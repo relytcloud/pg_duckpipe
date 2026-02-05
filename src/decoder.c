@@ -1,5 +1,8 @@
 #include "pg_ducklake_sync.h"
 
+#include "executor/spi.h"
+#include "utils/builtins.h"
+
 /*
  * Helper to convert LogicalRepTupleData to a List of string values.
  * We deep copy the strings because the buffer is transient.
@@ -165,7 +168,52 @@ decode_message(StringInfo buf, XLogRecPtr lsn, SyncGroup *group, HTAB *batches, 
 		break;
 	}
 	case LOGICAL_REP_MSG_TRUNCATE: {
-		/* Handle truncate if needed, or ignore for now */
+		/*
+		 * Handle TRUNCATE by truncating all target tables involved.
+		 * logicalrep_read_truncate returns a List of LogicalRepRelId values.
+		 */
+		bool cascade;
+		bool restart_seqs;
+		List *relid_list;
+		ListCell *lc;
+
+		relid_list = logicalrep_read_truncate(buf, &cascade, &restart_seqs);
+
+		/* Flush pending batches before TRUNCATE */
+		flush_all_batches(batches);
+
+		/* Connect to SPI for TRUNCATE execution */
+		if (SPI_connect() == SPI_OK_CONNECT) {
+			foreach (lc, relid_list) {
+				LogicalRepRelId relid = lfirst_oid(lc);
+				RelationCacheEntry *entry = (RelationCacheEntry *)hash_search(rel_cache, &relid, HASH_FIND, NULL);
+				if (entry) {
+					TableMapping *mapping = get_table_mapping(group, entry->rel->nspname, entry->rel->relname);
+					if (mapping && mapping->enabled) {
+						StringInfoData truncate_buf;
+						initStringInfo(&truncate_buf);
+						appendStringInfo(&truncate_buf, "TRUNCATE TABLE %s.%s",
+						                 quote_identifier(mapping->target_schema),
+						                 quote_identifier(mapping->target_table));
+						if (cascade)
+							appendStringInfoString(&truncate_buf, " CASCADE");
+						if (restart_seqs)
+							appendStringInfoString(&truncate_buf, " RESTART IDENTITY");
+
+						if (SPI_execute(truncate_buf.data, false, 0) != SPI_OK_UTILITY)
+							elog(WARNING, "Failed to truncate target table %s.%s", mapping->target_schema,
+							     mapping->target_table);
+						else
+							elog(LOG, "DuckLake Sync: Truncated %s.%s", mapping->target_schema, mapping->target_table);
+
+						pfree(truncate_buf.data);
+					}
+				}
+			}
+			SPI_finish();
+		}
+
+		list_free(relid_list);
 		break;
 	}
 	}

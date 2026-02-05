@@ -25,6 +25,13 @@ SELECT ducklake_sync.remove_table('public.t1', false);
 
 SELECT count(*) FROM ducklake_sync.table_mappings WHERE source_table = 't1';
 
+-- Test enable/disable group
+SELECT ducklake_sync.disable_group('analytics');
+SELECT enabled FROM ducklake_sync.sync_groups WHERE name = 'analytics';
+
+SELECT ducklake_sync.enable_group('analytics');
+SELECT enabled FROM ducklake_sync.sync_groups WHERE name = 'analytics';
+
 SELECT ducklake_sync.drop_group('analytics');
 SELECT count(*) FROM ducklake_sync.sync_groups WHERE name = 'analytics';
 

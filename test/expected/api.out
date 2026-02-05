@@ -54,6 +54,21 @@ SELECT count(*) FROM ducklake_sync.table_mappings WHERE source_table = 't1';
      0
 (1 row)
 
+-- Test enable/disable group
+SELECT ducklake_sync.disable_group('analytics');
+ERROR:  Sync group 'analytics' not found
+SELECT enabled FROM ducklake_sync.sync_groups WHERE name = 'analytics';
+ enabled 
+---------
+(0 rows)
+
+SELECT ducklake_sync.enable_group('analytics');
+ERROR:  Sync group 'analytics' not found
+SELECT enabled FROM ducklake_sync.sync_groups WHERE name = 'analytics';
+ enabled 
+---------
+(0 rows)
+
 SELECT ducklake_sync.drop_group('analytics');
 ERROR:  Sync group not found: analytics
 SELECT count(*) FROM ducklake_sync.sync_groups WHERE name = 'analytics';

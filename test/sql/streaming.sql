@@ -13,6 +13,13 @@ SELECT pg_sleep(2);
 
 SELECT * FROM ducklake.stream_test ORDER BY id;
 
+-- Test UPDATE (should be handled as DELETE + INSERT)
+UPDATE stream_test SET val = 'updated_two' WHERE id = 2;
+
+SELECT pg_sleep(2);
+
+SELECT * FROM ducklake.stream_test ORDER BY id;
+
 DELETE FROM stream_test WHERE id = 1;
 
 SELECT pg_sleep(2);

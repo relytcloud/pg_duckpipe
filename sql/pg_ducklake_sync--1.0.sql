@@ -127,8 +127,8 @@ CREATE FUNCTION ducklake_sync.status() RETURNS TABLE(
     sync_group TEXT,
     source_table TEXT,
     target_table TEXT,
+    state TEXT,
     enabled BOOLEAN,
-    lag_bytes BIGINT,
     rows_synced BIGINT,
     last_sync TIMESTAMPTZ
 )

@@ -204,14 +204,12 @@ process_snapshot(SyncGroup *group) {
 			SPI_start_transaction();
 			PushActiveSnapshot(GetTransactionSnapshot());
 
-			/* Postgres Write (Update state) */
+			/* Postgres Write (Update state) - use parameterized query */
 			{
-				char query[256];
-				snprintf(query, sizeof(query),
-				         "UPDATE ducklake_sync.table_mappings SET state = 'STREAMING' "
-				         "WHERE id = %d",
-				         task->id);
-				SPI_execute(query, false, 0);
+				Datum values[1] = {Int32GetDatum(task->id)};
+				Oid argtypes[1] = {INT4OID};
+				SPI_execute_with_args("UPDATE ducklake_sync.table_mappings SET state = 'STREAMING' WHERE id = $1", 1,
+				                      argtypes, values, NULL, false, 0);
 			}
 
 			/* Commit Postgres write */
@@ -253,12 +251,15 @@ process_sync_group(SyncGroup *group) {
 		}
 	}
 
-	/* Query the replication slot for binary changes */
+	/* Query the replication slot for binary changes
+	 * Use quote_literal_cstr to properly escape slot_name and publication
+	 */
 	initStringInfo(&query);
 	appendStringInfo(&query,
 	                 "SELECT lsn, data FROM pg_logical_slot_get_binary_changes("
-	                 "'%s', NULL, %d, 'proto_version', '1', 'publication_names', '%s')",
-	                 group->slot_name, ducklake_sync_batch_size_per_group, group->publication);
+	                 "%s, NULL, %d, 'proto_version', '1', 'publication_names', %s)",
+	                 quote_literal_cstr(group->slot_name), ducklake_sync_batch_size_per_group,
+	                 quote_literal_cstr(group->publication));
 
 	ret = SPI_execute(query.data, true, 0);
 	pfree(query.data);

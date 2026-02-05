@@ -119,12 +119,56 @@ ducklake_sync_drop_group(PG_FUNCTION_ARGS) {
 PG_FUNCTION_INFO_V1(ducklake_sync_enable_group);
 Datum
 ducklake_sync_enable_group(PG_FUNCTION_ARGS) {
+	char *name = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	int ret;
+
+	if (SPI_connect() != SPI_OK_CONNECT)
+		elog(ERROR, "SPI_connect failed");
+
+	{
+		Datum values[1] = {CStringGetTextDatum(name)};
+		Oid argtypes[1] = {TEXTOID};
+
+		ret = SPI_execute_with_args("UPDATE ducklake_sync.sync_groups SET enabled = true WHERE name = $1", 1, argtypes,
+		                            values, NULL, false, 0);
+
+		if (ret != SPI_OK_UPDATE)
+			elog(ERROR, "Failed to enable sync group '%s'", name);
+
+		if (SPI_processed == 0)
+			elog(ERROR, "Sync group '%s' not found", name);
+	}
+
+	SPI_finish();
+	elog(NOTICE, "Sync group '%s' enabled", name);
 	PG_RETURN_VOID();
 }
 
 PG_FUNCTION_INFO_V1(ducklake_sync_disable_group);
 Datum
 ducklake_sync_disable_group(PG_FUNCTION_ARGS) {
+	char *name = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	int ret;
+
+	if (SPI_connect() != SPI_OK_CONNECT)
+		elog(ERROR, "SPI_connect failed");
+
+	{
+		Datum values[1] = {CStringGetTextDatum(name)};
+		Oid argtypes[1] = {TEXTOID};
+
+		ret = SPI_execute_with_args("UPDATE ducklake_sync.sync_groups SET enabled = false WHERE name = $1", 1, argtypes,
+		                            values, NULL, false, 0);
+
+		if (ret != SPI_OK_UPDATE)
+			elog(ERROR, "Failed to disable sync group '%s'", name);
+
+		if (SPI_processed == 0)
+			elog(ERROR, "Sync group '%s' not found", name);
+	}
+
+	SPI_finish();
+	elog(NOTICE, "Sync group '%s' disabled", name);
 	PG_RETURN_VOID();
 }
 
@@ -404,6 +448,69 @@ ducklake_sync_move_table(PG_FUNCTION_ARGS) {
 PG_FUNCTION_INFO_V1(ducklake_sync_resync_table);
 Datum
 ducklake_sync_resync_table(PG_FUNCTION_ARGS) {
+	char *source_table_arg = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	char *source_copy = pstrdup(source_table_arg);
+	char *schema = "public";
+	char *table = source_copy;
+	char *dot = strchr(source_copy, '.');
+	char *t_schema = NULL;
+	char *t_table = NULL;
+	int ret;
+
+	if (dot) {
+		*dot = '\0';
+		schema = source_copy;
+		table = dot + 1;
+	}
+
+	if (SPI_connect() != SPI_OK_CONNECT)
+		elog(ERROR, "SPI_connect failed");
+
+	/* Get target table info */
+	{
+		Datum values[2] = {CStringGetTextDatum(schema), CStringGetTextDatum(table)};
+		Oid argtypes[2] = {TEXTOID, TEXTOID};
+		bool isnull;
+
+		ret = SPI_execute_with_args("SELECT target_schema, target_table FROM ducklake_sync.table_mappings "
+		                            "WHERE source_schema = $1 AND source_table = $2",
+		                            2, argtypes, values, NULL, true, 1);
+
+		if (ret != SPI_OK_SELECT || SPI_processed == 0)
+			elog(ERROR, "Table mapping for '%s.%s' not found", schema, table);
+
+		t_schema =
+		    pstrdup(TextDatumGetCString(SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1, &isnull)));
+		t_table = pstrdup(TextDatumGetCString(SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 2, &isnull)));
+	}
+
+	/* Truncate target table */
+	{
+		StringInfoData buf;
+		initStringInfo(&buf);
+		appendStringInfo(&buf, "TRUNCATE TABLE %s.%s", quote_identifier(t_schema), quote_identifier(t_table));
+		ret = SPI_execute(buf.data, false, 0);
+		if (ret != SPI_OK_UTILITY)
+			elog(WARNING, "Failed to truncate target table %s.%s", t_schema, t_table);
+		pfree(buf.data);
+	}
+
+	/* Reset state to SNAPSHOT to trigger re-copy */
+	{
+		Datum values[2] = {CStringGetTextDatum(schema), CStringGetTextDatum(table)};
+		Oid argtypes[2] = {TEXTOID, TEXTOID};
+
+		ret = SPI_execute_with_args("UPDATE ducklake_sync.table_mappings SET state = 'SNAPSHOT', "
+		                            "rows_synced = 0, last_sync_at = NULL "
+		                            "WHERE source_schema = $1 AND source_table = $2",
+		                            2, argtypes, values, NULL, false, 0);
+
+		if (ret != SPI_OK_UPDATE)
+			elog(ERROR, "Failed to reset table state");
+	}
+
+	SPI_finish();
+	elog(NOTICE, "Table '%s.%s' marked for resync", schema, table);
 	PG_RETURN_VOID();
 }
 

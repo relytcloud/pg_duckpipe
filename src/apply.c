@@ -4,27 +4,46 @@
 #include "utils/builtins.h"
 
 /*
- * Quote literal value for SQL.
- * Returns palloc'd string.
+ * Quote literal value for SQL using PostgreSQL's quote_literal_cstr.
+ * Returns palloc'd string. Handles NULL values properly.
  */
 static char *
 quote_val(char *val) {
+	if (val == NULL)
+		return pstrdup("NULL");
+	return quote_literal_cstr(val);
+}
+
+/*
+ * Build a properly quoted table reference (schema.table).
+ * Returns palloc'd string.
+ */
+static char *
+quote_qualified_table(const char *schema, const char *table) {
 	StringInfoData buf;
 	initStringInfo(&buf);
-
-	if (val == NULL)
-		appendStringInfoString(&buf, "NULL");
-	else {
-		appendStringInfoChar(&buf, '\'');
-		/* Escape quotes */
-		for (char *p = val; *p; p++) {
-			if (*p == '\'')
-				appendStringInfoChar(&buf, '\'');
-			appendStringInfoChar(&buf, *p);
-		}
-		appendStringInfoChar(&buf, '\'');
-	}
+	appendStringInfo(&buf, "%s.%s", quote_identifier(schema), quote_identifier(table));
 	return buf.data;
+}
+
+/*
+ * Parse schema.table from batch->target_table into separate parts.
+ * Returns palloc'd strings via out parameters.
+ */
+static void
+parse_target_table(const char *target_table, char **schema, char **table) {
+	char *copy = pstrdup(target_table);
+	char *dot = strchr(copy, '.');
+
+	if (dot) {
+		*dot = '\0';
+		*schema = pstrdup(copy);
+		*table = pstrdup(dot + 1);
+	} else {
+		*schema = pstrdup("public");
+		*table = pstrdup(copy);
+	}
+	pfree(copy);
 }
 
 void
@@ -33,12 +52,19 @@ apply_batch(SyncBatch *batch) {
 	bool insert_started = false;
 	ListCell *lc;
 	int ret;
+	char *target_schema;
+	char *target_table;
+	char *quoted_target;
 
 	if (!batch || batch->count == 0)
 		return;
 
 	if ((ret = SPI_connect()) != SPI_OK_CONNECT)
 		elog(ERROR, "SPI_connect failed: %d", ret);
+
+	/* Parse and quote the target table name once */
+	parse_target_table(batch->target_table, &target_schema, &target_table);
+	quoted_target = quote_qualified_table(target_schema, target_table);
 
 	initStringInfo(&insert_buf);
 
@@ -50,7 +76,7 @@ apply_batch(SyncBatch *batch) {
 			bool first_col = true;
 
 			if (!insert_started) {
-				appendStringInfo(&insert_buf, "INSERT INTO %s VALUES ", batch->target_table);
+				appendStringInfo(&insert_buf, "INSERT INTO %s VALUES ", quoted_target);
 				insert_started = true;
 			} else {
 				appendStringInfoString(&insert_buf, ", ");
@@ -66,15 +92,15 @@ apply_batch(SyncBatch *batch) {
 				appendStringInfoString(&insert_buf, quoted);
 				first_col = false;
 
-				if (val && quoted != val)
-					pfree(quoted);
+				pfree(quoted);
 			}
 			appendStringInfoChar(&insert_buf, ')');
 		} else if (change->type == SYNC_CHANGE_DELETE) {
 			/* Flush inserts first if any */
 			if (insert_started) {
-				if (SPI_execute(insert_buf.data, false, 0) < 0)
-					elog(ERROR, "Failed to execute INSERT batch for %s", batch->target_table);
+				ret = SPI_execute(insert_buf.data, false, 0);
+				if (ret != SPI_OK_INSERT)
+					elog(ERROR, "Failed to execute INSERT batch for %s (ret=%d)", batch->target_table, ret);
 				resetStringInfo(&insert_buf);
 				insert_started = false;
 			}
@@ -88,7 +114,7 @@ apply_batch(SyncBatch *batch) {
 			{
 				StringInfoData del_buf;
 				initStringInfo(&del_buf);
-				appendStringInfo(&del_buf, "DELETE FROM %s WHERE ", batch->target_table);
+				appendStringInfo(&del_buf, "DELETE FROM %s WHERE ", quoted_target);
 
 				/* Build WHERE clause using key columns if known, otherwise use all
 				 * columns */
@@ -107,14 +133,17 @@ apply_batch(SyncBatch *batch) {
 
 						char *colname = (char *)list_nth(batch->attnames, attidx);
 						char *val = (char *)list_nth(change->key_values, attidx);
-						char *quoted = quote_val(val);
 
 						if (i > 0)
 							appendStringInfoString(&del_buf, " AND ");
-						appendStringInfo(&del_buf, "%s = %s", colname, quoted);
 
-						if (quoted != val && val != NULL)
+						if (val == NULL) {
+							appendStringInfo(&del_buf, "%s IS NULL", quote_identifier(colname));
+						} else {
+							char *quoted = quote_val(val);
+							appendStringInfo(&del_buf, "%s = %s", quote_identifier(colname), quoted);
 							pfree(quoted);
+						}
 					}
 				} else {
 					/* No key info - use all columns from key_values */
@@ -125,16 +154,15 @@ apply_batch(SyncBatch *batch) {
 						char *val = (char *)lfirst(kc);
 						char *colname = (char *)lfirst(nc);
 
-						/* Skip NULL values in WHERE clause (use IS NULL) */
+						if (!first_key)
+							appendStringInfoString(&del_buf, " AND ");
+
+						/* Handle NULL values in WHERE clause with IS NULL */
 						if (val == NULL) {
-							if (!first_key)
-								appendStringInfoString(&del_buf, " AND ");
-							appendStringInfo(&del_buf, "%s IS NULL", colname);
+							appendStringInfo(&del_buf, "%s IS NULL", quote_identifier(colname));
 						} else {
 							char *quoted = quote_val(val);
-							if (!first_key)
-								appendStringInfoString(&del_buf, " AND ");
-							appendStringInfo(&del_buf, "%s = %s", colname, quoted);
+							appendStringInfo(&del_buf, "%s = %s", quote_identifier(colname), quoted);
 							pfree(quoted);
 						}
 						first_key = false;
@@ -142,8 +170,9 @@ apply_batch(SyncBatch *batch) {
 				}
 
 				/* Execute the DELETE */
-				if (SPI_execute(del_buf.data, false, 0) < 0)
-					elog(WARNING, "Failed to execute DELETE for %s", batch->target_table);
+				ret = SPI_execute(del_buf.data, false, 0);
+				if (ret != SPI_OK_DELETE)
+					elog(WARNING, "Failed to execute DELETE for %s (ret=%d)", batch->target_table, ret);
 
 				pfree(del_buf.data);
 			}
@@ -152,9 +181,15 @@ apply_batch(SyncBatch *batch) {
 
 	/* Flush remaining inserts */
 	if (insert_started) {
-		if (SPI_execute(insert_buf.data, false, 0) < 0)
-			elog(ERROR, "Failed to execute INSERT batch for %s", batch->target_table);
+		ret = SPI_execute(insert_buf.data, false, 0);
+		if (ret != SPI_OK_INSERT)
+			elog(ERROR, "Failed to execute INSERT batch for %s (ret=%d)", batch->target_table, ret);
 	}
+
+	pfree(insert_buf.data);
+	pfree(quoted_target);
+	pfree(target_schema);
+	pfree(target_table);
 
 	SPI_finish();
 }
