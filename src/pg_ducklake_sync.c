@@ -4,64 +4,23 @@ PG_MODULE_MAGIC;
 
 void _PG_init(void);
 
-/* GUC variables */
 int ducklake_sync_poll_interval = 1000;
 int ducklake_sync_batch_size_per_table = 1000;
 int ducklake_sync_batch_size_per_group = 10000;
 bool ducklake_sync_enabled = true;
 
-void _PG_init(void)
-{
-    BackgroundWorker worker;
+void
+_PG_init(void) {
+	DefineCustomIntVariable("ducklake_sync.poll_interval", "Interval in milliseconds between polls", NULL,
+	                        &ducklake_sync_poll_interval, 1000, 100, 3600000, PGC_SIGHUP, GUC_UNIT_MS, NULL, NULL,
+	                        NULL);
 
-    /* Define GUCs */
-    DefineCustomIntVariable("ducklake_sync.poll_interval",
-                            "Interval in milliseconds between polls",
-                            NULL,
-                            &ducklake_sync_poll_interval,
-                            1000, 100, 3600000,
-                            PGC_SIGHUP,
-                            GUC_UNIT_MS,
-                            NULL, NULL, NULL);
+	DefineCustomIntVariable("ducklake_sync.batch_size_per_table", "Maximum number of changes per table per batch", NULL,
+	                        &ducklake_sync_batch_size_per_table, 1000, 1, 1000000, PGC_SIGHUP, 0, NULL, NULL, NULL);
 
-    DefineCustomIntVariable("ducklake_sync.batch_size_per_table",
-                            "Maximum number of changes per table per batch",
-                            NULL,
-                            &ducklake_sync_batch_size_per_table,
-                            1000, 1, 1000000,
-                            PGC_SIGHUP,
-                            0,
-                            NULL, NULL, NULL);
+	DefineCustomIntVariable("ducklake_sync.batch_size_per_group", "Maximum number of changes per group per round", NULL,
+	                        &ducklake_sync_batch_size_per_group, 10000, 100, 10000000, PGC_SIGHUP, 0, NULL, NULL, NULL);
 
-    DefineCustomIntVariable("ducklake_sync.batch_size_per_group",
-                            "Maximum number of changes per group per round",
-                            NULL,
-                            &ducklake_sync_batch_size_per_group,
-                            10000, 100, 10000000,
-                            PGC_SIGHUP,
-                            0,
-                            NULL, NULL, NULL);
-
-    DefineCustomBoolVariable("ducklake_sync.enabled",
-                             "Enable pg_ducklake_sync background worker",
-                             NULL,
-                             &ducklake_sync_enabled,
-                             true,
-                             PGC_SIGHUP,
-                             0,
-                             NULL, NULL, NULL);
-
-    /* Register Background Worker */
-    memset(&worker, 0, sizeof(worker));
-    worker.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
-    worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
-    worker.bgw_restart_time = 10;
-    sprintf(worker.bgw_library_name, "pg_ducklake_sync");
-    sprintf(worker.bgw_function_name, "ducklake_sync_worker_main");
-    sprintf(worker.bgw_name, "pg_ducklake_sync worker");
-    sprintf(worker.bgw_type, "pg_ducklake_sync");
-    worker.bgw_main_arg = (Datum) 0;
-    worker.bgw_notify_pid = 0;
-
-    RegisterBackgroundWorker(&worker);
+	DefineCustomBoolVariable("ducklake_sync.enabled", "Enable pg_ducklake_sync background worker", NULL,
+	                         &ducklake_sync_enabled, true, PGC_SIGHUP, 0, NULL, NULL, NULL);
 }

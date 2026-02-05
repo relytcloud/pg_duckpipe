@@ -44,7 +44,9 @@ CREATE TABLE ducklake_sync.relation_cache (
 
 -- Default sync group
 INSERT INTO ducklake_sync.sync_groups (name, publication, slot_name)
-VALUES ('default', 'ducklake_sync_pub', 'ducklake_sync_slot');
+VALUES ('default', 
+        'ducklake_sync_pub_' || current_database(), 
+        'ducklake_sync_slot_' || current_database());
 
 -- API Functions
 CREATE FUNCTION ducklake_sync.create_group(
@@ -132,3 +134,11 @@ CREATE FUNCTION ducklake_sync.status() RETURNS TABLE(
 )
 AS 'MODULE_PATHNAME', 'ducklake_sync_status'
 LANGUAGE C STRICT;
+
+CREATE FUNCTION ducklake_sync.start_worker() RETURNS void
+AS 'MODULE_PATHNAME', 'ducklake_sync_start_worker'
+LANGUAGE C;
+
+CREATE FUNCTION ducklake_sync.stop_worker() RETURNS void
+AS 'MODULE_PATHNAME', 'ducklake_sync_stop_worker'
+LANGUAGE C;
