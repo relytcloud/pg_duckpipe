@@ -1,0 +1,66 @@
+-- Test API functions and metadata management
+CREATE EXTENSION pg_ducklake_sync CASCADE;
+NOTICE:  installing required extension "pg_duckdb"
+SELECT name, publication, slot_name FROM ducklake_sync.sync_groups;
+  name   |             publication              |               slot_name               
+---------+--------------------------------------+---------------------------------------
+ default | ducklake_sync_pub_contrib_regression | ducklake_sync_slot_contrib_regression
+(1 row)
+
+SELECT ducklake_sync.create_group('analytics');
+ create_group 
+--------------
+ 
+(1 row)
+
+SELECT name, publication, slot_name FROM ducklake_sync.sync_groups WHERE name = 'analytics';
+ name | publication | slot_name 
+------+-------------+-----------
+(0 rows)
+
+CREATE TABLE t1 (id int primary key, val text);
+SELECT ducklake_sync.add_table('public.t1', 'ducklake.t1', 'analytics', false);
+ERROR:  Sync group 'analytics' not found
+SELECT source_schema, source_table, group_id, state 
+FROM ducklake_sync.table_mappings 
+WHERE source_table = 't1';
+ source_schema | source_table | group_id | state 
+---------------+--------------+----------+-------
+(0 rows)
+
+SELECT ducklake_sync.move_table('public.t1', 'default');
+ move_table 
+------------
+ 
+(1 row)
+
+SELECT m.source_schema, m.source_table, g.name as group_name
+FROM ducklake_sync.table_mappings m
+JOIN ducklake_sync.sync_groups g ON m.group_id = g.id
+WHERE m.source_table = 't1';
+ source_schema | source_table | group_name 
+---------------+--------------+------------
+(0 rows)
+
+SELECT ducklake_sync.remove_table('public.t1', false);
+ remove_table 
+--------------
+ 
+(1 row)
+
+SELECT count(*) FROM ducklake_sync.table_mappings WHERE source_table = 't1';
+ count 
+-------
+     0
+(1 row)
+
+SELECT ducklake_sync.drop_group('analytics');
+ERROR:  Sync group not found: analytics
+SELECT count(*) FROM ducklake_sync.sync_groups WHERE name = 'analytics';
+ count 
+-------
+     0
+(1 row)
+
+DROP TABLE t1;
+DROP EXTENSION pg_ducklake_sync CASCADE;
