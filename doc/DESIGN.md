@@ -1,14 +1,14 @@
-# pg_ducklake_sync: PostgreSQL HTAP Sync Extension
+# pg_duckpipe: PostgreSQL HTAP Sync Extension
 
-## Technical Design Document v3.0
+## Technical Design Document v4.0
 
-### Date: 2026-02-04
+### Date: 2026-02-06
 
 ---
 
 ## 1. Executive Summary
 
-**pg_ducklake_sync** enables automatic synchronization from PostgreSQL heap tables (row store) to pg_ducklake DuckLake tables (column store), achieving HTAP within a single PostgreSQL instance.
+**pg_duckpipe** enables automatic CDC (Change Data Capture) synchronization from PostgreSQL heap tables (row store) to pg_ducklake DuckLake tables (column store), achieving HTAP within a single PostgreSQL instance.
 
 ### Design Philosophy: Simple AND Production-Ready
 
@@ -19,7 +19,7 @@ Key insight: PostgreSQL already provides **both** the production output plugin (
 | Output plugin | **pgoutput** (production, not test_decoding) |
 | Protocol parsing | Reuse PostgreSQL's `logicalrep_read_*` functions |
 | Data access | `pg_logical_slot_get_binary_changes()` via SPI |
-| Execution | Single background worker with polling |
+| Execution | On-demand background worker with polling |
 
 ---
 
@@ -40,7 +40,7 @@ It's not meant for production.
 | Format | Efficient binary | Human-readable text |
 | Parsing | Built-in `logicalrep_read_*` | Custom parser needed |
 | Schema info | Rich (RELATION messages) | Basic (inline types) |
-| Streaming | Full support | Limited |
+| TRUNCATE | Supported | Not supported |
 
 **Key realization**: We don't need to implement binary parsing ourselves. PostgreSQL's `logicalrep_read_*` functions (in `proto.c`) do all the work.
 
@@ -71,8 +71,9 @@ It's not meant for production.
 │  │                                                               ││
 │  │  1. SPI: pg_logical_slot_get_binary_changes()                ││
 │  │  2. Parse: logicalrep_read_insert/update/delete (built-in!)  ││
-│  │  3. Batch: Accumulate changes in memory                      ││
-│  │  4. Apply: INSERT/DELETE to DuckLake via SPI                 ││
+│  │  3. Batch: Accumulate changes per table in hash table        ││
+│  │  4. Apply: DELETE + INSERT to DuckLake via SPI               ││
+│  │  5. Checkpoint: Update confirmed_lsn and last_sync_at        ││
 │  │                                                               ││
 │  └───────────────────────────────────────────────────────────────┘│
 └──────────────────────────────────────────────────────────────────┘
@@ -82,49 +83,58 @@ It's not meant for production.
 
 ## 4. Protocol Message Flow
 
-pgoutput sends these message types (single-byte identifiers):
+pgoutput sends these message types (single-byte identifiers defined in `logicalproto.h`):
 
 ```
 'B' = BEGIN        - Transaction start
-'R' = RELATION     - Table schema definition (cached)
+'R' = RELATION     - Table schema definition (cached per poll round)
 'I' = INSERT       - Row insert
 'U' = UPDATE       - Row update (old key + new tuple)
 'D' = DELETE       - Row delete (old key)
 'T' = TRUNCATE     - Table truncate
-'C' = COMMIT       - Transaction commit with LSN
+'C' = COMMIT       - Transaction commit (triggers batch flush)
 ```
 
-Our worker processes them:
+Our `decode_message()` processes them:
 
 ```c
-while ((msg = get_next_message())) {
-    switch (msg->type) {
-        case 'B':
-            logicalrep_read_begin(&buf, &begin_data);
-            break;
-        case 'R':
-            rel = logicalrep_read_rel(&buf);  // Cache schema
-            cache_relation(rel);
-            break;
-        case 'I':
-            relid = logicalrep_read_insert(&buf, &newtup);
-            batch_insert(relid, &newtup);
-            break;
-        case 'U':
-            relid = logicalrep_read_update(&buf, &has_old, &oldtup, &newtup);
-            batch_delete(relid, &oldtup);  // Delete old
-            batch_insert(relid, &newtup);  // Insert new
-            break;
-        case 'D':
-            relid = logicalrep_read_delete(&buf, &oldtup);
-            batch_delete(relid, &oldtup);
-            break;
-        case 'C':
-            logicalrep_read_commit(&buf, &commit_data);
-            flush_batch();  // Apply all accumulated changes
-            update_checkpoint(commit_data.end_lsn);
-            break;
-    }
+switch (msgtype) {
+case LOGICAL_REP_MSG_RELATION:
+    rel = logicalrep_read_rel(buf);
+    entry = hash_search(rel_cache, &rel->remoteid, HASH_ENTER, &found);
+    entry->rel = rel;
+    entry->mapping = NULL;  // reset cached mapping
+    break;
+
+case LOGICAL_REP_MSG_INSERT:
+    relid = logicalrep_read_insert(buf, &newtup);
+    // lookup cached mapping, skip if CATCHUP and lsn <= snapshot_lsn
+    batch_add_change(batches, mapping, change, entry->rel);
+    break;
+
+case LOGICAL_REP_MSG_UPDATE:
+    relid = logicalrep_read_update(buf, &has_old, &oldtup, &newtup);
+    // decompose into DELETE(old key) + INSERT(new tuple)
+    batch_add_change(batches, mapping, del_change, entry->rel);
+    batch_add_change(batches, mapping, ins_change, entry->rel);
+    break;
+
+case LOGICAL_REP_MSG_DELETE:
+    relid = logicalrep_read_delete(buf, &oldtup);
+    batch_add_change(batches, mapping, change, entry->rel);
+    break;
+
+case LOGICAL_REP_MSG_COMMIT:
+    logicalrep_read_commit(buf, &commit_data);
+    group->pending_lsn = commit_data.end_lsn;
+    flush_all_batches(batches);  // apply on commit boundary
+    break;
+
+case LOGICAL_REP_MSG_TRUNCATE:
+    relid_list = logicalrep_read_truncate(buf, &cascade, &restart_seqs);
+    flush_all_batches(batches);  // flush pending before truncate
+    // TRUNCATE each mapped target table
+    break;
 }
 ```
 
@@ -134,322 +144,343 @@ while ((msg = get_next_message())) {
 
 ### 5.1 Metadata Schema
 
-**Key insight**: Separate "sync groups" (publication + slot) from "table mappings".
+Two tables in the `duckpipe` schema:
 
 ```sql
-CREATE SCHEMA ducklake_sync;
-
 -- Sync groups: each group = 1 publication + 1 replication slot
--- Multiple tables can share one group (resource efficient)
-CREATE TABLE ducklake_sync.sync_groups (
+-- Multiple tables share one group (resource efficient)
+CREATE TABLE duckpipe.sync_groups (
     id              SERIAL PRIMARY KEY,
     name            TEXT NOT NULL UNIQUE,
-    publication     TEXT NOT NULL UNIQUE,    -- PostgreSQL publication name
-    slot_name       TEXT NOT NULL UNIQUE,    -- Replication slot name
+    publication     TEXT NOT NULL UNIQUE,
+    slot_name       TEXT NOT NULL UNIQUE,
     enabled         BOOLEAN DEFAULT true,
-    confirmed_lsn   PG_LSN,                  -- Checkpoint for this group
+    confirmed_lsn   PG_LSN,
     last_sync_at    TIMESTAMPTZ,
     created_at      TIMESTAMPTZ DEFAULT NOW()
 );
 
 -- Table mappings: which source tables sync to which target tables
--- Many tables can belong to one sync group
-CREATE TABLE ducklake_sync.table_mappings (
+CREATE TABLE duckpipe.table_mappings (
     id              SERIAL PRIMARY KEY,
-    group_id        INTEGER NOT NULL REFERENCES ducklake_sync.sync_groups(id),
+    group_id        INTEGER NOT NULL REFERENCES duckpipe.sync_groups(id),
     source_schema   TEXT NOT NULL,
     source_table    TEXT NOT NULL,
     target_schema   TEXT NOT NULL,
     target_table    TEXT NOT NULL,
-
-    -- Sync state machine
     state           TEXT NOT NULL DEFAULT 'PENDING',
-                    -- PENDING: registered, not started
-                    -- SNAPSHOT: copying initial data
-                    -- CATCHUP: applying buffered + new changes
-                    -- STREAMING: normal operation
-    snapshot_lsn    PG_LSN,          -- LSN when snapshot started (for CATCHUP)
-
+    snapshot_lsn    PG_LSN,
     enabled         BOOLEAN DEFAULT true,
     rows_synced     BIGINT DEFAULT 0,
     last_sync_at    TIMESTAMPTZ,
     created_at      TIMESTAMPTZ DEFAULT NOW(),
-
-    UNIQUE(source_schema, source_table)      -- Each source table synced once
+    UNIQUE(source_schema, source_table)
 );
 
--- Cache relation schemas from RELATION messages (per group)
-CREATE TABLE ducklake_sync.relation_cache (
-    group_id        INTEGER REFERENCES ducklake_sync.sync_groups(id),
-    remote_relid    INTEGER,                 -- pgoutput relation ID
-    source_schema   TEXT,
-    source_table    TEXT,
-    columns         JSONB,                   -- [{name, type_oid, is_key}]
-    PRIMARY KEY (group_id, remote_relid)
-);
-
--- Default sync group (created on extension install)
-INSERT INTO ducklake_sync.sync_groups (name, publication, slot_name)
-VALUES ('default', 'ducklake_sync_pub', 'ducklake_sync_slot');
+-- Default sync group (created on extension install, name includes current database)
+INSERT INTO duckpipe.sync_groups (name, publication, slot_name)
+VALUES ('default',
+        'duckpipe_pub_' || current_database(),
+        'duckpipe_slot_' || current_database());
 ```
 
-**Resource usage comparison**:
+**Resource usage**:
 
-| Tables | Old Design | New Design |
-|--------|------------|------------|
-| 10 | 10 pubs, 10 slots | 1 pub, 1 slot |
-| 100 | 100 pubs, 100 slots | 1 pub, 1 slot |
-| 100 (grouped) | N/A | 5 pubs, 5 slots |
+| Tables | Groups | Publications | Slots |
+|--------|--------|--------------|-------|
+| 10 | 1 | 1 | 1 |
+| 50 | 1 | 1 | 1 |
+| 100 (grouped) | 5 | 5 | 5 |
 
-### 5.2 Background Worker
-
-**Multi-table aware**: One slot returns changes for multiple tables. Worker routes to correct targets.
+### 5.2 Data Structures (pg_duckpipe.h)
 
 ```c
-void ducklake_sync_worker_main(Datum arg) {
-    BackgroundWorkerInitializeConnection("postgres", NULL, 0);
+/* Sync state machine: PENDING → SNAPSHOT → CATCHUP → STREAMING */
+typedef enum SyncState {
+    SYNC_STATE_PENDING,
+    SYNC_STATE_SNAPSHOT,
+    SYNC_STATE_CATCHUP,
+    SYNC_STATE_STREAMING
+} SyncState;
 
-    while (!shutdown_requested) {
-        bool any_work_done = false;
+typedef struct SyncGroup {
+    int id;
+    char *name;
+    char *publication;
+    char *slot_name;
+    XLogRecPtr pending_lsn;
+} SyncGroup;
+
+typedef struct TableMapping {
+    int id;
+    int group_id;
+    char *source_schema;
+    char *source_table;
+    char *target_schema;
+    char *target_table;
+    SyncState state;
+    XLogRecPtr snapshot_lsn;
+    bool enabled;
+} TableMapping;
+
+typedef struct RelationCacheEntry {
+    LogicalRepRelId remote_relid;  /* Hash key */
+    LogicalRepRelation *rel;       /* Deep copied schema info */
+    TableMapping *mapping;         /* Cached mapping (avoids SPI per message) */
+} RelationCacheEntry;
+
+typedef struct SyncChange {
+    SyncChangeType type;           /* INSERT, UPDATE, DELETE */
+    XLogRecPtr lsn;
+    List *col_values;              /* List of char* (stringified column values) */
+    List *key_values;              /* List of char* (PK values for DELETE) */
+} SyncChange;
+
+typedef struct SyncBatch {
+    char target_table[NAMEDATALEN * 2 + 2];  /* Hash key: "schema.table\0" */
+    List *changes;                             /* List of SyncChange* */
+    int count;
+    XLogRecPtr last_lsn;
+    List *attnames;     /* Column names */
+    int nkeyattrs;      /* Number of key attributes */
+    int *keyattrs;      /* Key attribute indices (0-based) */
+} SyncBatch;
+```
+
+### 5.3 Background Worker
+
+The worker is started on-demand via `duckpipe.start_worker()` and registers as a dynamic background worker with `bgw_restart_time = 10` (auto-restart on crash).
+
+```c
+void duckpipe_worker_main(Datum main_arg) {
+    BackgroundWorkerInitializeConnectionByOid(dboid, InvalidOid, 0);
+
+    SyncMemoryContext = AllocSetContextCreate(TopMemoryContext, ...);
+
+    while (!got_sigterm) {
+        if (!duckpipe_enabled) { wait; continue; }
 
         StartTransactionCommand();
+        PushActiveSnapshot(GetTransactionSnapshot());
+        SPI_connect_ext(SPI_OPT_NONATOMIC);  /* allows mid-loop commits */
 
-        /* Process each enabled sync group */
-        foreach(group, get_enabled_sync_groups()) {
-            int processed = process_sync_group(group);
-            if (processed > 0)
-                any_work_done = true;
+        groups = get_enabled_sync_groups();  /* SPI query */
+        foreach(group, groups) {
+            processed = process_sync_group(group);
         }
 
+        SPI_finish();
+        PopActiveSnapshot();
         CommitTransactionCommand();
+        MemoryContextReset(SyncMemoryContext);
 
-        if (!any_work_done) {
-            WaitLatch(MyLatch, WL_LATCH_SET | WL_TIMEOUT,
-                      poll_interval_ms, WAIT_EVENT_EXTENSION);
-            ResetLatch(MyLatch);
-        }
+        WaitLatch(any_work ? 10ms : poll_interval);
     }
-}
-
-/*
- * Process one sync group (one publication, one slot, multiple tables)
- */
-int process_sync_group(SyncGroup *group) {
-    HTAB *batches;  /* Hash: source_relid -> SyncBatch */
-    int total_processed = 0;
-
-    /* Get changes from slot (may contain multiple tables) */
-    changes = pg_logical_slot_get_binary_changes(
-        group->slot_name, NULL, batch_size,
-        'publication_names', group->publication
-    );
-
-    /* Route each change to appropriate batch by table */
-    foreach(change, changes) {
-        char msgtype = get_message_type(change);
-
-        if (msgtype == 'R') {  /* RELATION message */
-            LogicalRepRelation *rel = logicalrep_read_rel(&buf);
-            cache_relation(group, rel);  /* Remember relid -> table mapping */
-        }
-        else if (msgtype == 'I' || msgtype == 'U' || msgtype == 'D') {
-            LogicalRepRelId relid = parse_change(&buf, &tuple_data);
-
-            /* Look up which target table this source maps to */
-            TableMapping *mapping = get_table_mapping(group, relid);
-            if (mapping == NULL || !mapping->enabled)
-                continue;  /* Table removed or disabled, skip */
-
-            /* Get or create batch for this table */
-            SyncBatch *batch = get_or_create_batch(batches, mapping);
-            add_to_batch(batch, msgtype, &tuple_data);
-            total_processed++;
-
-            /* Flush individual table if its batch is full */
-            if (batch->count >= batch_size_per_table) {
-                flush_batch(batch);
-                batch->count = 0;
-            }
-        }
-        else if (msgtype == 'C') {  /* COMMIT */
-            LogicalRepCommitData commit;
-            logicalrep_read_commit(&buf, &commit);
-            group->pending_lsn = commit.end_lsn;
-        }
-    }
-
-    /* Flush all remaining batches */
-    flush_all_batches(batches);
-    update_checkpoint(group, group->pending_lsn);
-
-    return total_processed;
 }
 ```
 
-void process_subscription(Subscription *sub) {
-    StringInfoData buf;
+Key design choices:
+- **SPI_OPT_NONATOMIC**: Allows `SPI_commit()`/`SPI_start_transaction()` within the loop for snapshot processing (DuckDB writes require separate transactions).
+- **SyncMemoryContext**: Dedicated memory context reset after each round to prevent leaks.
+- **Adaptive polling**: 10ms when work was found, `poll_interval` (default 1s) when idle.
 
-    /* Get binary changes via SPI */
-    SPI_connect();
+### 5.4 Processing Pipeline
 
-    int ret = SPI_execute_with_args(
-        "SELECT lsn, data FROM pg_logical_slot_get_binary_changes($1, NULL, $2, "
-        "'proto_version', '4', 'publication_names', $3)",
-        3, argtypes, values, nulls, true, 0);
+`process_sync_group()` handles one group per call:
 
-    /* Process each change */
-    for (int i = 0; i < SPI_processed; i++) {
-        bytea *data = DatumGetByteaP(SPI_getbinval(...));
-        initStringInfo(&buf);
-        appendBinaryStringInfo(&buf, VARDATA(data), VARSIZE(data) - VARHDRSZ);
+1. **Snapshot processing**: Find tables in `SNAPSHOT` state, copy data, transition to `CATCHUP`
+2. **Create hash tables**: `batches` (keyed by target table name) and `rel_cache` (keyed by pgoutput relation ID)
+3. **Fetch WAL changes**: `pg_logical_slot_get_binary_changes(slot, NULL, batch_size_per_group, 'publication_names', pub)`
+4. **Decode and batch**: Each message is parsed via `decode_message()`, changes accumulated in per-table `SyncBatch` entries
+5. **Flush batches**: `flush_all_batches()` applies all accumulated changes via `apply_batch()`
+6. **State transitions**: Move `CATCHUP` tables to `STREAMING`
+7. **Checkpoint**: Update `confirmed_lsn` and `last_sync_at` in `sync_groups`
 
-        char msgtype = pq_getmsgbyte(&buf);
-        process_message(sub, msgtype, &buf);
-    }
+### 5.5 Table Mapping Cache
 
-    /* Flush and checkpoint */
-    flush_batch(sub);
-
-    SPI_finish();
-}
-```
-
-### 5.3 Reusing PostgreSQL's Parsers
-
-The key insight: we directly call PostgreSQL's internal functions:
+To avoid an SPI query per WAL message, table mappings are cached in `RelationCacheEntry`:
 
 ```c
-#include "replication/logicalproto.h"
+// In decode_message(), for INSERT/UPDATE/DELETE:
+if (entry->mapping == NULL)
+    entry->mapping = get_table_mapping(group, entry->rel->nspname, entry->rel->relname);
+mapping = entry->mapping;
+```
 
-void process_message(Subscription *sub, char type, StringInfo buf) {
-    switch (type) {
-        case LOGICAL_REP_MSG_BEGIN:
-            {
-                LogicalRepBeginData begin_data;
-                logicalrep_read_begin(buf, &begin_data);  /* Built-in! */
-                sub->current_xid = begin_data.xid;
-            }
-            break;
+Cache lifetime is one poll round (destroyed with `rel_cache` hash table). Cache is invalidated when a new `RELATION` message arrives for the same table (`entry->mapping = NULL`).
 
-        case LOGICAL_REP_MSG_RELATION:
-            {
-                LogicalRepRelation *rel;
-                rel = logicalrep_read_rel(buf);           /* Built-in! */
-                cache_relation(sub, rel);
-            }
-            break;
+### 5.6 Change Application (apply.c)
 
-        case LOGICAL_REP_MSG_INSERT:
-            {
-                LogicalRepTupleData newtup;
-                LogicalRepRelId relid;
-                relid = logicalrep_read_insert(buf, &newtup);  /* Built-in! */
-                batch_add_insert(sub, relid, &newtup);
-            }
-            break;
+`apply_batch()` generates SQL for each batch:
 
-        case LOGICAL_REP_MSG_UPDATE:
-            {
-                LogicalRepTupleData oldtup, newtup;
-                bool has_oldtup;
-                LogicalRepRelId relid;
-                relid = logicalrep_read_update(buf, &has_oldtup,
-                                               &oldtup, &newtup);  /* Built-in! */
-                if (has_oldtup)
-                    batch_add_delete(sub, relid, &oldtup);
-                batch_add_insert(sub, relid, &newtup);
-            }
-            break;
+- **DELETEs**: `DELETE FROM target WHERE (pk1, pk2) IN (VALUES (v1, v2), ...)`
+- **INSERTs**: `INSERT INTO target (col1, col2, ...) VALUES (v1, v2, ...), ...`
 
-        case LOGICAL_REP_MSG_DELETE:
-            {
-                LogicalRepTupleData oldtup;
-                LogicalRepRelId relid;
-                relid = logicalrep_read_delete(buf, &oldtup);  /* Built-in! */
-                batch_add_delete(sub, relid, &oldtup);
-            }
-            break;
+UPDATEs are decomposed into DELETE + INSERT at decode time. This is efficient for column stores where in-place updates are expensive.
 
-        case LOGICAL_REP_MSG_COMMIT:
-            {
-                LogicalRepCommitData commit_data;
-                logicalrep_read_commit(buf, &commit_data);  /* Built-in! */
-                sub->pending_lsn = commit_data.end_lsn;
-            }
-            break;
+Changes are applied within the caller's SPI session (no nested `SPI_connect`).
+
+### 5.7 Batch Memory Management (batch.c)
+
+`SyncChange` structs contain nested Lists (`col_values`, `key_values`) that hold palloc'd strings. A custom `free_change_list()` properly frees the entire hierarchy:
+
+```c
+static void free_change_list(List *changes) {
+    foreach(lc, changes) {
+        SyncChange *change = lfirst(lc);
+        if (change->col_values != NIL) list_free_deep(change->col_values);
+        if (change->key_values != NIL) list_free_deep(change->key_values);
+        pfree(change);
     }
+    list_free(changes);
 }
 ```
 
 ---
 
-## 6. API
+## 6. Table Sync State Machine
 
-### 6.1 Sync Group Management
-
-```sql
--- Create a new sync group (publication + slot)
--- Use this to isolate tables or manage resources
-ducklake_sync.create_group(
-    name TEXT,                       -- group name
-    publication TEXT DEFAULT NULL,   -- defaults to 'ducklake_sync_pub_{name}'
-    slot_name TEXT DEFAULT NULL      -- defaults to 'ducklake_sync_slot_{name}'
-) RETURNS TEXT
-
--- Drop a sync group (must have no tables)
-ducklake_sync.drop_group(
-    name TEXT,
-    drop_slot BOOLEAN DEFAULT true
-) RETURNS void
-
--- Enable/disable a sync group
-ducklake_sync.enable_group(name TEXT) RETURNS void
-ducklake_sync.disable_group(name TEXT) RETURNS void
+```c
+typedef enum SyncState {
+    SYNC_STATE_PENDING,    // Registered, not yet processed
+    SYNC_STATE_SNAPSHOT,   // Copying existing data
+    SYNC_STATE_CATCHUP,    // Skipping WAL changes already in snapshot
+    SYNC_STATE_STREAMING   // Normal operation
+} SyncState;
 ```
 
-### 6.2 Table Sync Management
+```
+                add_table(copy_data=true)          add_table(copy_data=false)
+                       │                                    │
+                       ▼                                    │
+┌─────────────────────────────────────┐                     │
+│            SNAPSHOT                   │                     │
+│  1. Record pg_current_wal_lsn()     │                     │
+│  2. INSERT INTO target SELECT *     │                     │
+│     FROM source                      │                     │
+│  3. Commit DuckDB write             │                     │
+│  4. Store snapshot_lsn               │                     │
+└──────────────────┬──────────────────┘                     │
+                   │                                         │
+                   ▼                                         │
+┌─────────────────────────────────────┐                     │
+│            CATCHUP                    │                     │
+│  Consume WAL changes but skip any   │                     │
+│  with lsn <= snapshot_lsn (already  │                     │
+│  included in snapshot copy)          │                     │
+└──────────────────┬──────────────────┘                     │
+                   │ end of poll round                       │
+                   ▼                                         ▼
+┌─────────────────────────────────────────────────────────────┐
+│                      STREAMING                                │
+│  Normal operation: apply all changes as they arrive          │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### CATCHUP Logic
+
+The CATCHUP state prevents duplicate data when a table is added with `copy_data=true`. Between creating the replication slot and completing the snapshot copy, WAL changes may be generated that are already reflected in the copied data.
+
+In `decoder.c`, the skip logic:
+
+```c
+if (mapping->state == SYNC_STATE_CATCHUP &&
+    mapping->snapshot_lsn != InvalidXLogRecPtr &&
+    lsn <= mapping->snapshot_lsn)
+    return;  /* Already included in snapshot, skip */
+```
+
+After a poll round processes WAL, all `CATCHUP` tables transition to `STREAMING`:
 
 ```sql
--- Add a table to sync (uses 'default' group)
-ducklake_sync.add_table(
-    source_table TEXT,               -- 'schema.table'
-    target_table TEXT DEFAULT NULL,  -- defaults to 'ducklake.{table}'
+UPDATE duckpipe.table_mappings SET state = 'STREAMING'
+WHERE group_id = $1 AND state = 'CATCHUP';
+```
+
+### resync_table()
+
+Resyncing a table resets it to `SNAPSHOT` state:
+
+1. `TRUNCATE` the target DuckLake table
+2. `UPDATE state = 'SNAPSHOT', rows_synced = 0` in `table_mappings`
+3. Worker picks it up and re-copies data on next round
+
+---
+
+## 7. API
+
+All functions are in the `duckpipe` schema. Sensitive functions have `REVOKE ALL ... FROM PUBLIC` for security.
+
+### 7.1 Sync Group Management
+
+```sql
+-- Create a new sync group (creates publication + replication slot)
+duckpipe.create_group(
+    name TEXT,
+    publication TEXT DEFAULT NULL,   -- defaults to 'duckpipe_pub_{name}'
+    slot_name TEXT DEFAULT NULL      -- defaults to 'duckpipe_slot_{name}'
+) RETURNS TEXT
+
+-- Drop a sync group and optionally its replication slot
+duckpipe.drop_group(name TEXT, drop_slot BOOLEAN DEFAULT true) RETURNS void
+
+-- Enable/disable a sync group
+duckpipe.enable_group(name TEXT) RETURNS void
+duckpipe.disable_group(name TEXT) RETURNS void
+```
+
+### 7.2 Table Sync Management
+
+```sql
+-- Add a table to sync
+duckpipe.add_table(
+    source_table TEXT,               -- 'schema.table' (default schema: public)
+    target_table TEXT DEFAULT NULL,   -- defaults to 'ducklake.{table}', auto-created
     sync_group TEXT DEFAULT 'default',
-    copy_data BOOLEAN DEFAULT true   -- copy existing data
+    copy_data BOOLEAN DEFAULT true   -- SNAPSHOT initial data
 ) RETURNS void
 
 -- Remove a table from sync
-ducklake_sync.remove_table(
+duckpipe.remove_table(
     source_table TEXT,
     drop_target BOOLEAN DEFAULT false
 ) RETURNS void
 
--- Move a table to different sync group
-ducklake_sync.move_table(
-    source_table TEXT,
-    new_group TEXT
-) RETURNS void
+-- Move a table to a different sync group
+duckpipe.move_table(source_table TEXT, new_group TEXT) RETURNS void
 
--- Force full resync of a table
-ducklake_sync.resync_table(source_table TEXT) RETURNS void
+-- Force full resync (truncate target + re-snapshot)
+duckpipe.resync_table(source_table TEXT) RETURNS void
 ```
 
-### 6.3 Monitoring
+### 7.3 Worker Management
 
 ```sql
--- View all sync groups
-ducklake_sync.groups() RETURNS TABLE(
+-- Start the background worker for the current database
+duckpipe.start_worker() RETURNS void
+
+-- Stop all running workers
+duckpipe.stop_worker() RETURNS void
+```
+
+The worker auto-restarts after 10 seconds on crash (`bgw_restart_time = 10`).
+
+### 7.4 Monitoring (Set-Returning Functions)
+
+```sql
+-- Group-level overview
+duckpipe.groups() RETURNS TABLE(
     name TEXT,
     publication TEXT,
     slot_name TEXT,
     enabled BOOLEAN,
     table_count INTEGER,
-    lag_bytes BIGINT,
+    lag_bytes BIGINT,       -- bytes behind current WAL position
     last_sync TIMESTAMPTZ
 )
 
--- View all synced tables
-ducklake_sync.tables() RETURNS TABLE(
+-- Table-level overview
+duckpipe.tables() RETURNS TABLE(
     source_table TEXT,
     target_table TEXT,
     sync_group TEXT,
@@ -458,130 +489,79 @@ ducklake_sync.tables() RETURNS TABLE(
     last_sync TIMESTAMPTZ
 )
 
--- Detailed status
-ducklake_sync.status() RETURNS TABLE(
+-- Detailed per-table status with state
+duckpipe.status() RETURNS TABLE(
     sync_group TEXT,
     source_table TEXT,
     target_table TEXT,
+    state TEXT,             -- PENDING/SNAPSHOT/CATCHUP/STREAMING
     enabled BOOLEAN,
-    lag_bytes BIGINT,
     rows_synced BIGINT,
     last_sync TIMESTAMPTZ
 )
 ```
 
-### 6.4 Configuration (GUC)
+### 7.5 Configuration (GUC Parameters)
 
 ```sql
-ducklake_sync.poll_interval = 1000       -- ms between polls
-ducklake_sync.batch_size_per_table = 1000 -- changes per table per round
-ducklake_sync.enabled = on               -- enable/disable worker
+duckpipe.poll_interval = 1000          -- ms between polls (100-3600000)
+duckpipe.batch_size_per_table = 1000   -- changes per table before flush
+duckpipe.batch_size_per_group = 10000  -- total changes per group per round
+duckpipe.enabled = on                  -- enable/disable worker processing
 ```
+
+All GUC parameters are `PGC_SIGHUP` — changeable via `ALTER SYSTEM` or config reload without restart.
 
 ---
 
-## 7. Table Sync Flow
+## 8. Source File Structure
 
-### 7.1 Adding First Table (Default Group)
-
-```sql
-SELECT ducklake_sync.add_table('public.orders');
+```
+pg_duckpipe/
+├── pg_duckpipe.control          # Extension metadata (requires pg_duckdb)
+├── Makefile                     # PGXS build, delegates tests to test/regression/
+├── sql/
+│   └── pg_duckpipe--1.0.sql     # Schema, functions, REVOKE statements
+├── src/
+│   ├── pg_duckpipe.h            # Header: SyncState enum, structs, function decls
+│   ├── pg_duckpipe.c            # Entry point (_PG_init), GUC definitions
+│   ├── worker.c                 # Background worker loop, snapshot, WAL processing
+│   ├── decoder.c                # Message dispatch (logicalrep_read_*), CATCHUP skip
+│   ├── batch.c                  # Per-table batch accumulation, memory management
+│   ├── apply.c                  # SQL generation for DELETE/INSERT to DuckLake
+│   └── api.c                    # SQL function implementations, SRF monitoring views
+├── test/
+│   └── regression/
+│       ├── Makefile             # pg_regress_installcheck with --temp-instance
+│       ├── regression.conf      # wal_level=logical, shared_preload_libraries
+│       ├── schedule             # Test execution order
+│       ├── sql/                 # Test SQL files
+│       │   ├── api.sql          # Group/table management API tests
+│       │   ├── monitoring.sql   # groups()/tables()/status() SRF tests
+│       │   ├── streaming.sql    # INSERT/UPDATE/DELETE CDC tests
+│       │   ├── snapshot_updates.sql  # Initial copy + concurrent updates
+│       │   ├── multiple_tables.sql   # Multiple tables in same group
+│       │   ├── data_types.sql   # Various PostgreSQL data types
+│       │   ├── resync.sql       # resync_table() functionality
+│       │   └── truncate.sql     # TRUNCATE propagation
+│       └── expected/            # Expected outputs for pg_regress
+└── doc/
+    └── DESIGN.md                # This document
 ```
 
-Internally:
+### Build & Test
 
-```sql
--- 1. Create default publication if not exists
-CREATE PUBLICATION ducklake_sync_pub FOR TABLE public.orders;
-
--- 2. Create replication slot if not exists
-SELECT pg_create_logical_replication_slot('ducklake_sync_slot', 'pgoutput');
-
--- 3. Create target DuckLake table
-CREATE TABLE ducklake.orders (...) USING ducklake;
-
--- 4. Copy existing data
-INSERT INTO ducklake.orders SELECT * FROM public.orders;
-
--- 5. Record table mapping
-INSERT INTO ducklake_sync.table_mappings (...) VALUES (...);
+```bash
+make                        # Build the extension
+make install                # Install to PostgreSQL
+make installcheck           # Build + install + run all regression tests
+make check-regression       # Run regression tests only
+make check-regression TEST=api  # Run a single test
+make clean-regression       # Remove test artifacts
+make format                 # clang-format src/*.c src/*.h
 ```
 
-### 7.2 Adding More Tables to Same Group
-
-```sql
-SELECT ducklake_sync.add_table('public.customers');
-SELECT ducklake_sync.add_table('public.products');
-```
-
-Internally:
-
-```sql
--- Just add table to existing publication (no new slot!)
-ALTER PUBLICATION ducklake_sync_pub ADD TABLE public.customers;
-ALTER PUBLICATION ducklake_sync_pub ADD TABLE public.products;
-
--- Create target tables and copy data...
--- Record mappings...
-```
-
-### 7.3 Creating Separate Groups (Advanced)
-
-```sql
--- Create a separate group for high-volume tables
-SELECT ducklake_sync.create_group('high_volume');
-
--- Add tables to this group
-SELECT ducklake_sync.add_table('public.events', sync_group := 'high_volume');
-SELECT ducklake_sync.add_table('public.logs', sync_group := 'high_volume');
-```
-
-This creates a separate publication and slot for isolation.
-
-### 7.4 Resource Usage Examples
-
-| Scenario | Groups | Publications | Slots |
-|----------|--------|--------------|-------|
-| 50 tables, all default | 1 | 1 | 1 |
-| 50 tables, 2 groups | 2 | 2 | 2 |
-| 100 tables, by schema | 5 | 5 | 5 |
-
----
-
-## 8. Change Application
-
-### 8.1 Batch Accumulator
-
-```c
-typedef struct {
-    Oid         target_relid;       /* DuckLake table OID */
-    List       *inserts;            /* List of tuples to insert */
-    List       *delete_keys;        /* List of PK values to delete */
-    XLogRecPtr  last_lsn;           /* LSN of last change in batch */
-} SyncBatch;
-```
-
-### 8.2 Flush to DuckLake
-
-```sql
--- Within transaction:
-BEGIN;
-
--- Delete first (handles UPDATE = DELETE + INSERT)
-DELETE FROM ducklake.orders
-WHERE id IN (SELECT unnest($1::int[]));
-
--- Then insert
-INSERT INTO ducklake.orders (id, customer_id, amount, created_at)
-SELECT * FROM unnest($2::int[], $3::int[], $4::numeric[], $5::timestamptz[]);
-
--- Update checkpoint
-UPDATE ducklake_sync.subscriptions
-SET confirmed_lsn = $6, last_sync_at = now(), rows_synced = rows_synced + $7
-WHERE id = $8;
-
-COMMIT;
-```
+Tests run on a temporary PostgreSQL instance (port 5555) with `wal_level=logical` and `shared_preload_libraries = 'pg_duckdb,pg_duckpipe'`.
 
 ---
 
@@ -591,564 +571,155 @@ COMMIT;
 
 | Aspect | Impact |
 |--------|--------|
-| Source table | Zero (no triggers, WAL already written) |
-| WAL retention | Grows until consumed |
-| CPU (parsing) | Low (efficient binary format) |
-| Memory | batch_size * avg_row_size |
+| Source table writes | Zero (no triggers, WAL already written) |
+| WAL retention | Grows until consumed by slot |
+| CPU (parsing) | Low (efficient binary format, built-in parsers) |
+| Memory | batch_size * avg_row_size per poll round |
 
-### 9.2 Throughput
-
-Expected with pgoutput + built-in parsers:
-- Simple rows: **50,000-100,000 changes/second**
-- Complex rows: **10,000-30,000 changes/second**
-
-This is significantly better than test_decoding text parsing.
-
-### 9.3 Latency
+### 9.2 Latency
 
 | Setting | Typical Latency |
 |---------|-----------------|
 | poll_interval=1000ms | 1-3 seconds |
 | poll_interval=100ms | 100-500ms |
 
----
-
-## 10. Multi-Table Sync & Fairness
-
-### 10.1 Two Levels of Grouping
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  Sync Group: "default"                                          │
-│  (1 publication, 1 slot)                                        │
-│                                                                  │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐        │
-│  │ orders   │  │ customers│  │ products │  │ payments │        │
-│  │ 1M chg   │  │ 100 chg  │  │ 500 chg  │  │ 10K chg  │        │
-│  └──────────┘  └──────────┘  └──────────┘  └──────────┘        │
-└─────────────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────────────┐
-│  Sync Group: "high_volume"                                      │
-│  (1 publication, 1 slot)                                        │
-│                                                                  │
-│  ┌──────────┐  ┌──────────┐                                     │
-│  │ events   │  │ logs     │                                     │
-│  │ 10M chg  │  │ 5M chg   │                                     │
-│  └──────────┘  └──────────┘                                     │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-### 10.2 Fairness Within a Sync Group
-
-Changes from one slot are interleaved (WAL order). We batch by table and flush when:
-1. Table batch reaches `batch_size_per_table` (default 1000)
-2. Transaction commits
-3. End of poll batch
-
-```
-WAL order: [orders INSERT] [customers INSERT] [orders INSERT] [orders UPDATE]...
-
-Processing:
-  orders batch:    [INSERT, INSERT, UPDATE, ...]  → flush when full
-  customers batch: [INSERT, ...]                   → flush at commit
-```
-
-**Result**: All tables in a group make progress together (WAL-order fairness).
-
-### 10.3 Fairness Across Sync Groups
-
-Round-robin between groups:
-
-```
-Round 1:
-  Group "default":     process up to batch_size changes
-  Group "high_volume": process up to batch_size changes
-
-Round 2:
-  Group "default":     process up to batch_size changes
-  Group "high_volume": process up to batch_size changes
-```
-
-### 10.4 Configuration
-
-```sql
--- Changes per table before flush (intra-group fairness)
-ducklake_sync.batch_size_per_table = 1000
-
--- Total changes per group per round (inter-group fairness)
-ducklake_sync.batch_size_per_group = 10000
-
--- Poll interval when all caught up
-ducklake_sync.poll_interval = 1000  -- ms
-```
-
-### 10.5 When to Use Multiple Groups
-
-| Scenario | Recommendation |
-|----------|----------------|
-| < 50 tables, similar volume | Single "default" group |
-| High-volume tables | Separate group for isolation |
-| Different latency requirements | Separate groups |
-| Resource limits (slots) | Minimize groups |
-
-### 10.6 Adding New Table to Existing Group (Initial Sync)
-
-This is the most complex workflow. We must handle:
-- Existing tables continue streaming (no pause)
-- New table needs full data copy
-- Changes to new table during copy must not be lost
-
-#### Per-Table State Machine
-
-```
-                   add_table()
-                       │
-                       ▼
-┌─────────────────────────────────────────────────────────────┐
-│                      PENDING                                 │
-│  Table registered, not yet added to publication             │
-└──────────────────────────┬──────────────────────────────────┘
-                           │ start snapshot
-                           ▼
-┌─────────────────────────────────────────────────────────────┐
-│                      SNAPSHOT                                │
-│  Copying existing data with consistent snapshot             │
-│  Changes buffered to staging table                          │
-│  snapshot_lsn recorded                                       │
-└──────────────────────────┬──────────────────────────────────┘
-                           │ copy complete
-                           ▼
-┌─────────────────────────────────────────────────────────────┐
-│                      CATCHUP                                 │
-│  Applying buffered changes from staging table               │
-│  + applying new changes where lsn > snapshot_lsn            │
-└──────────────────────────┬──────────────────────────────────┘
-                           │ caught up to current
-                           ▼
-┌─────────────────────────────────────────────────────────────┐
-│                      STREAMING                               │
-│  Normal operation - apply changes as they arrive            │
-└─────────────────────────────────────────────────────────────┘
-```
-
-#### Detailed Workflow
-
-**Step 1: Register table and record snapshot LSN**
-
-```sql
-SELECT ducklake_sync.add_table('public.products');
-```
-
-```c
-void add_table(const char *source_table, const char *group_name) {
-    /* Start REPEATABLE READ transaction for consistent snapshot */
-    StartTransactionCommand();
-    SetTransactionSnapshot(SNAPSHOT_REPEATABLE_READ);
-
-    /* Record current slot LSN - this is our snapshot point */
-    XLogRecPtr snapshot_lsn = get_current_slot_lsn(group->slot_name);
-
-    /* Add table to publication */
-    exec_sql("ALTER PUBLICATION %s ADD TABLE %s",
-             group->publication, source_table);
-
-    /* Create target DuckLake table */
-    create_ducklake_table(target_table, source_table);
-
-    /* Create staging table for buffering changes during snapshot */
-    exec_sql("CREATE TABLE ducklake_sync.staging_%s ("
-             "  lsn pg_lsn, op char, data jsonb"
-             ")", table_id);
-
-    /* Record table mapping with state */
-    exec_sql("INSERT INTO ducklake_sync.table_mappings "
-             "(group_id, source_table, target_table, state, snapshot_lsn) "
-             "VALUES ($1, $2, $3, 'SNAPSHOT', $4)",
-             group_id, source_table, target_table, snapshot_lsn);
-
-    /* Copy existing data using our snapshot */
-    copy_table_data(source_table, target_table);  /* chunked */
-
-    CommitTransactionCommand();
-
-    /* Mark ready for catchup */
-    exec_sql("UPDATE ducklake_sync.table_mappings "
-             "SET state = 'CATCHUP' WHERE source_table = $1", source_table);
-}
-```
-
-**Step 2: Worker handles mixed states**
-
-```c
-void process_sync_group(SyncGroup *group) {
-    /* Get changes from slot */
-    changes = pg_logical_slot_get_binary_changes(...);
-
-    foreach(change, changes) {
-        char msgtype = get_message_type(change);
-        LogicalRepRelId relid = get_relid(change);
-
-        /* Look up table mapping and state */
-        TableMapping *mapping = get_table_mapping(group, relid);
-        if (!mapping) continue;
-
-        switch (mapping->state) {
-            case STATE_STREAMING:
-                /* Normal: apply change directly */
-                apply_change(mapping, change);
-                break;
-
-            case STATE_SNAPSHOT:
-                /* Buffer change to staging table - don't apply yet */
-                buffer_to_staging(mapping, change);
-                break;
-
-            case STATE_CATCHUP:
-                /* Apply if lsn > snapshot_lsn (change after snapshot) */
-                if (change->lsn > mapping->snapshot_lsn)
-                    apply_change(mapping, change);
-                /* else: already included in snapshot copy, skip */
-                break;
-
-            case STATE_PENDING:
-                /* Not in publication yet, shouldn't receive changes */
-                break;
-        }
-    }
-}
-```
-
-**Step 3: Complete catchup and transition to streaming**
-
-```c
-void check_catchup_complete(TableMapping *mapping) {
-    if (mapping->state != STATE_CATCHUP)
-        return;
-
-    /* Apply any remaining buffered changes */
-    apply_staging_table(mapping);
-
-    /* Drop staging table */
-    exec_sql("DROP TABLE ducklake_sync.staging_%s", mapping->id);
-
-    /* Transition to streaming */
-    exec_sql("UPDATE ducklake_sync.table_mappings "
-             "SET state = 'STREAMING' WHERE id = $1", mapping->id);
-}
-```
-
-#### Timeline Visualization
-
-```
-Time ──────────────────────────────────────────────────────────────►
-
-Slot LSN:     1000      1050      1100      1150      1200
-
-              │         │         │         │         │
-orders:       │ ●─────────●─────────●─────────●─────────●  (STREAMING)
-              │ apply   apply     apply     apply     apply
-              │
-customers:    │ ●─────────●─────────●─────────●─────────●  (STREAMING)
-              │ apply   apply     apply     apply     apply
-              │
-products:     │         │         │         │         │
-              │ add_table()       │         │         │
-              │ snapshot_lsn=1000 │         │         │
-              │         │         │         │         │
-              │ ┌───────┴─────────┴───┐     │         │
-              │ │    SNAPSHOT         │     │         │
-              │ │ copy 1M rows        │     │         │
-              │ │ buffer changes      │     │         │
-              │ └─────────────────────┘     │         │
-              │                       │     │         │
-              │                  CATCHUP    │         │
-              │                  apply staged         │
-              │                  skip lsn<=1000       │
-              │                  apply lsn>1000       │
-              │                             │         │
-              │                        STREAMING ─────●
-              │                             apply     apply
-```
-
-#### Key Invariants
-
-| Invariant | How Maintained |
-|-----------|----------------|
-| No data loss | Buffer changes during SNAPSHOT, apply in CATCHUP |
-| No duplicates | Skip changes where lsn <= snapshot_lsn |
-| Other tables not blocked | Process all changes, route by table state |
-| Consistent snapshot | REPEATABLE READ transaction for copy |
-
-#### Staging Table Schema
-
-```sql
-CREATE TABLE ducklake_sync.staging_{table_id} (
-    seq         SERIAL,           -- ordering
-    lsn         PG_LSN NOT NULL,  -- for debugging
-    op          CHAR(1),          -- 'I', 'U', 'D'
-    old_data    JSONB,            -- for UPDATE/DELETE (key columns)
-    new_data    JSONB             -- for INSERT/UPDATE (all columns)
-);
-```
-
-#### Resource Considerations
-
-| Resource | During SNAPSHOT | After STREAMING |
-|----------|-----------------|-----------------|
-| Staging table | Created, receives changes | Dropped |
-| Memory | Normal batching | Normal batching |
-| Disk | Staging table size | None |
-| WAL | No extra retention | Normal |
-
-Staging table size estimate: `changes_per_second × snapshot_duration × avg_row_size`
-
-Example: 1000 changes/sec × 60 sec × 500 bytes = 30 MB (acceptable)
-
-### 10.7 Monitoring
-
-```sql
--- Group-level status
-SELECT * FROM ducklake_sync.groups();
-  name        | table_count | lag_bytes | last_sync
---------------+-------------+-----------+------------
- default      | 25          | 50KB      | 1s ago
- high_volume  | 2           | 5MB       | 3s ago
-
--- Table-level status
-SELECT * FROM ducklake_sync.tables();
-  source_table    | sync_group   | rows_synced | last_sync
-------------------+--------------+-------------+-----------
- public.orders    | default      | 1000000     | 1s ago
- public.customers | default      | 50000       | 1s ago
- public.events    | high_volume  | 10000000    | 3s ago
-```
+When work is found, the next poll happens after 10ms (adaptive).
 
 ---
 
-## 11. Limitations (V1)
+## 10. Multi-Table Fairness
 
-1. **Primary key required** on source tables
-2. **No DDL sync** - schema changes need manual intervention
-3. **No row filtering** - all rows synced
-4. **No transformation** - columns copied as-is
-5. **Single worker** - one background worker handles all subscriptions
-6. **Eventual consistency** - configurable latency (1-5 seconds typical)
+### Within a Sync Group
+
+Changes from one slot are interleaved in WAL order. The worker batches by table and flushes when:
+1. A COMMIT message arrives (primary flush trigger)
+2. End of poll round (flush remaining)
+
+All tables in a group make progress together.
+
+### Across Sync Groups
+
+Groups are processed sequentially (round-robin) within each poll round. Each group processes up to `batch_size_per_group` changes per round.
 
 ---
 
-## 12. Comparison
+## 11. Security
+
+All mutating API functions (`create_group`, `drop_group`, `enable_group`, `disable_group`, `add_table`, `remove_table`, `move_table`, `resync_table`, `start_worker`, `stop_worker`) have:
+
+```sql
+REVOKE ALL ON FUNCTION duckpipe.<func>(...) FROM PUBLIC;
+```
+
+Only the extension owner (typically superuser) can call them.
+
+---
+
+## 12. Limitations (V1)
+
+1. **Primary key required** on source tables (needed for UPDATE/DELETE key identification)
+2. **No DDL sync** — schema changes need manual intervention
+3. **No row filtering** — all rows synced
+4. **No transformation** — columns copied as-is
+5. **Single worker per database** — one background worker handles all sync groups
+6. **Eventual consistency** — configurable latency (1-5 seconds typical)
+7. **No streaming replication protocol** — uses polling via `pg_logical_slot_get_binary_changes()` (not walsender)
+
+---
+
+## 13. PostgreSQL Internals Used
+
+Functions reused from `src/backend/replication/logical/proto.c`:
+
+| Function | Purpose |
+|----------|---------|
+| `logicalrep_read_begin()` | Parse BEGIN message |
+| `logicalrep_read_commit()` | Parse COMMIT message (provides end_lsn) |
+| `logicalrep_read_rel()` | Parse RELATION message (table schema) |
+| `logicalrep_read_insert()` | Parse INSERT message |
+| `logicalrep_read_update()` | Parse UPDATE message (old key + new tuple) |
+| `logicalrep_read_delete()` | Parse DELETE message (old key) |
+| `logicalrep_read_truncate()` | Parse TRUNCATE message (list of relation IDs) |
+
+Data structures from `src/include/replication/logicalproto.h`:
+
+| Structure | Purpose |
+|-----------|---------|
+| `LogicalRepRelation` | Table schema from RELATION message |
+| `LogicalRepTupleData` | Row data (colvalues array + colstatus) |
+| `LogicalRepBeginData` | Transaction info from BEGIN |
+| `LogicalRepCommitData` | Commit info including end_lsn |
+
+---
+
+## 14. Comparison
 
 ### vs. External ETL
 
-| Aspect | pg_ducklake_sync | External ETL |
-|--------|------------------|--------------|
+| Aspect | pg_duckpipe | External ETL |
+|--------|-------------|--------------|
 | Deployment | Extension only | Separate service |
 | Protocol | Reuses PG internals | Implements from scratch |
 | Latency | Lower (in-process) | Higher (network) |
 | Scalability | Single node | Distributed |
 
-### vs. test_decoding approach (v2 design)
+### vs. Custom Output Plugin
 
-| Aspect | pgoutput (v3) | test_decoding (v2) |
-|--------|---------------|-------------------|
-| Production ready | Yes | No (example only) |
-| Parsing | Built-in functions | Custom parser |
-| Efficiency | Binary format | Text format |
-| Throughput | 50-100K/s | 10-50K/s |
-| Code to write | ~600 lines | ~800 lines |
-
----
-
-## 13. Implementation Plan
-
-### Phase 1: Foundation (3 days)
-- Extension skeleton
-- Metadata schema
-- Background worker registration
-- GUC parameters
-
-### Phase 2: Core Logic (4 days)
-- SPI calls to pg_logical_slot_get_binary_changes
-- Message dispatch using logicalrep_read_* functions
-- Relation cache management
-- Batch accumulator
-
-### Phase 3: Change Application (3 days)
-- SQL generation for DuckLake operations
-- Bulk INSERT/DELETE
-- LSN checkpoint
-
-### Phase 4: API & Polish (3 days)
-- SQL function API
-- Initial copy logic
-- Status views
-- Error handling
-- Tests
-
-**Total: ~2 weeks**
-
----
-
-## 14. File Structure
-
-```
-pg_ducklake_sync/
-├── DESIGN.md
-├── README.md
-├── Makefile
-├── pg_ducklake_sync.control
-├── sql/
-│   └── pg_ducklake_sync--1.0.sql
-├── src/
-│   ├── pg_ducklake_sync.c      # Entry point, GUCs
-│   ├── worker.c                # Background worker main loop
-│   ├── decoder.c               # Message dispatch (calls logicalrep_read_*)
-│   ├── batch.c                 # Batch accumulator
-│   ├── apply.c                 # Apply changes to DuckLake
-│   └── api.c                   # SQL function implementations
-└── test/
-    └── sql/
-```
+| Aspect | pg_duckpipe (pgoutput) | Custom plugin |
+|--------|------------------------|---------------|
+| Maintenance | None (PG maintains pgoutput) | Must maintain |
+| Parsing | Built-in `logicalrep_read_*` | Write from scratch |
+| Protocol changes | Handled by PG | Must track manually |
 
 ---
 
 ## 15. Example Usage
 
-### 15.1 Basic Usage (Single Default Group)
+### Basic (Single Default Group)
 
 ```sql
--- Setup
-CREATE EXTENSION pg_ducklake;
-CREATE EXTENSION pg_ducklake_sync;
+CREATE EXTENSION pg_duckpipe CASCADE;  -- installs pg_duckdb dependency
 
--- Create OLTP tables
+-- Start the CDC worker
+SELECT duckpipe.start_worker();
+
+-- Create source table
 CREATE TABLE orders (id SERIAL PRIMARY KEY, customer_id INT, amount NUMERIC);
-CREATE TABLE customers (id SERIAL PRIMARY KEY, name TEXT, email TEXT);
-CREATE TABLE products (id SERIAL PRIMARY KEY, name TEXT, price NUMERIC);
 
--- Add all tables to sync (uses default group - 1 publication, 1 slot)
-SELECT ducklake_sync.add_table('public.orders');
-SELECT ducklake_sync.add_table('public.customers');
-SELECT ducklake_sync.add_table('public.products');
+-- Create target DuckLake table
+CREATE TABLE ducklake.orders (id INT, customer_id INT, amount NUMERIC) USING ducklake;
+
+-- Add to sync (initial snapshot + streaming)
+SELECT duckpipe.add_table('public.orders', 'ducklake.orders', 'default', true);
 
 -- OLTP writes
 INSERT INTO orders (customer_id, amount) VALUES (1, 99.99);
-INSERT INTO customers (name, email) VALUES ('Alice', 'alice@example.com');
 
--- OLAP reads (after sync)
-SELECT c.name, SUM(o.amount)
-FROM ducklake.orders o
-JOIN ducklake.customers c ON o.customer_id = c.id
-GROUP BY c.name;
+-- OLAP reads (after ~1s sync delay)
+SELECT customer_id, SUM(amount) FROM ducklake.orders GROUP BY customer_id;
 
 -- Monitor
-SELECT * FROM ducklake_sync.groups();   -- 1 group
-SELECT * FROM ducklake_sync.tables();   -- 3 tables
+SELECT * FROM duckpipe.groups();
+SELECT * FROM duckpipe.status();
 ```
 
-### 15.2 Advanced Usage (Multiple Groups)
+### Advanced (Multiple Groups)
 
 ```sql
 -- Create separate group for high-volume tables
-SELECT ducklake_sync.create_group('analytics');
+SELECT duckpipe.create_group('analytics');
 
--- Add high-volume tables to separate group
-SELECT ducklake_sync.add_table('public.events', sync_group := 'analytics');
-SELECT ducklake_sync.add_table('public.page_views', sync_group := 'analytics');
+-- Add tables to separate groups
+SELECT duckpipe.add_table('public.events', sync_group := 'analytics');
+SELECT duckpipe.add_table('public.users');  -- uses 'default' group
 
--- Regular tables use default group
-SELECT ducklake_sync.add_table('public.users');
-SELECT ducklake_sync.add_table('public.settings');
-
--- Check resource usage
-SELECT * FROM ducklake_sync.groups();
-  name      | publication              | slot_name              | table_count
-------------+--------------------------+------------------------+------------
- default    | ducklake_sync_pub        | ducklake_sync_slot     | 2
- analytics  | ducklake_sync_pub_analytics | ducklake_sync_slot_analytics | 2
-
--- Total: 2 publications, 2 slots (not 4!)
+-- Check resource usage: 2 groups = 2 publications + 2 slots
+SELECT * FROM duckpipe.groups();
 ```
 
-### 15.3 Moving Tables Between Groups
+### Resync
 
 ```sql
--- events table is too noisy, move to separate group
-SELECT ducklake_sync.create_group('noisy');
-SELECT ducklake_sync.move_table('public.events', 'noisy');
+-- Force re-snapshot of a table (truncates target, re-copies)
+SELECT duckpipe.resync_table('public.orders');
 ```
-
----
-
-## 16. Key Code References
-
-PostgreSQL functions we reuse (from `src/backend/replication/logical/proto.c`):
-
-| Function | Purpose |
-|----------|---------|
-| `logicalrep_read_begin()` | Parse BEGIN message |
-| `logicalrep_read_commit()` | Parse COMMIT message |
-| `logicalrep_read_rel()` | Parse RELATION message (schema) |
-| `logicalrep_read_insert()` | Parse INSERT message |
-| `logicalrep_read_update()` | Parse UPDATE message |
-| `logicalrep_read_delete()` | Parse DELETE message |
-| `logicalrep_read_truncate()` | Parse TRUNCATE message |
-
-Data structures (from `src/include/replication/logicalproto.h`):
-
-| Structure | Purpose |
-|-----------|---------|
-| `LogicalRepRelation` | Table schema from RELATION message |
-| `LogicalRepTupleData` | Row data from INSERT/UPDATE/DELETE |
-| `LogicalRepBeginData` | Transaction info from BEGIN |
-| `LogicalRepCommitData` | Commit info including LSN |
-
----
-
-## Appendix A: Design Review
-
-### Complexity Assessment
-
-| Component | Lines | Complexity |
-|-----------|-------|------------|
-| Worker loop | ~150 | Low |
-| Message dispatch | ~100 | Low (switch + function calls) |
-| Batch accumulator | ~100 | Low |
-| Apply logic | ~150 | Low |
-| API functions | ~100 | Low |
-| **Total** | **~600** | **Low** |
-
-**Simpler than v2** because we reuse PostgreSQL's parsing code instead of writing our own.
-
-### Production Readiness
-
-| Criterion | Status |
-|-----------|--------|
-| Output plugin | pgoutput (production) |
-| Protocol parsing | PostgreSQL built-in |
-| Error handling | Robust (retry + checkpoint) |
-| Monitoring | Status function + logs |
-
-### Risk Analysis
-
-| Risk | Mitigation |
-|------|------------|
-| Binary format changes | Protocol is versioned, request specific version |
-| logicalrep_read_* API changes | Internal API but stable, test on upgrade |
-| WAL bloat | Monitor slot lag, max_slot_wal_keep_size |
-
----
-
-## Appendix B: Alternatives Rejected
-
-### test_decoding (v2 design)
-- **Rejected**: Documentation explicitly says "example only"
-- Was chosen for simplicity but not production-appropriate
-
-### Custom output plugin
-- **Rejected**: More work, pgoutput already does what we need
-
-### Streaming protocol (not polling)
-- **Deferred to V2**: Polling is simpler, adequate for most workloads
-- Streaming would reduce latency but adds complexity

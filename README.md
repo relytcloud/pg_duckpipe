@@ -1,4 +1,4 @@
-# pg_ducklake_sync
+# pg_duckpipe
 
 PostgreSQL extension for HTAP (Hybrid Transactional/Analytical Processing) synchronization from heap tables to pg_ducklake columnar tables.
 
@@ -24,24 +24,31 @@ PostgreSQL extension for HTAP (Hybrid Transactional/Analytical Processing) synch
 - **Resource efficient**: Multiple tables share one publication/slot
 - **Built-in parsing**: Reuses PostgreSQL's `logicalrep_read_*` functions
 - **Flexible grouping**: Organize tables into sync groups as needed
+- **TRUNCATE support**: Propagates TRUNCATE to target tables
+- **Snapshot consistency**: CATCHUP state prevents duplicates during initial copy
+- **Auto-restart**: Worker recovers automatically from transient errors
 - **Low OLTP overhead**: No triggers, async processing
 
 ## Quick Start
 
 ```sql
--- Install extensions
-CREATE EXTENSION pg_ducklake;
-CREATE EXTENSION pg_ducklake_sync;
+-- Install extension (CASCADE pulls in pg_duckdb)
+CREATE EXTENSION pg_duckpipe CASCADE;
 
--- Add tables to sync (all use default group = 1 slot)
-SELECT ducklake_sync.add_table('public.orders');
-SELECT ducklake_sync.add_table('public.customers');
-SELECT ducklake_sync.add_table('public.products');
+-- Start the CDC worker
+SELECT duckpipe.start_worker();
+
+-- Create source and target tables
+CREATE TABLE orders (id SERIAL PRIMARY KEY, customer_id INT, amount NUMERIC);
+CREATE TABLE ducklake.orders (id INT, customer_id INT, amount NUMERIC) USING ducklake;
+
+-- Add table to sync (copies existing data + streams changes)
+SELECT duckpipe.add_table('public.orders', 'ducklake.orders');
 
 -- OLTP operations work normally
 INSERT INTO orders (customer_id, amount) VALUES (1, 99.99);
 
--- Analytics on columnar storage
+-- Analytics on columnar storage (after ~1s sync delay)
 SELECT customer_id, sum(amount), count(*)
 FROM ducklake.orders
 GROUP BY customer_id;
@@ -65,48 +72,53 @@ Group tables to manage resources and isolation:
 
 ```sql
 -- Default: all tables in one group
-SELECT ducklake_sync.add_table('public.orders');
-SELECT ducklake_sync.add_table('public.customers');
+SELECT duckpipe.add_table('public.orders');
+SELECT duckpipe.add_table('public.customers');
 
 -- Create separate group for high-volume tables
-SELECT ducklake_sync.create_group('analytics');
-SELECT ducklake_sync.add_table('public.events', sync_group := 'analytics');
-SELECT ducklake_sync.add_table('public.logs', sync_group := 'analytics');
+SELECT duckpipe.create_group('analytics');
+SELECT duckpipe.add_table('public.events', sync_group := 'analytics');
+SELECT duckpipe.add_table('public.logs', sync_group := 'analytics');
 ```
 
 ## API Reference
 
 ```sql
 -- Sync groups
-ducklake_sync.create_group(name) → TEXT
-ducklake_sync.drop_group(name)
-ducklake_sync.enable_group(name)
-ducklake_sync.disable_group(name)
+duckpipe.create_group(name, [publication], [slot_name]) → TEXT
+duckpipe.drop_group(name, [drop_slot])
+duckpipe.enable_group(name)
+duckpipe.disable_group(name)
 
 -- Table management
-ducklake_sync.add_table(source_table, [target_table], [sync_group])
-ducklake_sync.remove_table(source_table)
-ducklake_sync.move_table(source_table, new_group)
-ducklake_sync.resync_table(source_table)
+duckpipe.add_table(source_table, [target_table], [sync_group], [copy_data])
+duckpipe.remove_table(source_table, [drop_target])
+duckpipe.move_table(source_table, new_group)
+duckpipe.resync_table(source_table)
+
+-- Worker management
+duckpipe.start_worker()
+duckpipe.stop_worker()
 
 -- Monitoring
-ducklake_sync.groups() → TABLE
-ducklake_sync.tables() → TABLE
-ducklake_sync.status() → TABLE
+duckpipe.groups() → TABLE(name, publication, slot_name, enabled, table_count, lag_bytes, last_sync)
+duckpipe.tables() → TABLE(source_table, target_table, sync_group, enabled, rows_synced, last_sync)
+duckpipe.status() → TABLE(sync_group, source_table, target_table, state, enabled, rows_synced, last_sync)
 ```
 
 ## Configuration
 
 ```sql
-SET ducklake_sync.poll_interval = 1000;        -- ms
-SET ducklake_sync.batch_size_per_table = 1000; -- fairness between tables
-SET ducklake_sync.batch_size_per_group = 10000; -- fairness between groups
+SET duckpipe.poll_interval = 1000;          -- ms between polls
+SET duckpipe.batch_size_per_table = 1000;   -- fairness between tables
+SET duckpipe.batch_size_per_group = 10000;  -- fairness between groups
+SET duckpipe.enabled = on;                  -- enable/disable worker
 ```
 
 ## Requirements
 
 - PostgreSQL 14+
-- pg_ducklake extension
+- pg_duckdb extension
 - Source tables must have PRIMARY KEY
 
 ## Building
@@ -119,20 +131,13 @@ make install
 ## Running Tests
 
 ```bash
-make installcheck
+make installcheck               # Run all 8 regression tests
+make check-regression TEST=api  # Run a single test
 ```
-
-## Performance
-
-| Metric | Typical Value |
-|--------|---------------|
-| Sync latency | 1-3 seconds |
-| Throughput | 50,000-100,000 rows/sec |
-| OLTP overhead | <1% |
 
 ## Documentation
 
-See [DESIGN.md](DESIGN.md) for technical architecture and design decisions.
+See [doc/DESIGN.md](doc/DESIGN.md) for technical architecture and design decisions.
 
 ## License
 
