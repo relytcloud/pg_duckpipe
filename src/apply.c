@@ -59,10 +59,9 @@ apply_batch(SyncBatch *batch) {
 	if (!batch || batch->count == 0)
 		return;
 
-	if ((ret = SPI_connect()) != SPI_OK_CONNECT)
-		elog(ERROR, "SPI_connect failed: %d", ret);
-
-	/* Parse and quote the target table name once */
+	/* apply_batch is always called within an active SPI session from
+	 * process_sync_group, so we must not open a nested SPI connection here.
+	 * Parse and quote the target table name once */
 	parse_target_table(batch->target_table, &target_schema, &target_table);
 	quoted_target = quote_qualified_table(target_schema, target_table);
 
@@ -190,6 +189,4 @@ apply_batch(SyncBatch *batch) {
 	pfree(quoted_target);
 	pfree(target_schema);
 	pfree(target_table);
-
-	SPI_finish();
 }

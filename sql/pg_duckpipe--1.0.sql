@@ -32,16 +32,6 @@ CREATE TABLE duckpipe.table_mappings (
     UNIQUE(source_schema, source_table)
 );
 
--- Relation cache
-CREATE TABLE duckpipe.relation_cache (
-    group_id        INTEGER REFERENCES duckpipe.sync_groups(id),
-    remote_relid    INTEGER,
-    source_schema   TEXT,
-    source_table    TEXT,
-    columns         JSONB,
-    PRIMARY KEY (group_id, remote_relid)
-);
-
 -- Default sync group
 INSERT INTO duckpipe.sync_groups (name, publication, slot_name)
 VALUES ('default',
@@ -55,7 +45,7 @@ CREATE FUNCTION duckpipe.create_group(
     slot_name TEXT DEFAULT NULL
 ) RETURNS TEXT
 AS 'MODULE_PATHNAME', 'duckpipe_create_group'
-LANGUAGE C STRICT;
+LANGUAGE C;
 
 CREATE FUNCTION duckpipe.drop_group(
     name TEXT,
@@ -142,3 +132,15 @@ LANGUAGE C;
 CREATE FUNCTION duckpipe.stop_worker() RETURNS void
 AS 'MODULE_PATHNAME', 'duckpipe_stop_worker'
 LANGUAGE C;
+
+-- Restrict sensitive functions to superusers / extension owner
+REVOKE ALL ON FUNCTION duckpipe.create_group(TEXT, TEXT, TEXT) FROM PUBLIC;
+REVOKE ALL ON FUNCTION duckpipe.drop_group(TEXT, BOOLEAN) FROM PUBLIC;
+REVOKE ALL ON FUNCTION duckpipe.enable_group(TEXT) FROM PUBLIC;
+REVOKE ALL ON FUNCTION duckpipe.disable_group(TEXT) FROM PUBLIC;
+REVOKE ALL ON FUNCTION duckpipe.add_table(TEXT, TEXT, TEXT, BOOLEAN) FROM PUBLIC;
+REVOKE ALL ON FUNCTION duckpipe.remove_table(TEXT, BOOLEAN) FROM PUBLIC;
+REVOKE ALL ON FUNCTION duckpipe.move_table(TEXT, TEXT) FROM PUBLIC;
+REVOKE ALL ON FUNCTION duckpipe.resync_table(TEXT) FROM PUBLIC;
+REVOKE ALL ON FUNCTION duckpipe.start_worker() FROM PUBLIC;
+REVOKE ALL ON FUNCTION duckpipe.stop_worker() FROM PUBLIC;

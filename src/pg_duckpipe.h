@@ -52,6 +52,7 @@ typedef struct TableMapping {
 typedef struct RelationCacheEntry {
 	LogicalRepRelId remote_relid; /* Key */
 	LogicalRepRelation *rel;      /* Deep copied */
+	TableMapping *mapping;        /* Cached mapping, avoids SPI per message */
 } RelationCacheEntry;
 
 typedef enum SyncChangeType { SYNC_CHANGE_INSERT, SYNC_CHANGE_UPDATE, SYNC_CHANGE_DELETE } SyncChangeType;
@@ -72,8 +73,8 @@ typedef struct SyncChange {
 } SyncChange;
 
 typedef struct SyncBatch {
-	char target_table[NAMEDATALEN * 2]; /* Key for hash table (schema.table) */
-	List *changes;                      /* List of SyncChange* */
+	char target_table[NAMEDATALEN * 2 + 2]; /* Key for hash table (schema.table.\0) */
+	List *changes;                          /* List of SyncChange* */
 	int count;
 	XLogRecPtr last_lsn;
 	List *attnames; /* Column names from LogicalRepRelation */

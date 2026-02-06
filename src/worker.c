@@ -113,7 +113,7 @@ create_batch_hash(void) {
 	HASHCTL hashctl;
 
 	memset(&hashctl, 0, sizeof(hashctl));
-	hashctl.keysize = NAMEDATALEN * 2; /* schema.table */
+	hashctl.keysize = NAMEDATALEN * 2 + 2; /* schema.table.\0 */
 	hashctl.entrysize = sizeof(SyncBatch);
 	hashctl.hcxt = SyncMemoryContext;
 
@@ -184,6 +184,20 @@ process_snapshot(SyncGroup *group) {
 		foreach (lc, tasks) {
 			SnapshotTask *task = (SnapshotTask *)lfirst(lc);
 			StringInfoData buf;
+			XLogRecPtr snapshot_lsn;
+
+			/* Record current WAL position before copying data.
+			 * Any WAL changes with lsn <= snapshot_lsn are already
+			 * included in the snapshot copy and must be skipped
+			 * during CATCHUP. */
+			{
+				bool isnull;
+				int lsn_ret = SPI_execute("SELECT pg_current_wal_lsn()", true, 1);
+				if (lsn_ret == SPI_OK_SELECT && SPI_processed > 0)
+					snapshot_lsn = DatumGetLSN(SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1, &isnull));
+				else
+					snapshot_lsn = InvalidXLogRecPtr;
+			}
 
 			initStringInfo(&buf);
 			appendStringInfo(&buf, "INSERT INTO %s.%s SELECT * FROM %s.%s", quote_identifier(task->t_schema),
@@ -204,12 +218,13 @@ process_snapshot(SyncGroup *group) {
 			SPI_start_transaction();
 			PushActiveSnapshot(GetTransactionSnapshot());
 
-			/* Postgres Write (Update state) - use parameterized query */
+			/* Transition to CATCHUP with snapshot_lsn recorded */
 			{
-				Datum values[1] = {Int32GetDatum(task->id)};
-				Oid argtypes[1] = {INT4OID};
-				SPI_execute_with_args("UPDATE duckpipe.table_mappings SET state = 'STREAMING' WHERE id = $1", 1,
-				                      argtypes, values, NULL, false, 0);
+				Datum values[2] = {LSNGetDatum(snapshot_lsn), Int32GetDatum(task->id)};
+				Oid argtypes[2] = {LSNOID, INT4OID};
+				SPI_execute_with_args("UPDATE duckpipe.table_mappings SET state = 'CATCHUP', "
+				                      "snapshot_lsn = $1 WHERE id = $2",
+				                      2, argtypes, values, NULL, false, 0);
 			}
 
 			/* Commit Postgres write */
@@ -303,6 +318,26 @@ process_sync_group(SyncGroup *group) {
 	/* Flush any remaining batches */
 	flush_all_batches(batches);
 
+	/* Transition any CATCHUP tables to STREAMING.
+	 * After consuming a round of WAL, any table still in CATCHUP has now
+	 * consumed past its snapshot_lsn and can move to normal streaming. */
+	{
+		Datum values[1] = {Int32GetDatum(group->id)};
+		Oid argtypes[1] = {INT4OID};
+		SPI_execute_with_args("UPDATE duckpipe.table_mappings SET state = 'STREAMING' "
+		                      "WHERE group_id = $1 AND state = 'CATCHUP'",
+		                      1, argtypes, values, NULL, false, 0);
+	}
+
+	/* Update confirmed_lsn and last_sync_at after successful processing */
+	if (total_processed > 0 && group->pending_lsn != 0) {
+		Datum values[2] = {LSNGetDatum(group->pending_lsn), Int32GetDatum(group->id)};
+		Oid argtypes[2] = {LSNOID, INT4OID};
+		SPI_execute_with_args("UPDATE duckpipe.sync_groups SET confirmed_lsn = $1, "
+		                      "last_sync_at = now() WHERE id = $2",
+		                      2, argtypes, values, NULL, false, 0);
+	}
+
 	/* Clean up hash tables */
 	hash_destroy(batches);
 	hash_destroy(rel_cache);
@@ -323,6 +358,10 @@ duckpipe_worker_main(Datum main_arg) {
 
 	StartTransactionCommand();
 	dbname = get_database_name(dboid);
+	if (dbname == NULL) {
+		CommitTransactionCommand();
+		elog(FATAL, "database with OID %u does not exist", dboid);
+	}
 	/* Copy dbname to a safe context before committing */
 	{
 		MemoryContext oldcxt = MemoryContextSwitchTo(TopMemoryContext);
@@ -330,9 +369,6 @@ duckpipe_worker_main(Datum main_arg) {
 		MemoryContextSwitchTo(oldcxt);
 	}
 	CommitTransactionCommand();
-
-	if (dbname == NULL)
-		elog(FATAL, "database with OID %u does not exist", dboid);
 
 	SyncMemoryContext = AllocSetContextCreate(TopMemoryContext, "pg_duckpipe", ALLOCSET_DEFAULT_SIZES);
 

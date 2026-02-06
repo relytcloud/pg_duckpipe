@@ -15,7 +15,12 @@
 PG_FUNCTION_INFO_V1(duckpipe_create_group);
 Datum
 duckpipe_create_group(PG_FUNCTION_ARGS) {
-	char *name = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	char *name;
+
+	if (PG_ARGISNULL(0))
+		elog(ERROR, "group name must not be NULL");
+
+	name = text_to_cstring(PG_GETARG_TEXT_PP(0));
 	char *pub = PG_ARGISNULL(1) ? psprintf("duckpipe_pub_%s", name) : text_to_cstring(PG_GETARG_TEXT_PP(1));
 	char *slot = PG_ARGISNULL(2) ? psprintf("duckpipe_slot_%s", name) : text_to_cstring(PG_GETARG_TEXT_PP(2));
 	StringInfoData buf;
@@ -107,8 +112,7 @@ duckpipe_drop_group(PG_FUNCTION_ARGS) {
 	{
 		Datum values[1] = {CStringGetTextDatum(name)};
 		Oid argtypes[1] = {TEXTOID};
-		SPI_execute_with_args("DELETE FROM duckpipe.sync_groups WHERE name = $1", 1, argtypes, values, NULL, false,
-		                      0);
+		SPI_execute_with_args("DELETE FROM duckpipe.sync_groups WHERE name = $1", 1, argtypes, values, NULL, false, 0);
 	}
 
 	SPI_finish();
@@ -528,6 +532,15 @@ duckpipe_groups(PG_FUNCTION_ARGS) {
 		int ret;
 
 		funcctx = SRF_FIRSTCALL_INIT();
+
+		/* Connect to SPI before switching to multi_call_memory_ctx.
+		 * SPI_finish restores CurrentMemoryContext to what was current at
+		 * SPI_connect time. If we connect while in multi_call_memory_ctx,
+		 * SPI_finish would restore that context, and then SRF_RETURN_DONE
+		 * would try to delete it while it's current, triggering an assert. */
+		if (SPI_connect() != SPI_OK_CONNECT)
+			elog(ERROR, "SPI_connect failed");
+
 		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
 
 		/* Build tuple descriptor */
@@ -543,15 +556,12 @@ duckpipe_groups(PG_FUNCTION_ARGS) {
 		attinmeta = TupleDescGetAttInMetadata(tupdesc);
 		funcctx->attinmeta = attinmeta;
 
-		/* Query sync groups */
-		if (SPI_connect() != SPI_OK_CONNECT)
-			elog(ERROR, "SPI_connect failed");
-
 		ret = SPI_execute("SELECT g.name, g.publication, g.slot_name, g.enabled, "
 		                  "       (SELECT count(*) FROM duckpipe.table_mappings "
 		                  "m WHERE m.group_id = g.id)::int4 as table_count, "
-		                  "       COALESCE(pg_current_wal_lsn() - g.confirmed_lsn, "
-		                  "0)::int8 as lag_bytes, "
+		                  "       CASE WHEN g.confirmed_lsn IS NOT NULL "
+		                  "            THEN (pg_current_wal_lsn() - g.confirmed_lsn)::int8 "
+		                  "            ELSE 0::int8 END as lag_bytes, "
 		                  "       g.last_sync_at "
 		                  "FROM duckpipe.sync_groups g "
 		                  "ORDER BY g.name",
@@ -610,6 +620,10 @@ duckpipe_tables(PG_FUNCTION_ARGS) {
 		int ret;
 
 		funcctx = SRF_FIRSTCALL_INIT();
+
+		if (SPI_connect() != SPI_OK_CONNECT)
+			elog(ERROR, "SPI_connect failed");
+
 		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
 
 		/* Build tuple descriptor */
@@ -623,10 +637,6 @@ duckpipe_tables(PG_FUNCTION_ARGS) {
 
 		attinmeta = TupleDescGetAttInMetadata(tupdesc);
 		funcctx->attinmeta = attinmeta;
-
-		/* Query table mappings */
-		if (SPI_connect() != SPI_OK_CONNECT)
-			elog(ERROR, "SPI_connect failed");
 
 		ret = SPI_execute("SELECT m.source_schema || '.' || m.source_table as source_table, "
 		                  "       m.target_schema || '.' || m.target_table as target_table, "
@@ -690,6 +700,10 @@ duckpipe_status(PG_FUNCTION_ARGS) {
 		int ret;
 
 		funcctx = SRF_FIRSTCALL_INIT();
+
+		if (SPI_connect() != SPI_OK_CONNECT)
+			elog(ERROR, "SPI_connect failed");
+
 		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
 
 		/* Build tuple descriptor */
@@ -704,10 +718,6 @@ duckpipe_status(PG_FUNCTION_ARGS) {
 
 		attinmeta = TupleDescGetAttInMetadata(tupdesc);
 		funcctx->attinmeta = attinmeta;
-
-		/* Query status */
-		if (SPI_connect() != SPI_OK_CONNECT)
-			elog(ERROR, "SPI_connect failed");
 
 		ret = SPI_execute("SELECT g.name as sync_group, "
 		                  "       m.source_schema || '.' || m.source_table as source_table, "
@@ -794,7 +804,7 @@ duckpipe_start_worker(PG_FUNCTION_ARGS) {
 	memset(&worker, 0, sizeof(worker));
 	worker.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
 	worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
-	worker.bgw_restart_time = BGW_NEVER_RESTART;
+	worker.bgw_restart_time = 10; /* auto-restart after 10 seconds */
 	snprintf(worker.bgw_library_name, BGW_MAXLEN, "pg_duckpipe");
 	snprintf(worker.bgw_function_name, BGW_MAXLEN, "duckpipe_worker_main");
 	snprintf(worker.bgw_name, BGW_MAXLEN, "pg_duckpipe worker [%s]", dbname);

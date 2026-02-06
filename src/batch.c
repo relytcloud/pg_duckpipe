@@ -8,6 +8,32 @@
  */
 
 /*
+ * Free a list of SyncChange structs, including their internal
+ * col_values and key_values string lists.
+ * list_free_deep only frees the top-level pointed-to objects,
+ * but SyncChange contains nested Lists of palloc'd strings.
+ */
+static void
+free_change_list(List *changes) {
+	ListCell *lc;
+
+	foreach (lc, changes) {
+		SyncChange *change = (SyncChange *)lfirst(lc);
+
+		if (change->col_values != NIL) {
+			list_free_deep(change->col_values);
+			change->col_values = NIL;
+		}
+		if (change->key_values != NIL) {
+			list_free_deep(change->key_values);
+			change->key_values = NIL;
+		}
+		pfree(change);
+	}
+	list_free(changes);
+}
+
+/*
  * Add a change to the batch for the target table.
  * If the batch is full, flush it immediately.
  */
@@ -15,7 +41,7 @@ void
 batch_add_change(HTAB *batches, TableMapping *mapping, SyncChange *change, LogicalRepRelation *rel) {
 	SyncBatch *batch;
 	bool found;
-	char key[NAMEDATALEN * 2];
+	char key[NAMEDATALEN * 2 + 2];
 
 	/* Build key as schema.table */
 	snprintf(key, sizeof(key), "%s.%s", mapping->target_schema, mapping->target_table);
@@ -69,7 +95,7 @@ batch_add_change(HTAB *batches, TableMapping *mapping, SyncChange *change, Logic
 		apply_batch(batch);
 
 		/* Reset batch - keep attnames/keyattrs but clear changes */
-		list_free_deep(batch->changes);
+		free_change_list(batch->changes);
 		batch->changes = NIL;
 		batch->count = 0;
 	}
@@ -90,12 +116,7 @@ flush_all_batches(HTAB *batches) {
 			apply_batch(batch);
 
 			/* Reset batch */
-			/* We don't free the batch entry itself, just content */
-			/* list_free_deep works if elements are palloc'd */
-			/* We need to ensure SyncChange is freed.
-			   list_free_deep frees the list nodes and the pointed-to chunks.
-			*/
-			list_free_deep(batch->changes);
+			free_change_list(batch->changes);
 			batch->changes = NIL;
 			batch->count = 0;
 		}

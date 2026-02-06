@@ -57,7 +57,8 @@ decode_message(StringInfo buf, XLogRecPtr lsn, SyncGroup *group, HTAB *batches, 
 
 		entry = (RelationCacheEntry *)hash_search(rel_cache, &rel->remoteid, HASH_ENTER, &found);
 		/* If found, we might want to free old one? */
-		entry->rel = rel; /* Store the new relation definition */
+		entry->rel = rel;      /* Store the new relation definition */
+		entry->mapping = NULL; /* Reset cached mapping on schema change */
 		break;
 	}
 	case LOGICAL_REP_MSG_INSERT: {
@@ -74,9 +75,16 @@ decode_message(StringInfo buf, XLogRecPtr lsn, SyncGroup *group, HTAB *batches, 
 		if (!entry)
 			return; /* Should not happen if protocol flow is correct */
 
-		/* Find Table Mapping */
-		mapping = get_table_mapping(group, entry->rel->nspname, entry->rel->relname);
+		/* Find Table Mapping (cached per relation per poll round) */
+		if (entry->mapping == NULL)
+			entry->mapping = get_table_mapping(group, entry->rel->nspname, entry->rel->relname);
+		mapping = entry->mapping;
 		if (!mapping || !mapping->enabled)
+			return;
+
+		/* During CATCHUP, skip changes already included in snapshot */
+		if (strcmp(mapping->state, "CATCHUP") == 0 && mapping->snapshot_lsn != InvalidXLogRecPtr &&
+		    lsn <= mapping->snapshot_lsn)
 			return;
 
 		/* Construct Change */
@@ -101,8 +109,15 @@ decode_message(StringInfo buf, XLogRecPtr lsn, SyncGroup *group, HTAB *batches, 
 		entry = (RelationCacheEntry *)hash_search(rel_cache, &relid, HASH_FIND, NULL);
 		if (!entry)
 			return;
-		mapping = get_table_mapping(group, entry->rel->nspname, entry->rel->relname);
+		if (entry->mapping == NULL)
+			entry->mapping = get_table_mapping(group, entry->rel->nspname, entry->rel->relname);
+		mapping = entry->mapping;
 		if (!mapping || !mapping->enabled)
+			return;
+
+		/* During CATCHUP, skip changes already included in snapshot */
+		if (strcmp(mapping->state, "CATCHUP") == 0 && mapping->snapshot_lsn != InvalidXLogRecPtr &&
+		    lsn <= mapping->snapshot_lsn)
 			return;
 
 		/* Treat UPDATE as DELETE + INSERT for simplicity in V1 (easy for column
@@ -144,8 +159,15 @@ decode_message(StringInfo buf, XLogRecPtr lsn, SyncGroup *group, HTAB *batches, 
 		entry = (RelationCacheEntry *)hash_search(rel_cache, &relid, HASH_FIND, NULL);
 		if (!entry)
 			return;
-		mapping = get_table_mapping(group, entry->rel->nspname, entry->rel->relname);
+		if (entry->mapping == NULL)
+			entry->mapping = get_table_mapping(group, entry->rel->nspname, entry->rel->relname);
+		mapping = entry->mapping;
 		if (!mapping || !mapping->enabled)
+			return;
+
+		/* During CATCHUP, skip changes already included in snapshot */
+		if (strcmp(mapping->state, "CATCHUP") == 0 && mapping->snapshot_lsn != InvalidXLogRecPtr &&
+		    lsn <= mapping->snapshot_lsn)
 			return;
 
 		change = palloc0(sizeof(SyncChange));
@@ -182,39 +204,38 @@ decode_message(StringInfo buf, XLogRecPtr lsn, SyncGroup *group, HTAB *batches, 
 		/* Flush pending batches before TRUNCATE */
 		flush_all_batches(batches);
 
-		/* Connect to SPI for TRUNCATE execution */
-		if (SPI_connect() == SPI_OK_CONNECT) {
-			foreach (lc, relid_list) {
-				LogicalRepRelId relid = lfirst_oid(lc);
-				RelationCacheEntry *entry = (RelationCacheEntry *)hash_search(rel_cache, &relid, HASH_FIND, NULL);
-				if (entry) {
-					TableMapping *mapping = get_table_mapping(group, entry->rel->nspname, entry->rel->relname);
-					if (mapping && mapping->enabled) {
-						StringInfoData truncate_buf;
-						initStringInfo(&truncate_buf);
-						appendStringInfo(&truncate_buf, "TRUNCATE TABLE %s.%s",
-						                 quote_identifier(mapping->target_schema),
-						                 quote_identifier(mapping->target_table));
-						if (cascade)
-							appendStringInfoString(&truncate_buf, " CASCADE");
-						if (restart_seqs)
-							appendStringInfoString(&truncate_buf, " RESTART IDENTITY");
+		/* Execute TRUNCATEs within the caller's SPI session */
+		foreach (lc, relid_list) {
+			LogicalRepRelId relid = lfirst_oid(lc);
+			RelationCacheEntry *entry = (RelationCacheEntry *)hash_search(rel_cache, &relid, HASH_FIND, NULL);
+			if (entry) {
+				TableMapping *mapping = get_table_mapping(group, entry->rel->nspname, entry->rel->relname);
+				if (mapping && mapping->enabled) {
+					StringInfoData truncate_buf;
+					initStringInfo(&truncate_buf);
+					appendStringInfo(&truncate_buf, "TRUNCATE TABLE %s.%s", quote_identifier(mapping->target_schema),
+					                 quote_identifier(mapping->target_table));
+					if (cascade)
+						appendStringInfoString(&truncate_buf, " CASCADE");
+					if (restart_seqs)
+						appendStringInfoString(&truncate_buf, " RESTART IDENTITY");
 
-						if (SPI_execute(truncate_buf.data, false, 0) != SPI_OK_UTILITY)
-							elog(WARNING, "Failed to truncate target table %s.%s", mapping->target_schema,
-							     mapping->target_table);
-						else
-							elog(LOG, "DuckPipe: Truncated %s.%s", mapping->target_schema, mapping->target_table);
+					if (SPI_execute(truncate_buf.data, false, 0) != SPI_OK_UTILITY)
+						elog(WARNING, "Failed to truncate target table %s.%s", mapping->target_schema,
+						     mapping->target_table);
+					else
+						elog(LOG, "DuckPipe: Truncated %s.%s", mapping->target_schema, mapping->target_table);
 
-						pfree(truncate_buf.data);
-					}
+					pfree(truncate_buf.data);
 				}
 			}
-			SPI_finish();
 		}
 
 		list_free(relid_list);
 		break;
 	}
+	default:
+		elog(DEBUG1, "pg_duckpipe: unknown message type %c", msgtype);
+		break;
 	}
 }
