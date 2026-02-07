@@ -11,24 +11,20 @@ NOTICE:  Background worker started for database regression
 CREATE TABLE multi_a (id int primary key, val text);
 CREATE TABLE multi_b (id int primary key, num int);
 CREATE TABLE multi_c (id int primary key, flag boolean);
--- Create target tables
-CREATE TABLE ducklake.multi_a (id int, val text) USING ducklake;
-CREATE TABLE ducklake.multi_b (id int, num int) USING ducklake;
-CREATE TABLE ducklake.multi_c (id int, flag boolean) USING ducklake;
 -- Add all to default group
-SELECT duckpipe.add_table('public.multi_a', 'ducklake.multi_a', 'default', false);
+SELECT duckpipe.add_table('public.multi_a', NULL, 'default', false);
  add_table 
 -----------
  
 (1 row)
 
-SELECT duckpipe.add_table('public.multi_b', 'ducklake.multi_b', 'default', false);
+SELECT duckpipe.add_table('public.multi_b', NULL, 'default', false);
  add_table 
 -----------
  
 (1 row)
 
-SELECT duckpipe.add_table('public.multi_c', 'ducklake.multi_c', 'default', false);
+SELECT duckpipe.add_table('public.multi_c', NULL, 'default', false);
  add_table 
 -----------
  
@@ -44,21 +40,21 @@ SELECT pg_sleep(2);
  
 (1 row)
 
-SELECT * FROM ducklake.multi_a ORDER BY id;
+SELECT * FROM public.multi_a_ducklake ORDER BY id;
  id |  val  
 ----+-------
   1 | alpha
   2 | beta
 (2 rows)
 
-SELECT * FROM ducklake.multi_b ORDER BY id;
+SELECT * FROM public.multi_b_ducklake ORDER BY id;
  id | num 
 ----+-----
  10 | 100
  20 | 200
 (2 rows)
 
-SELECT * FROM ducklake.multi_c ORDER BY id;
+SELECT * FROM public.multi_c_ducklake ORDER BY id;
  id | flag 
 ----+------
   1 | t
@@ -74,14 +70,14 @@ SELECT pg_sleep(2);
  
 (1 row)
 
-SELECT * FROM ducklake.multi_a ORDER BY id;
+SELECT * FROM public.multi_a_ducklake ORDER BY id;
  id |  val  
 ----+-------
   1 | gamma
   2 | beta
 (2 rows)
 
-SELECT * FROM ducklake.multi_b ORDER BY id;
+SELECT * FROM public.multi_b_ducklake ORDER BY id;
  id | num 
 ----+-----
  20 | 200
@@ -106,9 +102,9 @@ SELECT duckpipe.remove_table('public.multi_c', false);
  
 (1 row)
 
-DROP TABLE ducklake.multi_a;
-DROP TABLE ducklake.multi_b;
-DROP TABLE ducklake.multi_c;
+DROP TABLE public.multi_a_ducklake;
+DROP TABLE public.multi_b_ducklake;
+DROP TABLE public.multi_c_ducklake;
 DROP TABLE multi_a;
 DROP TABLE multi_b;
 DROP TABLE multi_c;

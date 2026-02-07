@@ -435,7 +435,7 @@ duckpipe.disable_group(name TEXT) RETURNS void
 -- Add a table to sync
 duckpipe.add_table(
     source_table TEXT,               -- 'schema.table' (default schema: public)
-    target_table TEXT DEFAULT NULL,   -- defaults to 'ducklake.{table}', auto-created
+    target_table TEXT DEFAULT NULL,   -- defaults to '{schema}.{table}_ducklake', auto-created
     sync_group TEXT DEFAULT 'default',
     copy_data BOOLEAN DEFAULT true   -- SNAPSHOT initial data
 ) RETURNS void
@@ -683,18 +683,15 @@ CREATE EXTENSION pg_duckpipe CASCADE;  -- installs pg_duckdb dependency
 -- Create source table
 CREATE TABLE orders (id SERIAL PRIMARY KEY, customer_id INT, amount NUMERIC);
 
--- Create target DuckLake table
-CREATE TABLE ducklake.orders (id INT, customer_id INT, amount NUMERIC) USING ducklake;
-
--- Add to sync (initial snapshot + streaming)
+-- Add to sync (auto-creates orders_ducklake, initial snapshot + streaming)
 -- The background worker starts automatically if not already running
-SELECT duckpipe.add_table('public.orders', 'ducklake.orders', 'default', true);
+SELECT duckpipe.add_table('public.orders');
 
 -- OLTP writes
 INSERT INTO orders (customer_id, amount) VALUES (1, 99.99);
 
 -- OLAP reads (after ~1s sync delay)
-SELECT customer_id, SUM(amount) FROM ducklake.orders GROUP BY customer_id;
+SELECT customer_id, SUM(amount) FROM orders_ducklake GROUP BY customer_id;
 
 -- Monitor
 SELECT * FROM duckpipe.groups();

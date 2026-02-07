@@ -223,7 +223,7 @@ duckpipe_add_table(PG_FUNCTION_ARGS) {
 	char *source_table_copy = pstrdup(source_table_arg);
 	char *schema = "public";
 	char *table = source_table_copy;
-	char *t_schema = "ducklake";
+	char *t_schema;
 	char *t_table;
 	char *dot = strchr(source_table_copy, '.');
 	if (dot) {
@@ -232,7 +232,8 @@ duckpipe_add_table(PG_FUNCTION_ARGS) {
 		table = dot + 1;
 	}
 	if (!target_table_arg) {
-		t_table = pstrdup(table);
+		t_schema = pstrdup(schema);
+		t_table = psprintf("%s_ducklake", table);
 	} else {
 		char *target_copy = pstrdup(target_table_arg);
 		char *t_dot = strchr(target_copy, '.');
@@ -241,6 +242,7 @@ duckpipe_add_table(PG_FUNCTION_ARGS) {
 			t_schema = target_copy;
 			t_table = t_dot + 1;
 		} else {
+			t_schema = pstrdup(schema);
 			t_table = target_copy;
 		}
 	}
@@ -311,19 +313,27 @@ duckpipe_add_table(PG_FUNCTION_ARGS) {
 				elog(ERROR, "Failed to add table to publication %s", publication);
 		}
 
-		if (!target_table_arg) {
-			resetStringInfo(&buf);
-			appendStringInfo(&buf, "CREATE SCHEMA IF NOT EXISTS %s", quote_identifier(t_schema));
-			SPI_execute(buf.data, false, 0);
+		/* Always auto-create target table */
+		{
+			Datum svalues[1] = {CStringGetTextDatum(t_schema)};
+			Oid sargtypes[1] = {TEXTOID};
 
-			resetStringInfo(&buf);
-			appendStringInfo(&buf, "CREATE TABLE %s.%s (LIKE %s.%s INCLUDING ALL) USING ducklake",
-			                 quote_identifier(t_schema), quote_identifier(t_table), quote_identifier(schema),
-			                 quote_identifier(table));
-			ret = SPI_execute(buf.data, false, 0);
-			if (ret < 0)
-				elog(ERROR, "Failed to create target table %s.%s", t_schema, t_table);
+			ret = SPI_execute_with_args("SELECT 1 FROM pg_namespace WHERE nspname = $1", 1, sargtypes, svalues, NULL,
+			                            true, 1);
+			if (ret == SPI_OK_SELECT && SPI_processed == 0) {
+				resetStringInfo(&buf);
+				appendStringInfo(&buf, "CREATE SCHEMA %s", quote_identifier(t_schema));
+				SPI_execute(buf.data, false, 0);
+			}
 		}
+
+		resetStringInfo(&buf);
+		appendStringInfo(&buf, "CREATE TABLE IF NOT EXISTS %s.%s (LIKE %s.%s) USING ducklake",
+		                 quote_identifier(t_schema), quote_identifier(t_table), quote_identifier(schema),
+		                 quote_identifier(table));
+		ret = SPI_execute(buf.data, false, 0);
+		if (ret < 0)
+			elog(ERROR, "Failed to create target table %s.%s", t_schema, t_table);
 
 		/* 7. Insert table mapping */
 		{

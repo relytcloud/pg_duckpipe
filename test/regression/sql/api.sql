@@ -11,7 +11,7 @@ SELECT name, publication, slot_name FROM duckpipe.sync_groups WHERE name = 'anal
 -- Test add_table to the new group
 CREATE TABLE t1 (id int primary key, val text);
 
-SELECT duckpipe.add_table('public.t1', 'ducklake.t1', 'analytics', false);
+SELECT duckpipe.add_table('public.t1', NULL, 'analytics', false);
 
 SELECT source_schema, source_table, group_id, state
 FROM duckpipe.table_mappings
@@ -41,5 +41,6 @@ SELECT enabled FROM duckpipe.sync_groups WHERE name = 'analytics';
 SELECT duckpipe.drop_group('analytics');
 SELECT count(*) FROM duckpipe.sync_groups WHERE name = 'analytics';
 
+DROP TABLE public.t1_ducklake;
 DROP TABLE t1;
 DROP EXTENSION pg_duckpipe CASCADE;

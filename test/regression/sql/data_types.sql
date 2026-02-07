@@ -16,21 +16,7 @@ CREATE TABLE dtype_test (
     col_date date
 );
 
-CREATE TABLE ducklake.dtype_test (
-    id int,
-    col_int int,
-    col_bigint bigint,
-    col_smallint smallint,
-    col_float float,
-    col_double double precision,
-    col_text text,
-    col_varchar varchar(100),
-    col_bool boolean,
-    col_ts timestamp,
-    col_date date
-) USING ducklake;
-
-SELECT duckpipe.add_table('public.dtype_test', 'ducklake.dtype_test', 'default', false);
+SELECT duckpipe.add_table('public.dtype_test', NULL, 'default', false);
 
 -- Insert rows with various types
 INSERT INTO dtype_test (col_int, col_bigint, col_smallint, col_float, col_double, col_text, col_varchar, col_bool, col_ts, col_date)
@@ -46,10 +32,10 @@ VALUES (0, '', '');
 
 SELECT pg_sleep(2);
 
-SELECT id, col_int, col_bigint, col_smallint, col_bool, col_text, col_varchar FROM ducklake.dtype_test ORDER BY id;
+SELECT id, col_int, col_bigint, col_smallint, col_bool, col_text, col_varchar FROM public.dtype_test_ducklake ORDER BY id;
 
 SELECT duckpipe.remove_table('public.dtype_test', false);
-DROP TABLE ducklake.dtype_test;
+DROP TABLE public.dtype_test_ducklake;
 DROP TABLE dtype_test;
 
 SET client_min_messages = warning;

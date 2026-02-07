@@ -47,6 +47,12 @@ Heap Tables → WAL → Logical Decoding Slot (pgoutput) → Background Worker �
 - **SyncBatch**: Accumulated changes for one target table (hash key: schema.table)
 - **RelationCacheEntry**: Caches schema info from RELATION messages + cached TableMapping pointer
 
+### Target Table Auto-Creation
+
+`add_table()` always auto-creates the target DuckLake table using `CREATE TABLE IF NOT EXISTS ... (LIKE source) USING ducklake`.
+
+Default naming: source `public.lineitem` → target `public.lineitem_ducklake` (same schema, `_ducklake` suffix). The `target_table` parameter can override this.
+
 ### Table State Machine
 
 When adding a new table with copy_data=true: SNAPSHOT (copy data, record WAL LSN) → CATCHUP (skip WAL changes ≤ snapshot_lsn) → STREAMING (normal operation)

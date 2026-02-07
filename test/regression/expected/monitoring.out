@@ -7,10 +7,9 @@ SELECT name, publication, slot_name, enabled, table_count FROM duckpipe.groups()
  default | duckpipe_pub_regression | duckpipe_slot_regression | t       |           0
 (1 row)
 
--- Create and add table manually (explicit target table to avoid cross-tx DuckDB issue)
+-- Create and add table
 CREATE TABLE mon_test (id int primary key, val text);
-CREATE TABLE ducklake.mon_test (id int, val text) USING ducklake;
-SELECT duckpipe.add_table('public.mon_test', 'ducklake.mon_test', 'default', false);
+SELECT duckpipe.add_table('public.mon_test', NULL, 'default', false);
  add_table 
 -----------
  
@@ -18,16 +17,16 @@ SELECT duckpipe.add_table('public.mon_test', 'ducklake.mon_test', 'default', fal
 
 -- Test duckpipe.tables() returns the mapping
 SELECT source_table, target_table, sync_group, enabled FROM duckpipe.tables();
-  source_table   |   target_table    | sync_group | enabled 
------------------+-------------------+------------+---------
- public.mon_test | ducklake.mon_test | default    | t
+  source_table   |       target_table       | sync_group | enabled 
+-----------------+--------------------------+------------+---------
+ public.mon_test | public.mon_test_ducklake | default    | t
 (1 row)
 
 -- Test duckpipe.status() returns state info
 SELECT sync_group, source_table, target_table, state, enabled FROM duckpipe.status();
- sync_group |  source_table   |   target_table    |   state   | enabled 
-------------+-----------------+-------------------+-----------+---------
- default    | public.mon_test | ducklake.mon_test | STREAMING | t
+ sync_group |  source_table   |       target_table       |   state   | enabled 
+------------+-----------------+--------------------------+-----------+---------
+ default    | public.mon_test | public.mon_test_ducklake | STREAMING | t
 (1 row)
 
 -- Cleanup
@@ -37,6 +36,6 @@ SELECT duckpipe.remove_table('public.mon_test', false);
  
 (1 row)
 
-DROP TABLE ducklake.mon_test;
+DROP TABLE public.mon_test_ducklake;
 DROP TABLE mon_test;
 DROP EXTENSION pg_duckpipe CASCADE;
