@@ -23,9 +23,12 @@ SELECT pg_sleep(2);
 (1 row)
 
 SELECT * FROM ducklake.trunc_test ORDER BY id;
- id | val 
-----+-----
-(0 rows)
+ id |  val  
+----+-------
+  1 | one
+  2 | two
+  3 | three
+(3 rows)
 
 -- Truncate source table
 TRUNCATE trunc_test;

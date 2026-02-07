@@ -55,9 +55,12 @@ SELECT pg_sleep(2);
 (1 row)
 
 SELECT id, col_int, col_bigint, col_smallint, col_bool, col_text, col_varchar FROM ducklake.dtype_test ORDER BY id;
- id | col_int | col_bigint | col_smallint | col_bool | col_text | col_varchar 
-----+---------+------------+--------------+----------+----------+-------------
-(0 rows)
+ id | col_int | col_bigint | col_smallint | col_bool |  col_text   | col_varchar 
+----+---------+------------+--------------+----------+-------------+-------------
+  1 |      42 | 9999999999 |            1 | t        | hello world | varchar val
+  2 |         |            |              |          |             | 
+  3 |       0 |            |              |          |             | 
+(3 rows)
 
 SELECT duckpipe.remove_table('public.dtype_test', false);
  remove_table 

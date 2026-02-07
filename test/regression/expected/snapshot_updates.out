@@ -38,10 +38,10 @@ SELECT pg_sleep(4);
 (1 row)
 
 SELECT * FROM ducklake.existing_data ORDER BY id;
- id |  val  
-----+-------
+ id |     val     
+----+-------------
   1 | one
-  2 | two
+  2 | updated_two
   3 | three
 (3 rows)
 

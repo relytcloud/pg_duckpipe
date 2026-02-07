@@ -45,19 +45,25 @@ SELECT pg_sleep(2);
 (1 row)
 
 SELECT * FROM ducklake.multi_a ORDER BY id;
- id | val 
-----+-----
-(0 rows)
+ id |  val  
+----+-------
+  1 | alpha
+  2 | beta
+(2 rows)
 
 SELECT * FROM ducklake.multi_b ORDER BY id;
  id | num 
 ----+-----
-(0 rows)
+ 10 | 100
+ 20 | 200
+(2 rows)
 
 SELECT * FROM ducklake.multi_c ORDER BY id;
  id | flag 
 ----+------
-(0 rows)
+  1 | t
+  2 | f
+(2 rows)
 
 -- Update and delete across tables
 UPDATE multi_a SET val = 'gamma' WHERE id = 1;
@@ -69,14 +75,17 @@ SELECT pg_sleep(2);
 (1 row)
 
 SELECT * FROM ducklake.multi_a ORDER BY id;
- id | val 
-----+-----
-(0 rows)
+ id |  val  
+----+-------
+  1 | gamma
+  2 | beta
+(2 rows)
 
 SELECT * FROM ducklake.multi_b ORDER BY id;
  id | num 
 ----+-----
-(0 rows)
+ 20 | 200
+(1 row)
 
 -- Remove tables individually
 SELECT duckpipe.remove_table('public.multi_a', false);

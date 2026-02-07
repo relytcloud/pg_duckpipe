@@ -57,11 +57,9 @@ SELECT * FROM ducklake.resync_src ORDER BY id;
  id |  val  
 ----+-------
   1 | one
-  1 | one
-  2 | two
   2 | two
   3 | three
-(5 rows)
+(3 rows)
 
 SELECT duckpipe.remove_table('public.resync_src', false);
  remove_table 
