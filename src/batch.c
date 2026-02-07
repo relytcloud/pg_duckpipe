@@ -20,12 +20,26 @@ free_change_list(List *changes) {
 	foreach (lc, changes) {
 		SyncChange *change = (SyncChange *)lfirst(lc);
 
+		/* Handle col_values - free each string then the list */
 		if (change->col_values != NIL) {
-			list_free_deep(change->col_values);
+			ListCell *vc;
+			foreach (vc, change->col_values) {
+				char *val = (char *)lfirst(vc);
+				if (val != NULL)
+					pfree(val);
+			}
+			list_free(change->col_values);
 			change->col_values = NIL;
 		}
+		/* Handle key_values - free each string then the list */
 		if (change->key_values != NIL) {
-			list_free_deep(change->key_values);
+			ListCell *vc;
+			foreach (vc, change->key_values) {
+				char *val = (char *)lfirst(vc);
+				if (val != NULL)
+					pfree(val);
+			}
+			list_free(change->key_values);
 			change->key_values = NIL;
 		}
 		pfree(change);

@@ -186,6 +186,15 @@ process_snapshot(SyncGroup *group) {
 			StringInfoData buf;
 			XLogRecPtr snapshot_lsn;
 
+			/* Clear target before snapshot copy. This avoids duplicates during
+			 * resync even when target TRUNCATE is not effective. */
+			initStringInfo(&buf);
+			appendStringInfo(&buf, "DELETE FROM %s.%s", quote_identifier(task->t_schema),
+			                 quote_identifier(task->t_table));
+			if (SPI_execute(buf.data, false, 0) != SPI_OK_DELETE)
+				elog(WARNING, "Failed to clear target table %s.%s before snapshot", task->t_schema, task->t_table);
+			pfree(buf.data);
+
 			/* Record current WAL position before copying data.
 			 * Any WAL changes with lsn <= snapshot_lsn are already
 			 * included in the snapshot copy and must be skipped
@@ -287,31 +296,36 @@ process_sync_group(SyncGroup *group) {
 	}
 
 	/* Process each change message */
-	for (uint64 i = 0; i < SPI_processed; i++) {
-		bool isnull;
-		XLogRecPtr lsn;
-		Datum lsn_datum = SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 1, &isnull);
-		Datum data_datum = SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 2, &isnull);
+	{
+		uint64 num_changes = SPI_processed;
+		SPITupleTable *changes_tuptable = SPI_tuptable;
 
-		if (isnull)
-			continue;
+		for (uint64 i = 0; i < num_changes; i++) {
+			bool isnull;
+			XLogRecPtr lsn;
+			Datum lsn_datum = SPI_getbinval(changes_tuptable->vals[i], changes_tuptable->tupdesc, 1, &isnull);
+			Datum data_datum = SPI_getbinval(changes_tuptable->vals[i], changes_tuptable->tupdesc, 2, &isnull);
 
-		lsn = DatumGetLSN(lsn_datum);
-		{
-			bytea *data = DatumGetByteaP(data_datum);
-			int len = VARSIZE(data) - VARHDRSZ;
-			char *raw = VARDATA(data);
+			if (isnull)
+				continue;
 
-			/* Create StringInfo for parsing */
-			StringInfoData buf;
-			initStringInfo(&buf);
-			appendBinaryStringInfo(&buf, raw, len);
+			lsn = DatumGetLSN(lsn_datum);
+			{
+				bytea *data = DatumGetByteaP(data_datum);
+				int len = VARSIZE(data) - VARHDRSZ;
+				char *raw = VARDATA(data);
 
-			/* Decode and process the message */
-			decode_message(&buf, lsn, group, batches, rel_cache);
+				/* Create StringInfo for parsing */
+				StringInfoData buf;
+				initStringInfo(&buf);
+				appendBinaryStringInfo(&buf, raw, len);
 
-			pfree(buf.data);
-			total_processed++;
+				/* Decode and process the message */
+				decode_message(&buf, lsn, group, batches, rel_cache);
+
+				pfree(buf.data);
+				total_processed++;
+			}
 		}
 	}
 

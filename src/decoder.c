@@ -88,9 +88,10 @@ decode_message(StringInfo buf, XLogRecPtr lsn, SyncGroup *group, HTAB *batches, 
 			return;
 
 		/* Construct Change */
-		change = palloc0(sizeof(SyncChange));
+		change = palloc(sizeof(SyncChange));
 		change->type = SYNC_CHANGE_INSERT;
 		change->lsn = lsn;
+		change->key_values = NIL;
 		change->col_values = tuple_to_list(&newtup, entry->rel);
 
 		batch_add_change(batches, mapping, change, entry->rel);
@@ -128,10 +129,10 @@ decode_message(StringInfo buf, XLogRecPtr lsn, SyncGroup *group, HTAB *batches, 
 		   DEFAULT), so use newtup for key.
 		*/
 		{
-			SyncChange *del_change = palloc0(sizeof(SyncChange));
+			SyncChange *del_change = palloc(sizeof(SyncChange));
 			del_change->type = SYNC_CHANGE_DELETE;
 			del_change->lsn = lsn;
-
+			del_change->col_values = NIL; /* Explicitly initialize */
 			if (has_old)
 				del_change->key_values = tuple_to_list(&oldtup, entry->rel);
 			else
@@ -140,9 +141,10 @@ decode_message(StringInfo buf, XLogRecPtr lsn, SyncGroup *group, HTAB *batches, 
 			batch_add_change(batches, mapping, del_change, entry->rel);
 		}
 
-		change = palloc0(sizeof(SyncChange));
+		change = palloc(sizeof(SyncChange));
 		change->type = SYNC_CHANGE_INSERT;
 		change->lsn = lsn;
+		change->key_values = NIL; /* Explicitly initialize */
 		change->col_values = tuple_to_list(&newtup, entry->rel);
 		batch_add_change(batches, mapping, change, entry->rel);
 		break;
@@ -170,9 +172,10 @@ decode_message(StringInfo buf, XLogRecPtr lsn, SyncGroup *group, HTAB *batches, 
 		    lsn <= mapping->snapshot_lsn)
 			return;
 
-		change = palloc0(sizeof(SyncChange));
+		change = palloc(sizeof(SyncChange));
 		change->type = SYNC_CHANGE_DELETE;
 		change->lsn = lsn;
+		change->col_values = NIL; /* Explicitly initialize */
 		change->key_values = tuple_to_list(&oldtup, entry->rel);
 		batch_add_change(batches, mapping, change, entry->rel);
 		break;
@@ -191,7 +194,8 @@ decode_message(StringInfo buf, XLogRecPtr lsn, SyncGroup *group, HTAB *batches, 
 	}
 	case LOGICAL_REP_MSG_TRUNCATE: {
 		/*
-		 * Handle TRUNCATE by truncating all target tables involved.
+		 * Handle source TRUNCATE by clearing all target tables involved.
+		 * Use DELETE for compatibility with ducklake targets.
 		 * logicalrep_read_truncate returns a List of LogicalRepRelId values.
 		 */
 		bool cascade;
@@ -200,33 +204,32 @@ decode_message(StringInfo buf, XLogRecPtr lsn, SyncGroup *group, HTAB *batches, 
 		ListCell *lc;
 
 		relid_list = logicalrep_read_truncate(buf, &cascade, &restart_seqs);
+		(void)cascade;
+		(void)restart_seqs;
 
 		/* Flush pending batches before TRUNCATE */
 		flush_all_batches(batches);
 
-		/* Execute TRUNCATEs within the caller's SPI session */
+		/* Execute DELETEs within the caller's SPI session */
 		foreach (lc, relid_list) {
 			LogicalRepRelId relid = lfirst_oid(lc);
 			RelationCacheEntry *entry = (RelationCacheEntry *)hash_search(rel_cache, &relid, HASH_FIND, NULL);
 			if (entry) {
 				TableMapping *mapping = get_table_mapping(group, entry->rel->nspname, entry->rel->relname);
 				if (mapping && mapping->enabled) {
-					StringInfoData truncate_buf;
-					initStringInfo(&truncate_buf);
-					appendStringInfo(&truncate_buf, "TRUNCATE TABLE %s.%s", quote_identifier(mapping->target_schema),
+					StringInfoData clear_buf;
+					initStringInfo(&clear_buf);
+					appendStringInfo(&clear_buf, "DELETE FROM %s.%s", quote_identifier(mapping->target_schema),
 					                 quote_identifier(mapping->target_table));
-					if (cascade)
-						appendStringInfoString(&truncate_buf, " CASCADE");
-					if (restart_seqs)
-						appendStringInfoString(&truncate_buf, " RESTART IDENTITY");
 
-					if (SPI_execute(truncate_buf.data, false, 0) != SPI_OK_UTILITY)
-						elog(WARNING, "Failed to truncate target table %s.%s", mapping->target_schema,
+					if (SPI_execute(clear_buf.data, false, 0) != SPI_OK_DELETE)
+						elog(WARNING, "Failed to clear target table %s.%s", mapping->target_schema,
 						     mapping->target_table);
 					else
-						elog(LOG, "DuckPipe: Truncated %s.%s", mapping->target_schema, mapping->target_table);
+						elog(LOG, "DuckPipe: Cleared %s.%s due to source TRUNCATE", mapping->target_schema,
+						     mapping->target_table);
 
-					pfree(truncate_buf.data);
+					pfree(clear_buf.data);
 				}
 			}
 		}

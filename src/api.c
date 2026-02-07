@@ -529,14 +529,15 @@ duckpipe_resync_table(PG_FUNCTION_ARGS) {
 		t_table = pstrdup(TextDatumGetCString(SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 2, &isnull)));
 	}
 
-	/* Truncate target table */
+	/* Best-effort clear. The worker snapshot path also clears target rows
+	 * before copy to ensure correctness for resync. */
 	{
 		StringInfoData buf;
 		initStringInfo(&buf);
 		appendStringInfo(&buf, "TRUNCATE TABLE %s.%s", quote_identifier(t_schema), quote_identifier(t_table));
 		ret = SPI_execute(buf.data, false, 0);
 		if (ret != SPI_OK_UTILITY)
-			elog(WARNING, "Failed to truncate target table %s.%s", t_schema, t_table);
+			elog(WARNING, "Failed to clear target table %s.%s", t_schema, t_table);
 		pfree(buf.data);
 	}
 

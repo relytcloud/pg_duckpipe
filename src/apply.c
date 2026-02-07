@@ -112,26 +112,33 @@ apply_batch(SyncBatch *batch) {
 
 			{
 				StringInfoData del_buf;
+				bool skip_delete = false;
 				initStringInfo(&del_buf);
 				appendStringInfo(&del_buf, "DELETE FROM %s WHERE ", quoted_target);
 
 				/* Build WHERE clause using key columns if known, otherwise use all
 				 * columns */
 				if (batch->nkeyattrs > 0 && batch->keyattrs != NULL) {
-					/* Use only key columns */
+					/* Use only key columns.
+					 * key_values contains only the replica identity columns in order,
+					 * so we use sequential index i for key_values, while attidx is
+					 * used to get the column name from the full attnames list.
+					 */
 					for (int i = 0; i < batch->nkeyattrs; i++) {
 						int attidx = batch->keyattrs[i];
-
-						if (attidx >= list_length(change->key_values)) {
+						if (i >= list_length(change->key_values) || attidx >= list_length(batch->attnames)) {
 							elog(WARNING,
-							     "Key attribute index %d out of bounds for key_values list "
-							     "(len %d). Skipping DELETE/UPDATE key check.",
-							     attidx, list_length(change->key_values));
-							continue;
+							     "Key bounds error: key_idx=%d (len %d), att_idx=%d (len %d). Skipping DELETE.", i,
+							     list_length(change->key_values), attidx, list_length(batch->attnames));
+							skip_delete = true;
+							break;
 						}
+					}
+					for (int i = 0; i < batch->nkeyattrs && !skip_delete; i++) {
+						int attidx = batch->keyattrs[i];
 
 						char *colname = (char *)list_nth(batch->attnames, attidx);
-						char *val = (char *)list_nth(change->key_values, attidx);
+						char *val = (char *)list_nth(change->key_values, i);
 
 						if (i > 0)
 							appendStringInfoString(&del_buf, " AND ");
@@ -168,10 +175,12 @@ apply_batch(SyncBatch *batch) {
 					}
 				}
 
-				/* Execute the DELETE */
-				ret = SPI_execute(del_buf.data, false, 0);
-				if (ret != SPI_OK_DELETE)
-					elog(WARNING, "Failed to execute DELETE for %s (ret=%d)", batch->target_table, ret);
+				/* Execute the DELETE unless we detected a bounds error */
+				if (!skip_delete) {
+					ret = SPI_execute(del_buf.data, false, 0);
+					if (ret != SPI_OK_DELETE)
+						elog(WARNING, "Failed to execute DELETE for %s (ret=%d)", batch->target_table, ret);
+				}
 
 				pfree(del_buf.data);
 			}
