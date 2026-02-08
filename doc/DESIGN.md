@@ -133,7 +133,7 @@ case LOGICAL_REP_MSG_COMMIT:
 case LOGICAL_REP_MSG_TRUNCATE:
     relid_list = logicalrep_read_truncate(buf, &cascade, &restart_seqs);
     flush_all_batches(batches);  // flush pending before truncate
-    // TRUNCATE each mapped target table
+    // DELETE FROM each mapped target table (DuckLake compatibility)
     break;
 }
 ```
@@ -313,8 +313,10 @@ Cache lifetime is one poll round (destroyed with `rel_cache` hash table). Cache 
 
 `apply_batch()` generates SQL for each batch:
 
-- **DELETEs**: `DELETE FROM target WHERE (pk1, pk2) IN (VALUES (v1, v2), ...)`
-- **INSERTs**: `INSERT INTO target (col1, col2, ...) VALUES (v1, v2, ...), ...`
+- **DELETEs**: One per row: `DELETE FROM target WHERE pk1 = v1 AND pk2 = v2`
+- **INSERTs**: Batched multi-row: `INSERT INTO target VALUES (v1, v2, ...), (v3, v4, ...), ...`
+
+INSERTs are accumulated and flushed together. A pending INSERT batch is flushed before any DELETE to maintain correct ordering.
 
 UPDATEs are decomposed into DELETE + INSERT at decode time. This is efficient for column stores where in-place updates are expensive.
 
@@ -328,8 +330,15 @@ Changes are applied within the caller's SPI session (no nested `SPI_connect`).
 static void free_change_list(List *changes) {
     foreach(lc, changes) {
         SyncChange *change = lfirst(lc);
-        if (change->col_values != NIL) list_free_deep(change->col_values);
-        if (change->key_values != NIL) list_free_deep(change->key_values);
+        // Manually iterate to handle NULL entries (list_free_deep can't)
+        if (change->col_values != NIL) {
+            foreach(vc, change->col_values) { if (lfirst(vc)) pfree(lfirst(vc)); }
+            list_free(change->col_values);
+        }
+        if (change->key_values != NIL) {
+            foreach(vc, change->key_values) { if (lfirst(vc)) pfree(lfirst(vc)); }
+            list_free(change->key_values);
+        }
         pfree(change);
     }
     list_free(changes);
@@ -432,13 +441,15 @@ duckpipe.disable_group(name TEXT) RETURNS void
 ### 7.2 Table Sync Management
 
 ```sql
--- Add a table to sync
+-- Add a table to sync (always auto-creates target DuckLake table)
 duckpipe.add_table(
     source_table TEXT,               -- 'schema.table' (default schema: public)
     target_table TEXT DEFAULT NULL,   -- defaults to '{schema}.{table}_ducklake', auto-created
     sync_group TEXT DEFAULT 'default',
     copy_data BOOLEAN DEFAULT true   -- SNAPSHOT initial data
 ) RETURNS void
+-- Target table is created via: CREATE TABLE IF NOT EXISTS target (LIKE source) USING ducklake
+-- Target schema is created if it doesn't exist
 
 -- Remove a table from sync
 duckpipe.remove_table(
@@ -536,6 +547,7 @@ pg_duckpipe/
 │       ├── regression.conf      # wal_level=logical, shared_preload_libraries
 │       ├── schedule             # Test execution order
 │       ├── sql/                 # Test SQL files
+│       │   ├── auto_start.sql   # Worker auto-start on add_table()
 │       │   ├── api.sql          # Group/table management API tests
 │       │   ├── monitoring.sql   # groups()/tables()/status() SRF tests
 │       │   ├── streaming.sql    # INSERT/UPDATE/DELETE CDC tests
@@ -554,7 +566,7 @@ pg_duckpipe/
 ```bash
 make                        # Build the extension
 make install                # Install to PostgreSQL
-make installcheck           # Build + install + run all regression tests
+make installcheck           # Build + install + run all 9 regression tests
 make check-regression       # Run regression tests only
 make check-regression TEST=api  # Run a single test
 make clean-regression       # Remove test artifacts

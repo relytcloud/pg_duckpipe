@@ -128,7 +128,7 @@ make install
 ## Running Tests
 
 ```bash
-make installcheck               # Run all 8 regression tests
+make installcheck               # Run all 9 regression tests
 make check-regression TEST=api  # Run a single test
 ```
 
