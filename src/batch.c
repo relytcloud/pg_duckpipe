@@ -1,11 +1,83 @@
 #include "pg_duckpipe.h"
 
+#include "catalog/pg_type.h"
 #include "nodes/bitmapset.h"
 #include "utils/memutils.h"
 
 /*
  * Batch management functions
  */
+
+/* Update per-table sync metrics after a successful batch apply. */
+static void
+update_table_metrics(int mapping_id, int64 delta_rows) {
+	Datum values[2];
+	Oid argtypes[2] = {INT8OID, INT4OID};
+
+	if (delta_rows <= 0)
+		return;
+
+	values[0] = Int64GetDatum(delta_rows);
+	values[1] = Int32GetDatum(mapping_id);
+
+	SPI_execute_with_args("UPDATE duckpipe.table_mappings "
+	                      "SET rows_synced = rows_synced + $1, "
+	                      "    last_sync_at = now() "
+	                      "WHERE id = $2",
+	                      2, argtypes, values, NULL, false, 0);
+}
+
+/* Build batch attnames/keyattrs using source table catalogs when RELATION
+ * metadata is unavailable in this poll round. */
+static void
+load_batch_metadata_from_source(SyncBatch *batch, TableMapping *mapping) {
+	Datum values[2];
+	Oid argtypes[2] = {TEXTOID, TEXTOID};
+	int ret;
+
+	values[0] = CStringGetTextDatum(mapping->source_schema);
+	values[1] = CStringGetTextDatum(mapping->source_table);
+
+	ret = SPI_execute_with_args("SELECT a.attname "
+	                            "FROM pg_class c "
+	                            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+	                            "JOIN pg_attribute a ON a.attrelid = c.oid "
+	                            "WHERE n.nspname = $1 AND c.relname = $2 "
+	                            "  AND a.attnum > 0 AND NOT a.attisdropped "
+	                            "ORDER BY a.attnum",
+	                            2, argtypes, values, NULL, true, 0);
+
+	if (ret != SPI_OK_SELECT || SPI_processed == 0)
+		elog(ERROR, "Failed to load column metadata for %s.%s", mapping->source_schema, mapping->source_table);
+
+	for (uint64 i = 0; i < SPI_processed; i++) {
+		bool isnull;
+		char *attname = TextDatumGetCString(SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 1, &isnull));
+		if (!isnull)
+			batch->attnames = lappend(batch->attnames, pstrdup(attname));
+	}
+
+	ret = SPI_execute_with_args("SELECT k.attnum::int2 "
+	                            "FROM pg_class c "
+	                            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+	                            "JOIN pg_index i ON i.indrelid = c.oid AND i.indisprimary "
+	                            "JOIN unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord) ON true "
+	                            "WHERE n.nspname = $1 AND c.relname = $2 "
+	                            "ORDER BY k.ord",
+	                            2, argtypes, values, NULL, true, 0);
+
+	if (ret == SPI_OK_SELECT && SPI_processed > 0) {
+		batch->keyattrs = palloc(sizeof(int) * SPI_processed);
+		batch->nkeyattrs = 0;
+
+		for (uint64 i = 0; i < SPI_processed; i++) {
+			bool isnull;
+			int attnum = DatumGetInt16(SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 1, &isnull));
+			if (!isnull && attnum > 0)
+				batch->keyattrs[batch->nkeyattrs++] = attnum - 1; /* 0-based index */
+		}
+	}
+}
 
 /*
  * Free a list of SyncChange structs, including their internal
@@ -68,6 +140,7 @@ batch_add_change(HTAB *batches, TableMapping *mapping, SyncChange *change, Logic
 
 		/* New batch - key is already copied into batch->target_table by hash_search
 		 * since it's the first field and keysize matches */
+		batch->mapping_id = mapping->id;
 		batch->changes = NIL;
 		batch->count = 0;
 		batch->last_lsn = 0;
@@ -98,9 +171,13 @@ batch_add_change(HTAB *batches, TableMapping *mapping, SyncChange *change, Logic
 					}
 				}
 			}
+		} else {
+			load_batch_metadata_from_source(batch, mapping);
 		}
 
 		MemoryContextSwitchTo(oldcxt);
+	} else if (batch->mapping_id != mapping->id) {
+		elog(ERROR, "Conflicting mappings share target table key %s", key);
 	}
 
 	/* Add change in SyncMemoryContext so it survives SPI_commit */
@@ -114,7 +191,9 @@ batch_add_change(HTAB *batches, TableMapping *mapping, SyncChange *change, Logic
 
 	/* Flush if full */
 	if (batch->count >= duckpipe_batch_size_per_table) {
+		int applied_count = batch->count;
 		apply_batch(batch);
+		update_table_metrics(batch->mapping_id, applied_count);
 
 		/* Reset batch - keep attnames/keyattrs but clear changes */
 		free_change_list(batch->changes);
@@ -135,7 +214,9 @@ flush_all_batches(HTAB *batches) {
 
 	while ((batch = (SyncBatch *)hash_seq_search(&status)) != NULL) {
 		if (batch->count > 0) {
+			int applied_count = batch->count;
 			apply_batch(batch);
+			update_table_metrics(batch->mapping_id, applied_count);
 
 			/* Reset batch */
 			free_change_list(batch->changes);

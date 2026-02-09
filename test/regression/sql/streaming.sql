@@ -1,5 +1,7 @@
+SET client_min_messages = warning;
 CREATE EXTENSION pg_duckpipe CASCADE;
 SELECT duckpipe.start_worker();
+RESET client_min_messages;
 
 CREATE TABLE stream_test (id int primary key, val text);
 
@@ -24,6 +26,12 @@ DELETE FROM stream_test WHERE id = 1;
 SELECT pg_sleep(2);
 
 SELECT * FROM public.stream_test_ducklake ORDER BY id;
+
+-- Verify status metrics are updated
+SELECT rows_synced > 0 AS rows_synced_positive,
+       last_sync IS NOT NULL AS has_last_sync
+FROM duckpipe.status()
+WHERE source_table = 'public.stream_test';
 
 SELECT duckpipe.remove_table('public.stream_test', false);
 DROP TABLE public.stream_test_ducklake;

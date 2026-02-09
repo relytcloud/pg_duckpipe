@@ -1,0 +1,4 @@
+bench_data/
+bench_pg.log
+
+*.pyc

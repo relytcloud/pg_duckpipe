@@ -108,6 +108,7 @@ typedef struct SyncChange {
 
 typedef struct SyncBatch {
 	char target_table[NAMEDATALEN * 2 + 2]; /* Key for hash table (schema.table.\0) */
+	int mapping_id;                         /* table_mappings.id for metric updates */
 	List *changes;                          /* List of SyncChange* */
 	int count;
 	XLogRecPtr last_lsn;
