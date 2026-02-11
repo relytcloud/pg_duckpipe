@@ -10,6 +10,8 @@ NO_INSTALLCHECK = 1
 PG_CONFIG = /Users/xiaoyuwei/Desktop/workspace_ducklake/postgres/work/app/bin/pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 override PG_CFLAGS += -Wno-declaration-after-statement
+PG_CPPFLAGS += -I$(shell $(PG_CONFIG) --includedir)
+SHLIB_LINK += -L$(shell $(PG_CONFIG) --libdir) -lpq
 include $(PGXS)
 
 check-regression:

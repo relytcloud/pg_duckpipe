@@ -102,3 +102,12 @@ Changes are fetched via SPI calling `pg_logical_slot_get_binary_changes()`.
 - pg_duckdb extension must be installed (pg_duckpipe depends on it via control file)
 - Source tables must have PRIMARY KEY
 - PostgreSQL config: `wal_level=logical`, extension in `shared_preload_libraries`
+
+## Development Workflow
+
+This project uses a test-driven development (TDD) approach for bug fixes:
+
+1. **Write a failing test first**: Create a regression test in `test/regression/sql/` that demonstrates the bug. Write the expected output in `test/regression/expected/` reflecting the **correct** (fixed) behavior. Add the test to `test/regression/schedule`.
+2. **Verify the test fails**: Run `make installcheck` (or `make check-regression TEST=<name>`) and confirm the new test fails, proving the bug exists. Inspect the diff between expected and actual output to confirm the failure mode matches the bug.
+3. **Implement the fix**: Modify the source code to fix the bug.
+4. **Verify the test passes**: Run the test again and confirm it now passes with the expected output.
