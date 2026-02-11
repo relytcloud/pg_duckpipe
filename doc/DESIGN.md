@@ -293,7 +293,7 @@ Key design choices:
 3. **Fetch WAL changes**: `pg_logical_slot_get_binary_changes(slot, NULL, batch_size_per_group, 'publication_names', pub)`
 4. **Decode and batch**: Each message is parsed via `decode_message()`, changes accumulated in per-table `SyncBatch` entries
 5. **Flush batches**: `flush_all_batches()` applies all accumulated changes via `apply_batch()`
-6. **State transitions**: Move `CATCHUP` tables to `STREAMING`
+6. **State transitions**: Promote `CATCHUP` tables to `STREAMING` where `snapshot_lsn <= pending_lsn`
 7. **Checkpoint**: Update `confirmed_lsn` and `last_sync_at` in `sync_groups`
 
 ### 5.5 Table Mapping Cache
@@ -374,11 +374,13 @@ typedef enum SyncState {
                    ▼                                         │
 ┌─────────────────────────────────────┐                     │
 │            CATCHUP                    │                     │
-│  Consume WAL changes but skip any   │                     │
-│  with lsn <= snapshot_lsn (already  │                     │
-│  included in snapshot copy)          │                     │
+│  Skip WAL changes with              │                     │
+│  lsn <= snapshot_lsn (already in    │                     │
+│  snapshot copy).                     │                     │
+│  Apply changes with lsn >           │                     │
+│  snapshot_lsn normally.              │                     │
 └──────────────────┬──────────────────┘                     │
-                   │ end of poll round                       │
+                   │ when pending_lsn >= snapshot_lsn        │
                    ▼                                         ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                      STREAMING                                │
@@ -390,6 +392,8 @@ typedef enum SyncState {
 
 The CATCHUP state prevents duplicate data when a table is added with `copy_data=true`. Between creating the replication slot and completing the snapshot copy, WAL changes may be generated that are already reflected in the copied data.
 
+State is tracked **per table**, not per group. Each table in a group transitions independently based on its own `snapshot_lsn`.
+
 In `decoder.c`, the skip logic:
 
 ```c
@@ -399,12 +403,17 @@ if (mapping->state == SYNC_STATE_CATCHUP &&
     return;  /* Already included in snapshot, skip */
 ```
 
-After a poll round processes WAL, all `CATCHUP` tables transition to `STREAMING`:
+Note: changes with `lsn > snapshot_lsn` are applied normally even while in CATCHUP state. CATCHUP only skips messages at or below the snapshot boundary.
+
+After a poll round, CATCHUP tables are promoted to STREAMING only when the group's WAL consumption has advanced past their `snapshot_lsn`:
 
 ```sql
 UPDATE duckpipe.table_mappings SET state = 'STREAMING'
-WHERE group_id = $1 AND state = 'CATCHUP';
+WHERE group_id = $1 AND state = 'CATCHUP'
+  AND snapshot_lsn <= $2;  -- $2 = group->pending_lsn (last consumed commit LSN)
 ```
+
+This LSN-gated promotion prevents premature transition when `batch_size_per_group` limits cause partial WAL consumption across multiple poll rounds. Without it, a CATCHUP table promoted too early would process remaining WAL messages without skip logic, causing duplicate rows.
 
 ### resync_table()
 
@@ -556,7 +565,8 @@ pg_duckpipe/
 │       │   ├── multiple_tables.sql   # Multiple tables in same group
 │       │   ├── data_types.sql   # Various PostgreSQL data types
 │       │   ├── resync.sql       # resync_table() functionality
-│       │   └── truncate.sql     # TRUNCATE propagation
+│       │   ├── truncate.sql     # TRUNCATE propagation
+│       │   └── premature_catchup.sql  # CATCHUP→STREAMING LSN-gated transition
 │       └── expected/            # Expected outputs for pg_regress
 └── doc/
     └── DESIGN.md                # This document
