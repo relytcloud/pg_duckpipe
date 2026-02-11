@@ -1,6 +1,7 @@
 #include "pg_duckpipe.h"
 
-#include "access/xlog.h"
+#include "libpq-fe.h"
+
 #include "catalog/pg_type.h"
 #include "commands/dbcommands.h"
 #include "executor/spi.h"
@@ -193,20 +194,106 @@ process_snapshot(SyncGroup *group) {
 		MemoryContextSwitchTo(oldcxt);
 	}
 
-	/* Process tasks with transaction splitting */
+	/* Process tasks using temporary replication slot with exported snapshot.
+	 *
+	 * For each table in SNAPSHOT state we:
+	 *  1. Open a libpq replication connection back to our own database
+	 *  2. CREATE_REPLICATION_SLOT ... TEMPORARY LOGICAL pgoutput
+	 *     (EXPORT_SNAPSHOT is the default — returns consistent_point + snapshot_name)
+	 *  3. Import that snapshot via SET TRANSACTION SNAPSHOT in our SPI session
+	 *  4. Copy data under the imported snapshot (atomically consistent with consistent_point)
+	 *  5. Close the replication connection (drops temp slot, releases snapshot)
+	 *  6. Record consistent_point as snapshot_lsn and transition to CATCHUP
+	 *
+	 * This guarantees zero race window: the snapshot and WAL position are
+	 * determined atomically by the replication slot creation. */
 	if (tasks != NIL) {
 		ListCell *lc;
+		char *dbname;
+		const char *port_str;
+
+		/* Capture connection parameters while we still have a valid catalog snapshot */
+		dbname = pstrdup(get_database_name(MyDatabaseId));
+		port_str = GetConfigOptionByName("port", NULL, false);
+
 		foreach (lc, tasks) {
 			SnapshotTask *task = (SnapshotTask *)lfirst(lc);
 			StringInfoData buf;
-			XLogRecPtr snapshot_lsn;
+			XLogRecPtr consistent_point;
+			char *snapshot_name = NULL;
+			PGconn *repl_conn = NULL;
 			instr_time table_timer;
 
 			if (timing_enabled)
 				INSTR_TIME_SET_CURRENT(table_timer);
 
-			/* Clear target before snapshot copy. This avoids duplicates during
-			 * resync even when target TRUNCATE is not effective. */
+			/* --- Step 1: Open replication connection and create temp slot --- */
+			{
+				const char *keywords[] = {"dbname", "port", "replication", NULL};
+				const char *conn_values[] = {dbname, port_str, "database", NULL};
+				PGresult *res;
+				const char *cp_str;
+				const char *sn_str;
+				uint32 hi, lo;
+
+				repl_conn = PQconnectdbParams(keywords, conn_values, false);
+				if (PQstatus(repl_conn) != CONNECTION_OK) {
+					elog(WARNING, "DuckPipe: replication connection failed for %s.%s: %s",
+					     task->s_schema, task->s_table, PQerrorMessage(repl_conn));
+					PQfinish(repl_conn);
+					continue; /* skip this table, retry next round */
+				}
+
+				res = PQexec(repl_conn,
+				             "CREATE_REPLICATION_SLOT duckpipe_snap_tmp TEMPORARY LOGICAL pgoutput");
+				if (PQresultStatus(res) != PGRES_TUPLES_OK) {
+					elog(WARNING, "DuckPipe: CREATE_REPLICATION_SLOT failed for %s.%s: %s",
+					     task->s_schema, task->s_table, PQresultErrorMessage(res));
+					PQclear(res);
+					PQfinish(repl_conn);
+					continue;
+				}
+
+				/* Result columns: slot_name(0), consistent_point(1), snapshot_name(2), output_plugin(3) */
+				cp_str = PQgetvalue(res, 0, 1);
+				sn_str = PQgetvalue(res, 0, 2);
+
+				if (sscanf(cp_str, "%X/%X", &hi, &lo) != 2) {
+					elog(WARNING, "DuckPipe: failed to parse consistent_point '%s'", cp_str);
+					PQclear(res);
+					PQfinish(repl_conn);
+					continue;
+				}
+
+				consistent_point = ((uint64)hi << 32) | lo;
+
+				oldcxt = MemoryContextSwitchTo(SyncMemoryContext);
+				snapshot_name = pstrdup(sn_str);
+				MemoryContextSwitchTo(oldcxt);
+
+				PQclear(res);
+				/* Keep repl_conn open — it holds the exported snapshot alive */
+			}
+
+			/* --- Step 2: Import snapshot and copy data --- */
+			PopActiveSnapshot();
+			SPI_commit();
+			SPI_start_transaction();
+
+			/* Import the exported snapshot (requires REPEATABLE READ, must be
+			 * the first data-access statement in the transaction) */
+			if (SPI_execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ", false, 0) < 0)
+				elog(ERROR, "DuckPipe: failed to SET TRANSACTION ISOLATION LEVEL");
+
+			initStringInfo(&buf);
+			appendStringInfo(&buf, "SET TRANSACTION SNAPSHOT %s", quote_literal_cstr(snapshot_name));
+			if (SPI_execute(buf.data, false, 0) < 0)
+				elog(ERROR, "DuckPipe: failed to SET TRANSACTION SNAPSHOT %s", snapshot_name);
+			pfree(buf.data);
+
+			PushActiveSnapshot(GetTransactionSnapshot());
+
+			/* Clear target before snapshot copy */
 			initStringInfo(&buf);
 			appendStringInfo(&buf, "DELETE FROM %s.%s", quote_identifier(task->t_schema),
 			                 quote_identifier(task->t_table));
@@ -214,48 +301,39 @@ process_snapshot(SyncGroup *group) {
 				elog(WARNING, "Failed to clear target table %s.%s before snapshot", task->t_schema, task->t_table);
 			pfree(buf.data);
 
-			/* Record current WAL position before copying data.
-			 * Any WAL changes with lsn <= snapshot_lsn are already
-			 * included in the snapshot copy and must be skipped
-			 * during CATCHUP. */
-			{
-				bool isnull;
-				int lsn_ret = SPI_execute("SELECT pg_current_wal_lsn()", true, 1);
-				if (lsn_ret == SPI_OK_SELECT && SPI_processed > 0)
-					snapshot_lsn = DatumGetLSN(SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1, &isnull));
-				else
-					snapshot_lsn = InvalidXLogRecPtr;
-			}
-
 			initStringInfo(&buf);
 			appendStringInfo(&buf, "INSERT INTO %s.%s SELECT * FROM %s.%s", quote_identifier(task->t_schema),
 			                 quote_identifier(task->t_table), quote_identifier(task->s_schema),
 			                 quote_identifier(task->s_table));
 
-			elog(LOG, "DuckPipe: Copying data for %s.%s", task->s_schema, task->s_table);
+			elog(LOG, "DuckPipe: Copying data for %s.%s (snapshot=%s consistent_point=%X/%X)", task->s_schema,
+			     task->s_table, snapshot_name, LSN_FORMAT_ARGS(consistent_point));
 
-			/* DuckDB Write */
-			if (SPI_execute(buf.data, false, 0) < 0) {
+			if (SPI_execute(buf.data, false, 0) < 0)
 				elog(ERROR, "Failed to copy data for %s.%s", task->s_schema, task->s_table);
-			}
 			pfree(buf.data);
 
 			/* Commit DuckDB write */
 			PopActiveSnapshot();
 			SPI_commit();
+
+			/* --- Step 3: Close replication connection (drops temp slot + snapshot) --- */
+			PQfinish(repl_conn);
+			repl_conn = NULL;
+
 			SPI_start_transaction();
 			PushActiveSnapshot(GetTransactionSnapshot());
 
-			/* Transition to CATCHUP with snapshot_lsn recorded */
+			/* Transition to CATCHUP with consistent_point as snapshot_lsn */
 			{
-				Datum values[2] = {LSNGetDatum(snapshot_lsn), Int32GetDatum(task->id)};
+				Datum values[2] = {LSNGetDatum(consistent_point), Int32GetDatum(task->id)};
 				Oid argtypes[2] = {LSNOID, INT4OID};
 				SPI_execute_with_args("UPDATE duckpipe.table_mappings SET state = 'CATCHUP', "
 				                      "snapshot_lsn = $1 WHERE id = $2",
 				                      2, argtypes, values, NULL, false, 0);
 			}
 
-			/* Commit Postgres write */
+			/* Commit metadata write */
 			PopActiveSnapshot();
 			SPI_commit();
 			SPI_start_transaction();

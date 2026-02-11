@@ -1,0 +1,88 @@
+-- Snapshot race condition: deterministic proof of data loss
+--
+-- Bug: process_snapshot() uses a transaction snapshot (S1) from the start of
+-- the poll round for INSERT INTO target SELECT * FROM source, but records
+-- snapshot_lsn = pg_current_wal_lsn() which reflects the CURRENT WAL position.
+--
+-- Any transaction that commits between S1 and pg_current_wal_lsn() is:
+--   (a) invisible to INSERT...SELECT (not in S1)
+--   (b) skipped during CATCHUP (lsn <= snapshot_lsn)
+-- Result: permanent data loss.
+--
+-- This test uses a background psql session in REPEATABLE READ to pin a
+-- snapshot (simulating PushActiveSnapshot), then commits a concurrent row
+-- from the main session, and proves the concurrent row is invisible to
+-- the pinned snapshot while pg_current_wal_lsn() covers it.
+-- ============================================================
+-- Setup
+-- ============================================================
+CREATE TABLE snap_race_src (id int PRIMARY KEY, val text);
+INSERT INTO snap_race_src VALUES (1, 'row_1');
+-- Results table: the background session records what it observed
+CREATE TABLE snap_race_result (snapshot_copy_rows int);
+-- ============================================================
+-- Write the background worker simulation script (line by line,
+-- because psql \! is single-line only — no heredocs)
+-- ============================================================
+\! echo "BEGIN ISOLATION LEVEL REPEATABLE READ;" > /tmp/snap_race_bg.sql
+\! echo "SELECT count(*) FROM snap_race_src;" >> /tmp/snap_race_bg.sql
+\! echo "SELECT pg_sleep(2);" >> /tmp/snap_race_bg.sql
+\! echo "INSERT INTO snap_race_result SELECT (SELECT count(*) FROM snap_race_src);" >> /tmp/snap_race_bg.sql
+\! echo "COMMIT;" >> /tmp/snap_race_bg.sql
+-- Launch background session
+-- REPEATABLE READ pins the snapshot at first query, matching the behavior
+-- of PushActiveSnapshot(GetTransactionSnapshot()) in the actual worker.
+-- pg_sleep(2) gives main session time to commit the concurrent row.
+\! psql -p 5555 -d regression -f /tmp/snap_race_bg.sql > /dev/null 2>&1 &
+-- Wait for background session to establish its snapshot
+SELECT pg_sleep(0.5);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+-- ============================================================
+-- Concurrent commit: happens AFTER the background session's snapshot
+-- ============================================================
+INSERT INTO snap_race_src VALUES (2, 'row_2_concurrent');
+-- Verify main session sees both rows
+SELECT count(*) AS actual_source_rows FROM snap_race_src;
+ actual_source_rows 
+--------------------
+                  2
+(1 row)
+
+-- Wait for background session to complete
+SELECT pg_sleep(3);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+-- ============================================================
+-- Verify the gap
+-- ============================================================
+-- The background session (simulating the worker) saw only 1 row through
+-- its pinned snapshot, even though pg_current_wal_lsn() had advanced
+-- past row_2's commit. This is the exact race in process_snapshot().
+SELECT snapshot_copy_rows FROM snap_race_result;
+ snapshot_copy_rows 
+--------------------
+                  1
+(1 row)
+
+-- THE BUG:
+--   snapshot_copy_rows = 1  (worker's INSERT...SELECT would copy 1 row)
+--   actual_source_rows = 2  (source has 2 rows)
+--   snapshot_lsn (from pg_current_wal_lsn) >= row_2's commit LSN
+--
+-- During CATCHUP, row_2's WAL change has lsn <= snapshot_lsn,
+-- so decoder.c:161-162 skips it. Row 2 is permanently lost.
+--
+-- After fix: snapshot_lsn must be captured AT or BEFORE the snapshot
+-- used for the copy, so row_2's WAL change has lsn > snapshot_lsn
+-- and is correctly applied during CATCHUP.
+-- Cleanup
+DROP TABLE snap_race_result;
+DROP TABLE snap_race_src;
+\! rm -f /tmp/snap_race_bg.sql
