@@ -65,11 +65,15 @@ When adding with copy_data=false: directly STREAMING
 
 ## GUC Parameters
 
+All GUC parameters are `PGC_SIGHUP` — must be changed via `ALTER SYSTEM SET` + `SELECT pg_reload_conf()`, not session-level `SET`.
+
 ```sql
-duckpipe.poll_interval          -- ms between polls (default 1000)
-duckpipe.batch_size_per_table   -- changes per table per flush (default 1000)
-duckpipe.batch_size_per_group   -- total changes per group per round (default 10000)
-duckpipe.enabled                -- enable/disable worker (default on)
+duckpipe.poll_interval              -- ms between polls (default 1000, min 100)
+duckpipe.batch_size_per_table       -- changes per table per flush (default 1000, min 1)
+duckpipe.batch_size_per_group       -- total changes per group per round (default 10000, min 100)
+duckpipe.enabled                    -- enable/disable worker (default on)
+duckpipe.debug_log                  -- emit critical-path timing logs (default off)
+duckpipe.data_inlining_row_limit   -- max rows to inline in INSERT VALUES (default 0)
 ```
 
 ## Worker Lifecycle
@@ -81,15 +85,19 @@ duckpipe.enabled                -- enable/disable worker (default on)
 ## Test Files
 
 Tests are in `test/regression/sql/` with expected output in `test/regression/expected/`:
+- **auto_start.sql**: Worker auto-start on add_table()
 - **api.sql**: Group/table management API tests
 - **monitoring.sql**: groups()/tables()/status() SRF tests
 - **streaming.sql**: INSERT/UPDATE/DELETE CDC synchronization
 - **snapshot_updates.sql**: Initial copy and concurrent updates
+- **catchup_handoff.sql**: CATCHUP→STREAMING handoff with WAL backlog
 - **multiple_tables.sql**: Multiple tables in same sync group
 - **data_types.sql**: Various PostgreSQL data types
 - **resync.sql**: resync_table() functionality
 - **truncate.sql**: TRUNCATE propagation
+- **stress_append.sql**: Many single-row transactions batched efficiently
 - **premature_catchup.sql**: CATCHUP→STREAMING transition correctness under batch-limited WAL consumption
+- **snapshot_race.sql**: Snapshot race condition proof (concurrent writes during snapshot)
 
 ## PostgreSQL Internals Used
 

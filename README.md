@@ -105,12 +105,15 @@ duckpipe.status() → TABLE(sync_group, source_table, target_table, state, enabl
 
 ## Configuration
 
+All parameters are `PGC_SIGHUP` — change via `ALTER SYSTEM SET` + `SELECT pg_reload_conf()`:
+
 ```sql
-SET duckpipe.poll_interval = 1000;          -- ms between polls
-SET duckpipe.batch_size_per_table = 1000;   -- fairness between tables
-SET duckpipe.batch_size_per_group = 10000;  -- fairness between groups
-SET duckpipe.enabled = on;                  -- enable/disable worker
-SET duckpipe.debug_log = off;               -- emit critical-path timing logs
+ALTER SYSTEM SET duckpipe.poll_interval = 1000;          -- ms between polls (min 100)
+ALTER SYSTEM SET duckpipe.batch_size_per_table = 1000;   -- fairness between tables
+ALTER SYSTEM SET duckpipe.batch_size_per_group = 10000;  -- fairness between groups (min 100)
+ALTER SYSTEM SET duckpipe.enabled = on;                  -- enable/disable worker
+ALTER SYSTEM SET duckpipe.debug_log = off;               -- emit critical-path timing logs
+SELECT pg_reload_conf();
 ```
 
 ## Requirements
@@ -135,7 +138,8 @@ make check-regression TEST=api  # Run a single test
 
 ## Documentation
 
-See [doc/DESIGN.md](doc/DESIGN.md) for technical architecture and design decisions.
+- [doc/DESIGN.md](doc/DESIGN.md) — Technical architecture, protocol details, and remote sync design (Section 16)
+- [doc/STANDALONE_DESIGN.md](doc/STANDALONE_DESIGN.md) — Planned Rust-based standalone CDC engine
 
 ## ETL Comparison Findings (2026-02-10)
 

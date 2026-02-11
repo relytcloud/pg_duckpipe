@@ -741,3 +741,309 @@ SELECT * FROM duckpipe.groups();
 -- Force re-snapshot of a table (truncates target, re-copies)
 SELECT duckpipe.resync_table('public.orders');
 ```
+
+---
+
+## 16. Remote Sync Design (Planned)
+
+### 16.1 Motivation
+
+Current pg_duckpipe syncs heap → DuckLake within a single PostgreSQL instance. Remote sync extends this to replicate from a **remote** PostgreSQL server into local DuckLake tables, enabling:
+
+- **Offload analytics**: OLTP on a dedicated server, OLAP on a separate analytics node with DuckLake
+- **Data consolidation**: Replicate tables from multiple remote PostgreSQL instances into one analytics database
+- **Read replica replacement**: Instead of a full streaming replica, selectively sync specific tables into columnar format
+
+```
+┌──────────────────────┐              ┌──────────────────────────────────┐
+│  Remote PostgreSQL   │              │  Local PostgreSQL + DuckLake     │
+│                      │   network    │                                  │
+│  ┌──────────────┐    │              │  ┌────────────────────────────┐  │
+│  │ Heap Tables  │    │  ─────────►  │  │ DuckLake Tables (OLAP)     │  │
+│  │ (OLTP)       │    │   pgoutput   │  └────────────────────────────┘  │
+│  └──────────────┘    │   binary     │                                  │
+│                      │              │  ┌────────────────────────────┐  │
+│  Replication Slot    │              │  │ pg_duckpipe worker         │  │
+│  Publication         │              │  │ (fetches + decodes + apply)│  │
+│                      │              │  └────────────────────────────┘  │
+└──────────────────────┘              └──────────────────────────────────┘
+```
+
+### 16.2 What Changes (and What Doesn't)
+
+The pgoutput binary wire format is identical regardless of whether the source is local or remote. This means the core decoding, batching, and apply pipeline is reusable without modification.
+
+| Component | Local (current) | Remote | Changes needed |
+|-----------|-----------------|--------|----------------|
+| WAL fetch | `pg_logical_slot_get_binary_changes()` via SPI | `dblink` calling same function on remote | worker.c: swap SPI call for dblink call |
+| Message parsing | `logicalrep_read_*` on binary data | Same — wire format is identical | None (decoder.c unchanged) |
+| Batching | Per-table hash accumulation | Same | None (batch.c unchanged) |
+| Apply | INSERT/DELETE to local DuckLake via SPI | Same — target is always local | None (apply.c unchanged) |
+| Snapshot copy | `INSERT INTO target SELECT * FROM source` (local) | `dblink` or `postgres_fdw` to remote source | worker.c: snapshot copy path |
+| Slot management | Local SQL (`pg_create_logical_replication_slot`) | `dblink` to remote | api.c: group creation |
+| Publication management | Local SQL (`CREATE PUBLICATION`) | Must exist on remote (user-managed or via `dblink`) | api.c or user responsibility |
+| Connection info | None needed | `conninfo` string stored per sync group | Schema + api.c |
+
+### 16.3 Background: dblink
+
+`dblink` is a PostgreSQL contrib module that allows SQL queries against remote PostgreSQL servers from within a local session. It's relevant here because it provides the simplest path to remote WAL consumption.
+
+**Key dblink concepts:**
+
+```sql
+-- Open a persistent named connection (survives across queries in a session)
+SELECT dblink_connect('myconn', 'host=remote port=5432 dbname=prod user=repl');
+
+-- Execute a query on the remote server, returns setof record
+SELECT * FROM dblink('myconn',
+    'SELECT lsn, data FROM pg_logical_slot_get_binary_changes(
+        ''duckpipe_slot'', NULL, 1000,
+        ''proto_version'', ''1'',
+        ''publication_names'', ''duckpipe_pub'')'
+) AS t(lsn pg_lsn, data bytea);
+
+-- Close the connection
+SELECT dblink_disconnect('myconn');
+```
+
+**Why dblink fits pg_duckpipe's architecture:**
+
+1. **Minimal code change**: The current worker calls `pg_logical_slot_get_binary_changes()` via SPI. With dblink, the same SQL runs on the remote server — only the transport changes. The returned `(lsn, data)` rows have the identical schema.
+
+2. **Persistent connections**: `dblink_connect` creates a named connection that persists for the session. The background worker can open one connection per remote group at startup and reuse it across poll rounds, avoiding per-round connection overhead.
+
+3. **No new dependencies**: `dblink` ships with PostgreSQL as a contrib module. It's already available on virtually all PostgreSQL installations. No external libraries or custom protocol handling needed.
+
+4. **Binary data passthrough**: `dblink` returns `bytea` columns faithfully. The pgoutput binary messages pass through the network as-is — the local `logicalrep_read_*` functions parse them exactly as they would for local data.
+
+**dblink vs. postgres_fdw:**
+
+| Aspect | dblink | postgres_fdw |
+|--------|--------|--------------|
+| Query style | Explicit `dblink()` function calls | Transparent via foreign tables |
+| Connection management | Manual (`dblink_connect`/`dblink_disconnect`) | Automatic (cached per session) |
+| Return types | `setof record` (must cast) | Typed foreign tables |
+| Binary data | Works (returns `bytea` as-is) | Works but designed for row access |
+| Overhead | Minimal — direct SQL passthrough | Higher — query planning, FDW API |
+| Use for WAL fetch | Natural fit — same SQL, different server | Awkward — WAL functions aren't tables |
+| Use for snapshot copy | `dblink` + `COPY` or row-at-a-time | Natural fit — `SELECT * FROM foreign_table` |
+
+**Recommendation**: Use `dblink` for WAL fetching (the hot path) and optionally `postgres_fdw` for snapshot copy (one-time bulk data transfer where transparent SQL is convenient).
+
+**dblink limitations to be aware of:**
+
+- **Authentication**: The remote connection string must include credentials or use `.pgpass`/`pg_service.conf`. Storing passwords in `sync_groups` requires encryption or referencing a `pg_foreign_server` with `password_required = false`.
+- **Error handling**: If the remote server disconnects, `dblink` calls raise errors. The worker must catch these and reconnect.
+- **No async streaming**: `dblink` is request-response (polling). For push-based streaming, you'd need libpq's replication protocol directly. But polling matches pg_duckpipe's existing architecture.
+- **Two-phase not needed**: pg_duckpipe doesn't need distributed transactions — it's one-directional replication with idempotent apply.
+
+### 16.4 Approach: dblink Polling (Recommended for V2)
+
+This approach maximizes code reuse. The worker's poll loop stays nearly identical — the only difference is where the SQL executes.
+
+**Current local flow (worker.c):**
+```c
+// SPI call to local server
+appendStringInfo(&query,
+    "SELECT lsn, data FROM pg_logical_slot_get_binary_changes("
+    "%s, NULL, %d, 'proto_version', '1', 'publication_names', %s)",
+    quote_literal_cstr(group->slot_name),
+    duckpipe_batch_size_per_group,
+    quote_literal_cstr(group->publication));
+ret = SPI_execute(query.data, true, 0);
+```
+
+**Remote flow (proposed change):**
+```c
+if (group->conninfo != NULL) {
+    // Remote: wrap the same query in dblink()
+    appendStringInfo(&query,
+        "SELECT * FROM dblink(%s, "
+        "'SELECT lsn, data FROM pg_logical_slot_get_binary_changes("
+        "''" SLOT "'', NULL, %d, "
+        "''proto_version'', ''1'', "
+        "''publication_names'', ''" PUB "'')"
+        "') AS t(lsn pg_lsn, data bytea)",
+        quote_literal_cstr(group->conninfo), ...);
+    ret = SPI_execute(query.data, true, 0);
+} else {
+    // Local: existing path (unchanged)
+    ...
+}
+```
+
+The result set schema is identical: `(lsn pg_lsn, data bytea)`. All downstream code (message copy, decode, batch, apply) is unchanged.
+
+### 16.5 Schema Changes
+
+```sql
+-- Add conninfo column to sync_groups
+ALTER TABLE duckpipe.sync_groups ADD COLUMN conninfo TEXT;
+-- NULL = local sync (current behavior, backward compatible)
+-- Non-NULL = remote sync via dblink
+
+-- Examples:
+-- Local group (default, unchanged):
+--   conninfo = NULL
+
+-- Remote group:
+--   conninfo = 'host=prod-db.internal port=5432 dbname=production user=replicator'
+```
+
+No changes to `table_mappings` — remote vs. local is a group-level property. All tables in a remote group sync from the same remote server.
+
+### 16.6 API Changes
+
+```sql
+-- Extended create_group with optional conninfo
+duckpipe.create_group(
+    name TEXT,
+    publication TEXT DEFAULT NULL,
+    slot_name TEXT DEFAULT NULL,
+    conninfo TEXT DEFAULT NULL          -- NEW: NULL = local, non-NULL = remote
+) RETURNS TEXT
+
+-- Extended add_table for remote sources
+duckpipe.add_table(
+    source_table TEXT,
+    target_table TEXT DEFAULT NULL,
+    sync_group TEXT DEFAULT 'default',
+    copy_data BOOLEAN DEFAULT true
+) RETURNS void
+-- When sync_group has conninfo set:
+--   - Publication must already exist on remote (user-managed)
+--   - Snapshot copy uses dblink to fetch from remote source
+--   - Target table schema derived from remote table via dblink query
+```
+
+**Example usage:**
+
+```sql
+-- Create extension (dblink must also be available)
+CREATE EXTENSION dblink;
+CREATE EXTENSION pg_duckpipe CASCADE;
+
+-- On the REMOTE server (one-time setup by DBA):
+--   CREATE PUBLICATION analytics_pub FOR TABLE orders, customers;
+--   -- Replication slot is created by pg_duckpipe via dblink
+
+-- On the LOCAL analytics server:
+SELECT duckpipe.create_group(
+    'remote_prod',
+    publication := 'analytics_pub',
+    conninfo := 'host=prod-db port=5432 dbname=production user=replicator'
+);
+
+-- Add remote tables (auto-creates local DuckLake targets)
+SELECT duckpipe.add_table('public.orders', sync_group := 'remote_prod');
+SELECT duckpipe.add_table('public.customers', sync_group := 'remote_prod');
+
+-- Query local DuckLake tables for analytics
+SELECT customer_id, sum(amount) FROM orders_ducklake GROUP BY customer_id;
+```
+
+### 16.7 Snapshot Copy for Remote Tables
+
+The snapshot path (`process_snapshot` in worker.c) currently does:
+
+```sql
+INSERT INTO target SELECT * FROM source;
+```
+
+For remote sources, this becomes:
+
+```sql
+-- Option A: dblink (simple, row-at-a-time over network)
+INSERT INTO target
+SELECT * FROM dblink(conninfo,
+    'SELECT * FROM source_schema.source_table'
+) AS t(col1 type1, col2 type2, ...);
+
+-- Option B: postgres_fdw (transparent, bulk transfer)
+-- Requires one-time foreign server + user mapping setup
+CREATE FOREIGN TABLE temp_remote_source (LIKE target)
+    SERVER remote_prod OPTIONS (schema_name 'public', table_name 'orders');
+INSERT INTO target SELECT * FROM temp_remote_source;
+DROP FOREIGN TABLE temp_remote_source;
+
+-- Option C: COPY protocol via libpq (most efficient for bulk)
+-- Remote: COPY source TO STDOUT (BINARY)
+-- Local:  COPY target FROM STDIN (BINARY)
+-- Requires libpq connection, not SPI — more implementation effort
+```
+
+**Recommendation**: Start with Option A (dblink) for simplicity. The column type list can be derived by querying `information_schema.columns` on the remote server via dblink. Optimize to Option C if snapshot copy performance becomes a bottleneck for large tables.
+
+### 16.8 Connection Lifecycle
+
+```
+Worker startup
+    │
+    ▼
+For each remote group:
+    dblink_connect('group_{id}', conninfo)
+    │
+    ▼
+Poll loop (repeated):
+    dblink('group_{id}', 'SELECT ... pg_logical_slot_get_binary_changes(...)')
+    │
+    ▼
+On error / disconnect:
+    dblink_disconnect('group_{id}')
+    dblink_connect('group_{id}', conninfo)   ← reconnect
+    │
+    ▼
+Worker shutdown:
+    dblink_disconnect('group_{id}')
+```
+
+Named connections persist across poll rounds within the worker's session, avoiding per-round TCP handshake and authentication overhead.
+
+### 16.9 Remote Slot and Publication Management
+
+| Operation | Local (current) | Remote |
+|-----------|-----------------|--------|
+| Create slot | `pg_create_logical_replication_slot()` via SPI | `dblink(conninfo, 'SELECT pg_create_logical_replication_slot(...)')` |
+| Drop slot | `pg_drop_replication_slot()` via SPI | `dblink(conninfo, 'SELECT pg_drop_replication_slot(...)')` |
+| Create publication | `CREATE PUBLICATION ... FOR TABLE ...` via SPI | User-managed on remote server |
+| Add table to publication | `ALTER PUBLICATION ... ADD TABLE ...` via SPI | User-managed on remote server |
+
+Publication management on the remote server is left to the DBA because:
+1. It requires DDL privileges on the remote server
+2. The remote server's publication may serve multiple subscribers
+3. Network partitions during DDL create hard-to-recover states
+
+The replication slot, however, is managed by pg_duckpipe because:
+1. It's specific to this subscriber (one slot per sync group)
+2. Slot creation can be done via `dblink` with replication-capable credentials
+3. Slot lifecycle must be tied to group lifecycle (leaked slots cause unbounded WAL retention)
+
+### 16.10 Implementation Phases
+
+**Phase 1: Core remote WAL streaming**
+- Add `conninfo` column to `sync_groups` schema
+- Add `conninfo` parameter to `create_group()`
+- Create/drop replication slot on remote via dblink
+- Worker: branch WAL fetch to use dblink when `conninfo` is set
+- Worker: dblink connection lifecycle (connect, reconnect on error, disconnect)
+- No snapshot support yet — `copy_data=false` only
+
+**Phase 2: Remote snapshot copy**
+- Query remote `information_schema.columns` via dblink for target table creation
+- Snapshot copy via dblink SELECT
+- Temporary replication slot on remote for atomic snapshot + LSN
+- Full SNAPSHOT → CATCHUP → STREAMING state machine for remote tables
+
+**Phase 3: Operational hardening**
+- Connection health monitoring in `duckpipe.groups()` view
+- Credential management (reference `pg_foreign_server` instead of inline conninfo)
+- Configurable connection timeout and retry policy
+- Remote server version compatibility checks
+
+### 16.11 Limitations of Remote Sync
+
+1. **Polling latency**: dblink is request-response. Minimum latency is `poll_interval` + network RTT + query execution. For sub-second latency, consider reducing `poll_interval` but expect higher remote server load.
+2. **No push-based streaming**: True streaming replication (walsender protocol via `START_REPLICATION`) would eliminate polling overhead but requires implementing the full replication protocol client in C with libpq async APIs. This is a possible future optimization (Phase 4+).
+3. **Publication is user-managed**: The DBA must create and maintain the publication on the remote server. pg_duckpipe cannot auto-add tables to a remote publication.
+4. **Network partition handling**: If the remote becomes unreachable, the worker retries on the next poll round. The replication slot on the remote continues to retain WAL. Prolonged outages may cause WAL disk pressure on the remote — monitoring `pg_replication_slots.wal_status` on the remote is the DBA's responsibility.
+5. **No conflict resolution**: Remote sync is one-directional. If the local DuckLake target is modified outside pg_duckpipe, there is no conflict detection.
