@@ -1047,3 +1047,130 @@ The replication slot, however, is managed by pg_duckpipe because:
 3. **Publication is user-managed**: The DBA must create and maintain the publication on the remote server. pg_duckpipe cannot auto-add tables to a remote publication.
 4. **Network partition handling**: If the remote becomes unreachable, the worker retries on the next poll round. The replication slot on the remote continues to retain WAL. Prolonged outages may cause WAL disk pressure on the remote — monitoring `pg_replication_slots.wal_status` on the remote is the DBA's responsibility.
 5. **No conflict resolution**: Remote sync is one-directional. If the local DuckLake target is modified outside pg_duckpipe, there is no conflict detection.
+
+---
+
+## 17. Native UPDATE SQL for TOAST Fix (Planned)
+
+### 17.1 Problem
+
+When an UPDATE doesn't modify a TOASTed column (text/jsonb/bytea > ~2KB), pgoutput sends column status `'u'` (unchanged) with no data payload. The current code in `decoder.c:30-33` converts this to NULL. Since UPDATEs are decomposed into DELETE + INSERT, the INSERT writes NULL for the unchanged column, silently corrupting data.
+
+```
+Source UPDATE: SET small_col = 'new' WHERE id = 1   (big_col unchanged)
+pgoutput:      newtup = {id: 1, small_col: 'new', big_col: status='u'}
+
+Current behavior (broken):
+  DELETE FROM target WHERE id = 1;
+  INSERT INTO target VALUES (1, 'new', NULL);   ← big_col lost!
+```
+
+### 17.2 Fix: Batched UPDATE ... FROM (VALUES ...)
+
+Replace the DELETE + INSERT decomposition with native `UPDATE ... SET` SQL. Unchanged columns are omitted from the SET clause — they keep their current value in the target table.
+
+```sql
+-- Single batched statement for N rows with same changed-column pattern
+UPDATE target AS t
+SET small_col = v.small_col
+FROM (VALUES
+    (1, 'updated_1'),
+    (2, 'updated_2'),
+    (3, 'updated_3')
+) AS v(id, small_col)
+WHERE t.id = v.id;
+-- big_col untouched for all rows
+```
+
+Each row gets its own distinct values via PK join. Efficient for DuckLake — one columnar file rewrite per batch, not per row.
+
+### 17.3 Data Structures
+
+Add `SYNC_CHANGE_UPDATE` to the change type enum and per-column unchanged tracking:
+
+```c
+typedef enum SyncChangeType {
+    SYNC_CHANGE_INSERT,
+    SYNC_CHANGE_UPDATE,   /* Native UPDATE with per-column change tracking */
+    SYNC_CHANGE_DELETE
+} SyncChangeType;
+
+typedef struct SyncChange {
+    SyncChangeType type;
+    XLogRecPtr lsn;
+    List *col_values;    /* All column values (NULL for unchanged TOAST cols) */
+    List *key_values;    /* PK values for UPDATE/DELETE */
+    bool *col_unchanged; /* Per-column flag: true = status 'u' (UPDATE only) */
+    int ncols;           /* Length of col_unchanged array */
+} SyncChange;
+```
+
+### 17.4 Decoder Changes
+
+New helper `tuple_to_list_with_unchanged()`:
+- For status `'u'`: `val_str = NULL`, `unchanged[i] = true`
+- For status `'n'`: `val_str = NULL`, `unchanged[i] = false` (real NULL, changed)
+- For status `'t'`/`'b'`: `val_str = copied_value`, `unchanged[i] = false`
+
+The UPDATE message handler creates a single `SYNC_CHANGE_UPDATE` instead of DELETE + INSERT:
+
+```c
+case LOGICAL_REP_MSG_UPDATE: {
+    ...
+    change->type = SYNC_CHANGE_UPDATE;
+    change->key_values = has_old ? tuple_to_list(&oldtup, rel)
+                                 : extract_key_values(&newtup, rel);
+    change->col_values = tuple_to_list_with_unchanged(&newtup, rel,
+                                                       &change->col_unchanged,
+                                                       &change->ncols);
+    batch_add_change(batches, mapping, change, rel);
+}
+```
+
+### 17.5 Apply: Batched UPDATE Generation
+
+UPDATEs are accumulated and grouped by their `col_unchanged` bitmask pattern. Within a single source `UPDATE ... SET col1=... WHERE ...`, all affected rows have the same changed-column set, so they share one bitmask and batch together naturally.
+
+When the batch is flushed (different pattern encountered, batch full, or end of changes):
+
+```sql
+UPDATE target AS t
+SET col1 = v.col1, col3 = v.col3
+FROM (VALUES
+    (key1, val1_col1, val1_col3),
+    (key2, val2_col1, val2_col3)
+) AS v(pk_col, col1, col3)
+WHERE t.pk_col = v.pk_col;
+```
+
+Flush ordering rules:
+- UPDATE flushes pending INSERTs first (same as DELETE currently does)
+- A different `col_unchanged` pattern flushes the previous UPDATE batch
+- This preserves operation ordering within a table
+
+Edge cases:
+- **All columns unchanged**: skip the UPDATE entirely
+- **PK column updated**: old key in WHERE, new PK value in SET
+- **Multi-column PK**: multiple columns in WHERE join
+
+### 17.6 Files to Modify
+
+| File | Change |
+|------|--------|
+| `src/pg_duckpipe.h` | Add `SYNC_CHANGE_UPDATE`, `col_unchanged`, `ncols` to SyncChange |
+| `src/decoder.c` | Add `tuple_to_list_with_unchanged()`, UPDATE creates SYNC_CHANGE_UPDATE |
+| `src/apply.c` | Batched UPDATE SQL generation with `UPDATE ... FROM (VALUES ...)` |
+| `src/batch.c` | Free `col_unchanged` in `free_change_list()` |
+| `test/regression/sql/toast_unchanged.sql` | Regression test |
+| `test/regression/expected/toast_unchanged.out` | Expected output |
+| `test/regression/schedule` | Add test |
+
+### 17.7 Test Plan
+
+The `toast_unchanged.sql` test:
+1. Create table with text column, add to sync
+2. Insert rows with large text values (>2KB, triggers TOAST)
+3. Wait for sync, verify initial data
+4. Update only the small column (big column → status `'u'` in WAL)
+5. Wait for sync, verify big column preserved (not NULL)
+6. Update the big column itself, verify it changes correctly

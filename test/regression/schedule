@@ -12,6 +12,8 @@ test: data_types
 test: resync
 test: truncate
 test: stress_append
+# TOAST unchanged columns become NULL (bug confirmation test)
+test: toast_unchanged
 # Premature CATCHUP→STREAMING transition (many separate transactions)
 test: premature_catchup
 # Snapshot race condition proof (uses background psql session)

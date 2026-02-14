@@ -6,13 +6,13 @@ PostgreSQL extension for HTAP (Hybrid Transactional/Analytical Processing) synch
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  PostgreSQL                                                  │
-│                                                              │
-│  ┌─────────────┐     automatic      ┌──────────────────┐   │
-│  │ Heap Tables │  ─────sync─────►   │ DuckLake Tables  │   │
-│  │ (OLTP)      │     (CDC)          │ (OLAP)           │   │
-│  └─────────────┘                    └──────────────────┘   │
-│                                                              │
+│  PostgreSQL                                                 │
+│                                                             │
+│  ┌─────────────┐     automatic      ┌──────────────────┐    │
+│  │ Heap Tables │  ─────sync─────►   │ DuckLake Tables  │    │
+│  │ (OLTP)      │     (CDC)          │ (OLAP)           │    │
+│  └─────────────┘                    └──────────────────┘    │
+│                                                             │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -194,13 +194,15 @@ Regression test: `test/regression/sql/premature_catchup.sql` (200 separate trans
 
 ### 4. TOAST Unchanged Columns Become NULL — `decoder.c:30`
 
-**Severity: Medium**
+**Severity: Medium — Planned fix: native batched UPDATE SQL**
 
-When an `UPDATE` doesn't modify a TOASTed column (large text, jsonb, bytea > ~2KB), pgoutput sends status `'u'` (unchanged). The code converts this to NULL. Since UPDATEs are decomposed into `DELETE + INSERT`, the INSERT writes NULL for the unchanged TOAST column, silently corrupting data. Workaround: set `REPLICA IDENTITY FULL` on source tables with TOAST columns.
+When an `UPDATE` doesn't modify a TOASTed column (large text, jsonb, bytea > ~2KB), pgoutput sends status `'u'` (unchanged). The current code converts this to NULL. Since UPDATEs are decomposed into `DELETE + INSERT`, the INSERT writes NULL for the unchanged TOAST column, silently corrupting data. Workaround: set `REPLICA IDENTITY FULL` on source tables with TOAST columns.
+
+**Planned fix:** Replace the DELETE + INSERT decomposition with native `UPDATE ... FROM (VALUES ...)` SQL. Unchanged columns (status `'u'`) are omitted from the SET clause — they keep their current value in the target. UPDATEs are batched by their `col_unchanged` bitmask pattern, producing efficient single-statement updates per batch. See `doc/DESIGN.md` Section 17 for full design.
 
 ## Performance TODOs
 
-- [ ] **Batch DELETEs in `apply_batch`** (`apply.c`): DELETEs are executed one-at-a-time via SPI. For UPDATE-heavy workloads (DELETE+INSERT pairs), this means 2N SPI calls per batch instead of 2. Batch DELETEs into a single `DELETE FROM t WHERE (pk) IN (VALUES ...)` statement.
+- [ ] **Batch DELETEs in `apply_batch`** (`apply.c`): DELETEs are executed one-at-a-time via SPI. Batch DELETEs into a single `DELETE FROM t WHERE (pk) IN (VALUES ...)` statement.
 - [x] **Zero-copy WAL decode** (`worker.c`): The decode loop allocates/copies a StringInfo per message. Point StringInfo directly at the pre-copied `wal_messages[i].data` buffer instead of alloc+copy+free per message.
 - [ ] **Defer `update_table_metrics` to end-of-round** (`batch.c`): Each batch flush does an SPI UPDATE to `table_mappings`. Accumulate deltas and write once at end-of-round to reduce mid-pipeline SPI calls.
 - [x] **Skip poll wait when there is work** (`worker.c`): The worker now loops immediately without sleeping when any group processed changes, instead of always waiting 10ms.
