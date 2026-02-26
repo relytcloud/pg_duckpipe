@@ -22,8 +22,8 @@ pub struct SnapshotResult {
     pub task_id: i32,
     pub source_schema: String,
     pub source_table: String,
-    /// Ok(consistent_point_lsn) on success, Err(message) on failure.
-    pub result: Result<u64, String>,
+    /// Ok((consistent_point_lsn, rows_copied)) on success, Err(message) on failure.
+    pub result: Result<(u64, u64), String>,
 }
 
 /// Process snapshot for a single table with its own connections.
@@ -31,7 +31,7 @@ pub struct SnapshotResult {
 /// Creates a temporary logical replication slot via SQL to get a consistent_point,
 /// exports the transaction snapshot, copies data on a second connection, then cleans up.
 ///
-/// Returns the consistent_point LSN on success.
+/// Returns `(consistent_point_lsn, rows_copied)` on success.
 ///
 /// `task_id` is used to create a unique temporary slot name, allowing
 /// concurrent snapshot tasks for different tables.
@@ -45,7 +45,7 @@ pub async fn process_snapshot_task(
     connstr: &str,
     timing: bool,
     task_id: i32,
-) -> Result<u64, String> {
+) -> Result<(u64, u64), String> {
     let table_start = if timing { Some(Instant::now()) } else { None };
 
     // Step 1: Open control connection — creates temp slot and exports snapshot.
@@ -164,7 +164,7 @@ pub async fn process_snapshot_task(
                 format_lsn(consistent_point)
             );
 
-            client
+            let rows_copied = client
                 .execute(&copy_sql, &[])
                 .await
                 .map_err(|e| format!("INSERT SELECT: {}", e))?;
@@ -174,7 +174,7 @@ pub async fn process_snapshot_task(
                 .await
                 .map_err(|e| format!("COMMIT: {}", e))?;
 
-            Ok::<(), String>(())
+            Ok::<u64, String>(rows_copied)
         }
         .await;
 
@@ -193,18 +193,27 @@ pub async fn process_snapshot_task(
     drop(ctrl_client);
     let _ = ctrl_conn_handle.await;
 
-    copy_result?;
+    let rows_copied = copy_result?;
+
+    tracing::info!(
+        "DuckPipe: Snapshot complete for {}.{}: {} rows copied (consistent_point={})",
+        source_schema,
+        source_table,
+        rows_copied,
+        format_lsn(consistent_point)
+    );
 
     if let Some(start) = table_start {
         tracing::info!(
-            "DuckPipe timing: action=snapshot_table source={}.{} target={}.{} elapsed_ms={:.3}",
+            "DuckPipe timing: action=snapshot_table source={}.{} target={}.{} rows={} elapsed_ms={:.3}",
             source_schema,
             source_table,
             target_schema,
             target_table,
+            rows_copied,
             start.elapsed().as_secs_f64() * 1000.0
         );
     }
 
-    Ok(consistent_point)
+    Ok((consistent_point, rows_copied))
 }

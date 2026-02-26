@@ -714,10 +714,17 @@ async fn process_snapshots(
     for handle in handles {
         match handle.await {
             Ok(snap_result) => match snap_result.result {
-                Ok(snapshot_lsn) => {
+                Ok((snapshot_lsn, rows_copied)) => {
                     meta.set_catchup_state(snap_result.task_id, snapshot_lsn)
                         .await
                         .map_err(|e| format!("set_catchup_state: {}", e))?;
+                    // Credit snapshot rows to rows_synced so the metric reflects all
+                    // data delivered to the target, not just WAL-streamed changes.
+                    if rows_copied > 0 {
+                        let _ = meta
+                            .update_table_metrics(snap_result.task_id, rows_copied as i64)
+                            .await;
+                    }
                 }
                 Err(e) => {
                     let _ = meta

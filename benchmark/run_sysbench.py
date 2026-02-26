@@ -91,6 +91,15 @@ def get_total_lag_bytes(db_params):
     )
     return parse_int(res, 0)
 
+def get_total_queued_changes(db_params):
+    """Return total changes still buffered in flush coordinator queues.
+    A non-zero value means flush threads are still draining — not a true stall."""
+    res = run_sql(
+        db_params,
+        "SELECT COALESCE(total_queued_changes, 0) FROM duckpipe.worker_status()",
+    )
+    return parse_int(res, 0)
+
 def get_benchmark_rows_synced(args, db_params):
     table_filter = ", ".join([f"'public.sbtest{i}'" for i in range(1, args.tables + 1)])
     res = run_sql(
@@ -242,12 +251,15 @@ def benchmark_snapshot(args, db_params):
     # to give the slot a COMMIT at a higher LSN.
     catchup_trigger_sent = False
 
+    prev_snapshot_count = 0
+    prev_snapshot_time = start_time
+
     while True:
-        # Sum of synced rows across all tables (updated by flush workers, not snapshot phase)
+        # rows_synced is credited after snapshot copy completes (includes snapshot rows).
         res = run_sql(db_params, "SELECT sum(rows_synced) FROM duckpipe.status()")
         synced = int(res) if res and res.isdigit() else 0
 
-        # Check actual count in target
+        # Check actual count in target (ground truth while snapshot may still be running)
         target_count = 0
         for i in range(1, args.tables + 1):
              cnt = run_sql(db_params, f"SELECT count(*) FROM public.sbtest{i}_ducklake")
@@ -258,15 +270,21 @@ def benchmark_snapshot(args, db_params):
         state_res = run_sql(db_params, "SELECT count(*) FROM duckpipe.status() WHERE state != 'STREAMING'")
         not_streaming = int(state_res) if state_res and state_res.isdigit() else args.tables
 
-        elapsed = time.time() - start_time
-        rate = target_count / elapsed if elapsed > 0 else 0
+        now = time.time()
+        elapsed = now - start_time
+        interval_secs = now - prev_snapshot_time
+        interval_rate = (target_count - prev_snapshot_count) / interval_secs if interval_secs > 0 else 0
+        prev_snapshot_count = target_count
+        prev_snapshot_time = now
 
-        sys.stdout.write(f"\r    Synced(View): {synced} | Actual: {target_count}/{total_rows} | Pending: {not_streaming} | Rate: {rate:.0f} rows/s | Time: {elapsed:.1f}s")
+        sys.stdout.write(f"\r    rows_synced: {synced:,} | Actual: {target_count:,}/{total_rows:,} | Pending: {not_streaming} | Rate: {interval_rate:.0f} rows/s | Time: {elapsed:.1f}s")
         sys.stdout.flush()
 
         if target_count >= total_rows and not_streaming == 0:
+            elapsed = time.time() - start_time
+            snapshot_rate = target_count / elapsed if elapsed > 0 else 0
             print(f"\n[+] Snapshot complete!")
-            return rate
+            return snapshot_rate
 
         # If all rows are physically copied but tables are stuck in CATCHUP (no SNAPSHOT
         # remaining), nudge the WAL consumer by emitting a transactional logical message.
@@ -376,6 +394,7 @@ def benchmark_streaming(args, db_params):
     final_lag = get_total_lag_bytes(db_params)
     prev_final_lag = final_lag
     prev_count = catchup_start_count
+    prev_interval_time = catchup_start_time
 
     # Stall limit: 30 × 2s = 60s with no progress.
     # Must be > poll_interval (default 10s) so we don't give up between flush cycles.
@@ -395,18 +414,22 @@ def benchmark_streaming(args, db_params):
             if cnt and cnt.isdigit():
                 current_count += int(cnt)
 
+        now = time.time()
         final_lag = get_total_lag_bytes(db_params)
+        queued_changes = get_total_queued_changes(db_params)
         count_increasing = current_count > prev_count
         lag_decreasing = final_lag < prev_final_lag
+        flush_draining = queued_changes > 0
 
         # Primary termination: target count reached expected (oltp_insert only).
         if expected_final_count is not None and current_count >= expected_final_count:
             actual_final_count = current_count
             break
 
-        # Progress display.
-        catchup_so_far = time.time() - catchup_start_time
-        catchup_rate = (current_count - catchup_start_count) / catchup_so_far if catchup_so_far > 0 else 0
+        # Progress display — windowed rate (rows added since last interval) so the
+        # rate drops to 0 during stalls rather than showing a misleading falling average.
+        interval_secs = now - prev_interval_time
+        interval_rate = (current_count - prev_count) / interval_secs if interval_secs > 0 else 0
         lag_mb = final_lag / 1024 / 1024
         lag_trend = '▼' if lag_decreasing else ('▲' if final_lag > prev_final_lag else '–')
         if expected_final_count:
@@ -414,13 +437,17 @@ def benchmark_streaming(args, db_params):
             count_str = f"{current_count:,}/{expected_final_count:,} ({pct})"
         else:
             count_str = f"{current_count:,}"
+        queued_str = f" queued={queued_changes:,}" if queued_changes > 0 else ""
         sys.stdout.write(
-            f"\r    Catch-up: {count_str} | {catchup_rate:.0f} rows/s | lag={lag_mb:.1f}MB {lag_trend}  "
+            f"\r    Catch-up: {count_str} | {interval_rate:.0f} rows/s | lag={lag_mb:.1f}MB {lag_trend}{queued_str}  "
         )
         sys.stdout.flush()
 
-        # Secondary: stall detection — no rows delivered AND lag not decreasing.
-        if not count_increasing and not lag_decreasing:
+        # Secondary: stall detection — no rows delivered, lag not decreasing, AND
+        # flush coordinator has nothing queued (i.e., flush threads are idle).
+        # Checking queued_changes prevents declaring a stall while the flush thread
+        # is still draining a large batch that hasn't committed to DuckLake yet.
+        if not count_increasing and not lag_decreasing and not flush_draining:
             stall_count += 1
             if stall_count >= stall_limit:
                 actual_final_count = current_count
@@ -430,6 +457,7 @@ def benchmark_streaming(args, db_params):
 
         prev_final_lag = final_lag
         prev_count = current_count
+        prev_interval_time = now
         actual_final_count = current_count
 
     catchup_elapsed = time.time() - catchup_start_time
@@ -472,7 +500,9 @@ def benchmark_streaming(args, db_params):
     for line in stdout.split('\n'):
         if "transactions:" in line or "latency" in line:
             print(f"    {line.strip()}")
-    print(f"    lag(avg/peak/final): {avg_lag/1024/1024:.1f}MB / {max_lag/1024/1024:.1f}MB / {final_lag/1024/1024:.1f}MB")
+    # Note: final lag includes non-DML WAL (checkpoints, autovacuum) that accumulated
+    # after OLTP ended — it is NOT a data-consistency indicator.
+    print(f"    lag(avg/peak): {avg_lag/1024/1024:.1f}MB / {max_lag/1024/1024:.1f}MB  [during OLTP]")
     print(f"    catch-up: {actual_final_count:,} rows in {catchup_elapsed:.1f}s ({catchup_throughput:.0f} rows/s)")
     if expected_final_count is not None:
         oltp_rows = actual_final_count - args.table_size * args.tables
@@ -556,8 +586,8 @@ def main():
     print("===========================================================")
     print(f" Snapshot Throughput  : {snapshot_rate:.0f} rows/sec")
     print(f" OLTP Throughput      : {streaming_tps:.2f} TPS")
-    print(f" Avg Replication Lag  : {avg_lag/1024/1024:.1f} MB")
-    print(f" Peak Replication Lag : {max_lag/1024/1024:.1f} MB")
+    print(f" Avg Replication Lag  : {avg_lag/1024/1024:.1f} MB  [during OLTP]")
+    print(f" Peak Replication Lag : {max_lag/1024/1024:.1f} MB  [during OLTP]")
     print(f" Catch-up Time        : {catchup_elapsed:.1f} sec")
     print(f" Catch-up Throughput  : {catchup_throughput:.0f} rows/sec")
     if expected_final_count is not None:

@@ -38,18 +38,30 @@
 - [ ] Flush thread pool — currently 1 OS thread + 1 tokio runtime + 1 DuckDB connection per table; for 50+ tables, a fixed-size thread pool would be more efficient
 - [ ] Batch compaction tuning — explore DuckLake-level compaction to reduce Parquet file proliferation under sustained small-batch writes
 - [ ] Inline data flush
-- [ ] benchmark and identify bottleneck
+- [x] benchmark and identify bottleneck (see benchmark findings below)
+- [ ] **confirmed_lsn resets to 0 on table re-add** — when a CATCHUP table with NULL applied_lsn is added to an existing group, `get_min_applied_lsn()` returns 0, forcing WAL slot to replay from the slot's restart_lsn (DB creation). Fix: use `snapshot_lsn` as the effective floor for CATCHUP tables with NULL applied_lsn so confirmed_lsn doesn't regress to 0.
 
 #### Features
 - [ ] `source_uri` column for pg_mooncake compatibility
 - [ ] `conninfo` column in sync_groups for remote PG support
 - [ ] Schema DDL sync (ALTER TABLE ADD/DROP COLUMN propagation)
 
+#### Monitoring / Observability
+- [x] `rows_synced` = 0 during snapshot — snapshot row count not credited to `rows_synced`; fixed by returning row count from `process_snapshot_task()` and calling `update_table_metrics()` after `set_catchup_state()`
+- [ ] `applied_lsn` stays NULL during SNAPSHOT/CATCHUP until first WAL flush — should be set to `snapshot_lsn` after snapshot completes
+- [ ] No per-table accumulator visibility — operators cannot see how many changes are buffered per-table (only aggregate `total_queued_changes`)
+- [ ] `worker_state` not updated during snapshot processing — stale `total_queued_changes`/`is_backpressured` while snapshots run
+
 #### Robustness
+- [ ] Snapshot failures have no retry backoff — unlike ERRORED flush state (30s×2^n backoff), snapshot failures retry on every cycle immediately; risk of thrash on repeated failures
 - [ ] Graceful handling of DuckLake schema drift (target table altered outside duckpipe)
 - [ ] Connection pooling for flush thread PG metadata updates (currently short-lived connections per flush)
 - [x] Standardize logging: shared `init_subscriber`, all `eprintln!` replaced with `tracing` macros
 - [ ] regressions / tests for crash / error cases
+
+#### Benchmark Script
+- [x] Catch-up rate displayed as cumulative average (falls during stalls, misleading) — fixed to windowed per-interval rate
+- [x] Final `lag_bytes` misleading after OLTP — WAL keeps advancing from checkpoints/autovacuum, lag stays large even when all DML is applied; fixed summary output to clarify
 
 ### Phase 7: Standardized Logging
 - `duckpipe-core/src/log.rs` (new) — `init_subscriber(debug: bool)`: shared tracing-subscriber setup; `RUST_LOG` overrides the default filter
