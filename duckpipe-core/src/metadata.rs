@@ -405,6 +405,39 @@ impl<'a> MetadataClient<'a> {
         Ok(min_lsn_str.map(|s| parse_lsn(&s)).unwrap_or(0))
     }
 
+    /// Get (mapping_id, applied_lsn) for all enabled STREAMING/CATCHUP tables in a group.
+    ///
+    /// Used to seed the coordinator's `per_table_lsn` at the start of each cycle so that
+    /// CATCHUP tables with no WAL changes are still visible for confirmed_lsn computation.
+    /// Returns applied_lsn = 0 for tables with NULL applied_lsn.
+    pub async fn get_active_table_lsns(
+        &self,
+        group_id: i32,
+    ) -> Result<Vec<(i32, u64)>, tokio_postgres::Error> {
+        let rows = self
+            .client
+            .query(
+                "SELECT id, applied_lsn::text \
+                 FROM duckpipe.table_mappings \
+                 WHERE group_id = $1 AND enabled = true \
+                 AND state IN ('STREAMING', 'CATCHUP')",
+                &[&group_id],
+            )
+            .await?;
+
+        Ok(rows
+            .iter()
+            .map(|row| {
+                let id: i32 = row.get(0);
+                let applied_lsn: u64 = row
+                    .get::<_, Option<String>>(1)
+                    .map(|s| parse_lsn(&s))
+                    .unwrap_or(0);
+                (id, applied_lsn)
+            })
+            .collect())
+    }
+
     /// Update confirmed_lsn and last_sync_at for a sync group.
     pub async fn update_confirmed_lsn(
         &self,

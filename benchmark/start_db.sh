@@ -35,8 +35,12 @@ unix_socket_directories = '/tmp'
 log_min_messages = warning
 duckdb.unsafe_allow_mixed_transactions=on
 duckpipe.debug_log=on
-duckpipe.batch_size_per_table=10000
+duckpipe.flush_batch_threshold=10000
 duckpipe.data_inlining_row_limit=100000
+# Longer poll cycle so WAL scan overhead doesn't crowd out data delivery.
+# Each cycle gets poll_interval/2 ms to read WAL; with large backlogs the server
+# needs several hundred ms just to scan past restart_lsn before it can stream new data.
+duckpipe.poll_interval=10000
 EOF
 
 # Start each benchmark run with a fresh log file to avoid mixing old failures.
@@ -55,9 +59,18 @@ for i in {1..10}; do
     sleep 1
 done
 
+# The bgworker connects back via the replication protocol using the OS user ($USER).
+# Create that role as superuser so the WAL streaming connection succeeds.
+OS_USER=$(whoami)
+if [ "$OS_USER" != "postgres" ]; then
+    echo "[-] Creating OS user role '$OS_USER'..."
+    "$PG_BIN/psql" -h localhost -p $PORT -U postgres \
+        -c "CREATE USER \"$OS_USER\" SUPERUSER;" 2>/dev/null || true
+fi
+
 echo "[+] Database started!"
 echo "    Port: $PORT"
-echo "    User: postgres"
+echo "    User: postgres (OS user '$OS_USER' also created)"
 echo "    Log:  $LOG_FILE"
 echo ""
 echo "Run benchmark:"

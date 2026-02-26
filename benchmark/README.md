@@ -21,8 +21,8 @@ This directory contains a benchmark suite for `pg_duckpipe` utilizing `sysbench`
     ./start_db.sh
     ```
     This creates a new data directory `bench_data` and starts Postgres on port 5556.
-    The benchmark config also sets conservative DuckPipe batch sizes to improve
-    apply visibility during correctness checks.
+    The benchmark config sets `duckpipe.flush_batch_threshold=10000` for
+    conservative flush sizing to improve apply visibility during correctness checks.
 
 2.  **Run Benchmark**:
     ```bash

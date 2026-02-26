@@ -9,6 +9,7 @@ check-regression:
 	--temp-instance=./tmp_check \
 	--temp-config regression.conf \
 	--port=5555 \
+	--encoding=UTF8 \
 	--load-extension=pg_duckdb \
 	--load-extension=pg_duckpipe \
 	$(if $(TEST),$(TEST),--schedule=schedule)

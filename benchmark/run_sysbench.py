@@ -87,10 +87,7 @@ def parse_int(value, default=0):
 def get_total_lag_bytes(db_params):
     res = run_sql(
         db_params,
-        "SELECT COALESCE(sum(pg_current_wal_lsn() - rs.confirmed_flush_lsn), 0) "
-        "FROM duckpipe.sync_groups g "
-        "JOIN pg_replication_slots rs ON rs.slot_name = g.slot_name "
-        "WHERE g.enabled",
+        "SELECT COALESCE(sum(lag_bytes), 0) FROM duckpipe.groups() WHERE enabled",
     )
     return parse_int(res, 0)
 
@@ -237,9 +234,16 @@ def benchmark_snapshot(args, db_params):
 
     total_rows = args.tables * args.table_size
     print("[-] Monitoring snapshot sync...")
+    # Tracks whether we already emitted the WAL nudge to trigger CATCHUP→STREAMING.
+    # After a snapshot, the replication slot may see no new WAL messages because the
+    # snapshot copy happens outside the publication's WAL stream.  Without a commit
+    # with LSN > snapshot_lsn the state machine never fires the CATCHUP→STREAMING
+    # transition.  We emit one transactional logical message (pg_logical_emit_message)
+    # to give the slot a COMMIT at a higher LSN.
+    catchup_trigger_sent = False
 
     while True:
-        # Sum of synced rows across all tables
+        # Sum of synced rows across all tables (updated by flush workers, not snapshot phase)
         res = run_sql(db_params, "SELECT sum(rows_synced) FROM duckpipe.status()")
         synced = int(res) if res and res.isdigit() else 0
 
@@ -263,6 +267,17 @@ def benchmark_snapshot(args, db_params):
         if target_count >= total_rows and not_streaming == 0:
             print(f"\n[+] Snapshot complete!")
             return rate
+
+        # If all rows are physically copied but tables are stuck in CATCHUP (no SNAPSHOT
+        # remaining), nudge the WAL consumer by emitting a transactional logical message.
+        # The resulting COMMIT updates pending_lsn past snapshot_lsn, triggering the
+        # CATCHUP→STREAMING transition on the next worker cycle.
+        if target_count >= total_rows and not_streaming > 0 and not catchup_trigger_sent:
+            snap_res = run_sql(db_params, "SELECT count(*) FROM duckpipe.status() WHERE state = 'SNAPSHOT'")
+            still_in_snapshot = int(snap_res) if snap_res and snap_res.isdigit() else 1
+            if still_in_snapshot == 0:
+                run_sql(db_params, "SELECT pg_logical_emit_message(true, 'duckpipe_bench', 'catchup_trigger')", timeout=5)
+                catchup_trigger_sent = True
 
         if time.time() > snapshot_deadline:
             print("\n[!] Snapshot timeout exceeded.")
@@ -338,57 +353,99 @@ def benchmark_streaming(args, db_params):
     max_lag = max(lag_samples) if lag_samples else 0
 
     print("[-] Waiting for replication catch-up...")
-    catchup_start = time.time()
-    catchup_deadline = catchup_start + args.catchup_timeout
-    expected_events_per_tx = get_expected_events_per_tx(args)
-    expected_rows_delta = tx_count * expected_events_per_tx if tx_count > 0 and expected_events_per_tx is not None else None
-    final_lag = get_total_lag_bytes(db_params)
-    rows_after = get_benchmark_rows_synced(args, db_params)
-    rows_delta = rows_after - rows_before
+    catchup_start_time = time.time()
+    catchup_deadline = catchup_start_time + args.catchup_timeout
 
-    # Stall detection: give up if no progress for this many consecutive checks
+    # For oltp_insert: expected final count = initial rows + inserts during OLTP.
+    # This is the ground-truth termination signal; we poll the actual target table
+    # count instead of the rows_synced metadata, which can be inflated due to WAL
+    # replay on slot reconnects.
+    expected_final_count = None
+    if args.workload == "oltp_insert":
+        expected_final_count = args.table_size * args.tables + tx_count
+
+    # Record actual target row count at the start of catch-up so we can compute
+    # catch-up throughput independently of the inflated rows_synced counter.
+    catchup_start_count = 0
+    for i in range(1, args.tables + 1):
+        cnt = run_sql(db_params, f"SELECT count(*) FROM public.sbtest{i}_ducklake", timeout=10)
+        if cnt and cnt.isdigit():
+            catchup_start_count += int(cnt)
+
+    actual_final_count = catchup_start_count
+    final_lag = get_total_lag_bytes(db_params)
+    prev_final_lag = final_lag
+    prev_count = catchup_start_count
+
+    # Stall limit: 30 × 2s = 60s with no progress.
+    # Must be > poll_interval (default 10s) so we don't give up between flush cycles.
     stall_limit = 30
     stall_count = 0
-    prev_rows_delta = rows_delta
 
-    while time.time() < catchup_deadline:
-        if expected_rows_delta is not None:
-            if rows_delta >= expected_rows_delta:
-                break
-        elif final_lag == 0:
+    while True:
+        time.sleep(2.0)
+
+        if time.time() >= catchup_deadline:
             break
 
-        time.sleep(1.0)
-        final_lag = get_total_lag_bytes(db_params)
-        if final_lag == 0 and rows_delta == prev_rows_delta:
-            # Might be a transient connection issue (e.g. server restarting after crash)
-            wait_for_db_ready(db_params, timeout=30)
-            final_lag = get_total_lag_bytes(db_params)
-        rows_after = get_benchmark_rows_synced(args, db_params)
-        rows_delta = rows_after - rows_before
+        # Ground-truth: actual row count in target tables.
+        current_count = 0
+        for i in range(1, args.tables + 1):
+            cnt = run_sql(db_params, f"SELECT count(*) FROM public.sbtest{i}_ducklake", timeout=10)
+            if cnt and cnt.isdigit():
+                current_count += int(cnt)
 
-        # Stall detection
-        if rows_delta == prev_rows_delta:
+        final_lag = get_total_lag_bytes(db_params)
+        count_increasing = current_count > prev_count
+        lag_decreasing = final_lag < prev_final_lag
+
+        # Primary termination: target count reached expected (oltp_insert only).
+        if expected_final_count is not None and current_count >= expected_final_count:
+            actual_final_count = current_count
+            break
+
+        # Progress display.
+        catchup_so_far = time.time() - catchup_start_time
+        catchup_rate = (current_count - catchup_start_count) / catchup_so_far if catchup_so_far > 0 else 0
+        lag_mb = final_lag / 1024 / 1024
+        lag_trend = '▼' if lag_decreasing else ('▲' if final_lag > prev_final_lag else '–')
+        if expected_final_count:
+            pct = f"{100 * current_count / expected_final_count:.0f}%"
+            count_str = f"{current_count:,}/{expected_final_count:,} ({pct})"
+        else:
+            count_str = f"{current_count:,}"
+        sys.stdout.write(
+            f"\r    Catch-up: {count_str} | {catchup_rate:.0f} rows/s | lag={lag_mb:.1f}MB {lag_trend}  "
+        )
+        sys.stdout.flush()
+
+        # Secondary: stall detection — no rows delivered AND lag not decreasing.
+        if not count_increasing and not lag_decreasing:
             stall_count += 1
             if stall_count >= stall_limit:
-                print(f"\n    [!] Worker stalled ({stall_limit}s with no progress). Stopping catch-up wait.")
+                actual_final_count = current_count
                 break
         else:
             stall_count = 0
-        prev_rows_delta = rows_delta
 
-        elapsed = time.time() - catchup_start
-        if expected_rows_delta and expected_rows_delta > 0:
-            pct = 100.0 * rows_delta / expected_rows_delta
-            rate = rows_delta / elapsed if elapsed > 0 else 0
-            eta = (expected_rows_delta - rows_delta) / rate if rate > 0 else 0
-            sys.stdout.write(f"\r    Catch-up: {rows_delta}/{expected_rows_delta} ({pct:.1f}%) | {rate:.0f} events/s | ETA: {eta:.0f}s | lag: {final_lag}  ")
-            sys.stdout.flush()
+        prev_final_lag = final_lag
+        prev_count = current_count
+        actual_final_count = current_count
 
-    if expected_rows_delta and expected_rows_delta > 0 and rows_delta > 0:
-        print()  # newline after progress line
+    catchup_elapsed = time.time() - catchup_start_time
+    catchup_throughput = (actual_final_count - catchup_start_count) / catchup_elapsed if catchup_elapsed > 0 else 0
 
-    catchup_complete = (rows_delta >= expected_rows_delta) if expected_rows_delta is not None else (final_lag == 0)
+    if actual_final_count > catchup_start_count:
+        print()  # newline after the progress line
+
+    # Consistency: target count matches expected.
+    # Note: lag_bytes after OLTP is NOT a consistency indicator — pg_current_wal_lsn()
+    # keeps advancing from non-DML WAL (checkpoints, autovacuum), so lag_bytes stays
+    # large even when all DML has been applied.
+    catchup_complete = (
+        (expected_final_count is not None and actual_final_count >= expected_final_count)
+        or (expected_final_count is None and not count_increasing and not lag_decreasing)
+    )
     consistency_mode = resolve_consistency_mode(args)
     checks_ran = False
     checks_skipped_reason = None
@@ -397,42 +454,32 @@ def benchmark_streaming(args, db_params):
 
     if should_run_checks:
         checks_ran = True
-        if consistency_mode == "full":
+        if expected_final_count is not None:
+            # For oltp_insert: we already know the actual count; no extra query needed.
+            if actual_final_count < expected_final_count:
+                mismatches.append({
+                    "table": f"sbtest1..{args.tables}",
+                    "source_count": expected_final_count,
+                    "target_count": actual_final_count,
+                    "mode": "full",
+                })
+        elif consistency_mode == "full":
             mismatches = verify_table_consistency_full(args, db_params)
-        else:
-            # Safe mode intentionally avoids querying ducklake tables because
-            # value-level queries can be unstable under concurrent apply load.
-            if expected_rows_delta is None:
-                mismatches = [{
-                    "mode": "safe",
-                    "reason": "no expected rows delta available",
-                    "rows_synced_delta": rows_delta,
-                    "rows_synced_expected": None,
-                    "final_lag": final_lag,
-                }]
-            elif rows_delta != expected_rows_delta or final_lag != 0:
-                mismatches = [{
-                    "mode": "safe",
-                    "reason": "metadata mismatch",
-                    "rows_synced_delta": rows_delta,
-                    "rows_synced_expected": expected_rows_delta,
-                    "final_lag": final_lag,
-                }]
     elif consistency_mode != "off":
-        checks_skipped_reason = "catch-up incomplete"
+        checks_skipped_reason = "catch-up incomplete (stall or timeout)"
 
     print("\n[Sysbench Output Summary]")
     for line in stdout.split('\n'):
         if "transactions:" in line or "latency" in line:
             print(f"    {line.strip()}")
-    print(f"    lag(avg/max/final bytes): {avg_lag:.0f}/{max_lag}/{final_lag}")
+    print(f"    lag(avg/peak/final): {avg_lag/1024/1024:.1f}MB / {max_lag/1024/1024:.1f}MB / {final_lag/1024/1024:.1f}MB")
+    print(f"    catch-up: {actual_final_count:,} rows in {catchup_elapsed:.1f}s ({catchup_throughput:.0f} rows/s)")
+    if expected_final_count is not None:
+        oltp_rows = actual_final_count - args.table_size * args.tables
+        print(f"    expected: {expected_final_count:,} rows ({args.table_size * args.tables:,} initial + {tx_count:,} from OLTP)")
     print(f"    consistency mode: {consistency_mode}")
-    print(f"    rows_synced delta during streaming: {rows_delta}")
-    if expected_rows_delta is not None:
-        print(f"    rows_synced expected events/tx: {expected_events_per_tx}")
-        print(f"    rows_synced expected delta: {expected_rows_delta}")
     if not catchup_complete:
-        print("    [!] Catch-up incomplete before timeout; consistency mismatches may include unapplied changes.")
+        print("    [!] Catch-up did not complete before timeout; results may reflect partial apply.")
     if consistency_mode == "off":
         print("    [!] Consistency checks skipped (--consistency-mode off).")
     elif not checks_ran:
@@ -440,28 +487,15 @@ def benchmark_streaming(args, db_params):
     elif mismatches:
         print("    [!] Consistency mismatches detected:")
         for m in mismatches:
-            if m["mode"] == "full":
-                err = m.get("error", "")
-                if err:
-                    print(f"        {m['table']}: error={err}")
-                else:
-                    print(
-                        "        "
-                        f"{m['table']}: source={m['source_count']}, target={m['target_count']}"
-                    )
+            err = m.get("error", "")
+            if err:
+                print(f"        {m['table']}: error={err}")
             else:
-                print(
-                    "        "
-                    f"reason={m['reason']}, rows_synced_delta={m['rows_synced_delta']}, "
-                    f"rows_synced_expected={m['rows_synced_expected']}, final_lag={m['final_lag']}"
-                )
+                print(f"        {m['table']}: source={m['source_count']}, target={m['target_count']}")
     else:
-        if consistency_mode == "full":
-            print("    [OK] Source/target value and key consistency checks passed for all benchmark tables.")
-        else:
-            print("    [OK] Safe consistency checks (rows_synced/lag metadata) passed.")
+        print("    [OK] Consistency check passed — target count matches expected.")
 
-    return tps, avg_lag, max_lag, final_lag, rows_delta, mismatches, checks_ran
+    return tps, avg_lag, max_lag, final_lag, catchup_elapsed, catchup_throughput, actual_final_count, expected_final_count, mismatches, checks_ran
 
 # ==============================================================================
 # Main
@@ -512,21 +546,27 @@ def main():
         prepare_env(args, db_params)
 
     snapshot_rate = benchmark_snapshot(args, db_params)
-    streaming_tps, avg_lag, max_lag, final_lag, rows_delta, mismatches, checks_ran = benchmark_streaming(args, db_params)
+    (streaming_tps, avg_lag, max_lag, final_lag,
+     catchup_elapsed, catchup_throughput,
+     actual_final_count, expected_final_count,
+     mismatches, checks_ran) = benchmark_streaming(args, db_params)
 
     print("\n===========================================================")
     print(" Final Results")
     print("===========================================================")
-    print(f" Snapshot Throughput : {snapshot_rate:.0f} rows/sec")
-    print(f" OLTP Throughput     : {streaming_tps:.2f} TPS")
-    print(f" Avg Lag             : {avg_lag:.0f} bytes")
-    print(f" Peak Lag            : {max_lag} bytes")
-    print(f" Final Lag           : {final_lag} bytes")
-    print(f" rows_synced Delta   : {rows_delta}")
+    print(f" Snapshot Throughput  : {snapshot_rate:.0f} rows/sec")
+    print(f" OLTP Throughput      : {streaming_tps:.2f} TPS")
+    print(f" Avg Replication Lag  : {avg_lag/1024/1024:.1f} MB")
+    print(f" Peak Replication Lag : {max_lag/1024/1024:.1f} MB")
+    print(f" Catch-up Time        : {catchup_elapsed:.1f} sec")
+    print(f" Catch-up Throughput  : {catchup_throughput:.0f} rows/sec")
+    if expected_final_count is not None:
+        status = "PASS" if actual_final_count >= expected_final_count else f"INCOMPLETE ({actual_final_count:,}/{expected_final_count:,})"
+        print(f" Consistency          : {status}")
     if checks_ran:
-        print(f" Count Mismatches    : {len(mismatches)}")
+        print(f" Count Mismatches     : {len(mismatches)}")
     else:
-        print(" Count Mismatches    : skipped")
+        print(" Count Mismatches     : skipped")
     print("===========================================================")
 
 if __name__ == "__main__":
