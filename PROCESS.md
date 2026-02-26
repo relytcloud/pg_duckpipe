@@ -37,6 +37,8 @@
 #### Performance / Scalability
 - [ ] Flush thread pool — currently 1 OS thread + 1 tokio runtime + 1 DuckDB connection per table; for 50+ tables, a fixed-size thread pool would be more efficient
 - [ ] Batch compaction tuning — explore DuckLake-level compaction to reduce Parquet file proliferation under sustained small-batch writes
+- [ ] Inline data flush
+- [ ] benchmark and identify bottleneck
 
 #### Features
 - [ ] `source_uri` column for pg_mooncake compatibility
@@ -46,6 +48,8 @@
 #### Robustness
 - [ ] Graceful handling of DuckLake schema drift (target table altered outside duckpipe)
 - [ ] Connection pooling for flush thread PG metadata updates (currently short-lived connections per flush)
+- [ ] reognanize logging with global setup and control (e.g., format, log level)
+- [ ] regressions / tests for crash / error cases
 
 ---
 

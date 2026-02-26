@@ -8,7 +8,7 @@
 //! 4. Backpressure: WAL consumption pauses when total queued changes exceed threshold
 
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tokio_postgres::Client;
 
@@ -41,6 +41,14 @@ pub struct ServiceConfig {
     pub max_queued_changes: i32,
 }
 
+/// How often the per-slot relation cache refreshes `enabled` (and `state`) from PG.
+///
+/// `state` transitions initiated by the service itself are mirrored in-place
+/// immediately, so this interval only needs to catch external changes — e.g. a
+/// user toggling `enabled` via direct SQL.  30 s gives responsive behaviour
+/// without adding per-round metadata queries.
+const ENABLED_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+
 /// Result of processing one sync group round.
 pub struct ProcessResult {
     pub total_processed: i32,
@@ -64,6 +72,8 @@ struct RelCacheWithMapping {
 pub struct SlotState {
     pub consumer: SlotConsumer,
     rel_cache: HashMap<u32, RelCacheWithMapping>,
+    /// When the cache last did a periodic refresh of `enabled`/`state` from PG.
+    last_enabled_check: Instant,
 }
 
 /// Helper: ensure a coordinator queue exists for a target table, loading metadata if needed.
@@ -458,8 +468,16 @@ async fn process_wal_messages(
     // flush threads commit applied_lsn to PG *before* sending the mpsc result,
     // so any Success result here means PG is already up-to-date for that table.
     for r in &coordinator.collect_results() {
-        if let FlushThreadResult::Error { target_key, error, .. } = r {
+        if let FlushThreadResult::Error { target_key, error, mapping_id, .. } = r {
             eprintln!("pg_duckpipe: flush error for {}: {}", target_key, error);
+            // Invalidate the cached mapping so the next WAL event for this table
+            // re-fetches state from PG — it may have transitioned to ERRORED.
+            for cached in rel_cache.values_mut() {
+                if cached.mapping.as_ref().map_or(false, |m| &m.id == mapping_id) {
+                    cached.mapping = None;
+                    break;
+                }
+            }
         }
     }
 
@@ -476,6 +494,16 @@ async fn process_wal_messages(
                     "pg_duckpipe: auto-retrying errored table {}.{}",
                     table.source_schema, table.source_table
                 );
+                // Mirror ERRORED → STREAMING in the rel_cache so routing resumes
+                // immediately without waiting for the next periodic refresh.
+                for cached in rel_cache.values_mut() {
+                    if let Some(ref mut mapping) = cached.mapping {
+                        if mapping.id == table.id {
+                            mapping.state = "STREAMING".to_string();
+                            break;
+                        }
+                    }
+                }
             }
         }
     }
@@ -485,6 +513,19 @@ async fn process_wal_messages(
         meta.transition_catchup_to_streaming(group.id, group.pending_lsn)
             .await
             .map_err(|e| format!("transition_catchup: {}", e))?;
+
+        // Mirror the transition in the rel_cache so routing reflects the new state
+        // immediately without waiting for the next periodic refresh.
+        for cached in rel_cache.values_mut() {
+            if let Some(ref mut mapping) = cached.mapping {
+                if mapping.state == "CATCHUP"
+                    && mapping.snapshot_lsn != 0
+                    && mapping.snapshot_lsn <= group.pending_lsn
+                {
+                    mapping.state = "STREAMING".to_string();
+                }
+            }
+        }
     }
 
     // Update confirmed_lsn using the in-memory per-table LSN state for crash-safe slot
@@ -713,6 +754,7 @@ pub async fn run_sync_cycle(
     consumers: &mut HashMap<String, SlotState>,
 ) -> Result<bool, String> {
     // Establish metadata connection (short-lived per cycle)
+    // TODO tls mode
     let (client, connection) = tokio_postgres::connect(&config.connstr, tokio_postgres::NoTls)
         .await
         .map_err(|e| format!("connect: {}", e))?;
@@ -745,10 +787,12 @@ pub async fn run_sync_cycle(
             coordinator.seed_table_lsns(&active_lsns);
         }
 
-        // Drain any flush results that arrived since the last cycle.  This updates
-        // per_table_lsn (flushed state) and logs errors.  Done before both the
-        // confirmed_lsn persistence step and the slot connection.
-        for r in &coordinator.collect_results() {
+        // Drain flush results from the previous cycle.  This updates per_table_lsn
+        // (flushed state) and logs errors.  Done before both the confirmed_lsn
+        // persistence step and the slot connection.  Results are saved so we can
+        // later do targeted rel_cache invalidation for errored mappings.
+        let prev_results = coordinator.collect_results();
+        for r in &prev_results {
             if let FlushThreadResult::Error { target_key, error, .. } = r {
                 eprintln!("pg_duckpipe: flush error for {}: {}", target_key, error);
             }
@@ -788,20 +832,61 @@ pub async fn run_sync_cycle(
             consumers.insert(group.slot_name.clone(), SlotState {
                 consumer,
                 rel_cache: HashMap::new(),
+                // Fresh connection — cache is empty, so no immediate refresh needed.
+                last_enabled_check: Instant::now(),
             });
         }
 
-        let state = consumers.get_mut(&group.slot_name).unwrap();
+        let slot_state = consumers.get_mut(&group.slot_name).unwrap();
 
-        // Invalidate cached mappings so metadata (state, enabled) is refreshed from PG.
-        // Relation schema info (attnames, atttypes) is preserved.
-        for cached in state.rel_cache.values_mut() {
-            cached.mapping = None;
+        // Targeted invalidation: mappings that had flush errors may have transitioned
+        // to ERRORED in PG.  Clearing only those entries forces a re-fetch before the
+        // next WAL event for those tables, so routing picks up the new state promptly.
+        for r in &prev_results {
+            if let FlushThreadResult::Error { mapping_id, .. } = r {
+                for cached in slot_state.rel_cache.values_mut() {
+                    if cached.mapping.as_ref().map_or(false, |m| &m.id == mapping_id) {
+                        cached.mapping = None;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Periodic refresh of `enabled` + `state` for all cached mappings.
+        // State transitions owned by the service (CATCHUP→STREAMING, retries, flush
+        // errors) are mirrored in-place as they happen, so this only needs to catch
+        // external changes such as a user toggling `enabled` via direct SQL.
+        if slot_state.last_enabled_check.elapsed() >= ENABLED_REFRESH_INTERVAL {
+            let ids: Vec<i32> = slot_state.rel_cache.values()
+                .filter_map(|c| c.mapping.as_ref().map(|m| m.id))
+                .collect();
+            if !ids.is_empty() {
+                match meta.get_mapping_enabled_states(&ids).await {
+                    Ok(meta_map) => {
+                        for cached in slot_state.rel_cache.values_mut() {
+                            if let Some(ref mut mapping) = cached.mapping {
+                                if let Some((enabled, state_str)) = meta_map.get(&mapping.id) {
+                                    mapping.enabled = *enabled;
+                                    mapping.state = state_str.clone();
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "pg_duckpipe: periodic enabled/state refresh failed for slot {}: {}",
+                            group.slot_name, e
+                        );
+                    }
+                }
+            }
+            slot_state.last_enabled_check = Instant::now();
         }
 
         let result = match process_sync_group_streaming(
-            &client, &meta, group, config, &mut state.consumer, coordinator,
-            &mut state.rel_cache,
+            &client, &meta, group, config, &mut slot_state.consumer, coordinator,
+            &mut slot_state.rel_cache,
         )
         .await
         {

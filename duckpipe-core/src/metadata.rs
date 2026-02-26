@@ -1,5 +1,7 @@
 //! Async metadata client for accessing duckpipe schema tables via tokio-postgres.
 
+use std::collections::HashMap;
+
 use tokio_postgres::Client;
 
 use crate::types::{SyncGroup, TableMapping, format_lsn, parse_lsn};
@@ -582,6 +584,36 @@ impl<'a> MetadataClient<'a> {
             )
             .await?;
         Ok(())
+    }
+
+    /// Batch-fetch `(enabled, state)` for a set of mapping IDs.
+    ///
+    /// Used for the periodic refresh of externally-mutable fields without
+    /// invalidating the entire rel_cache each sync round.  Only `enabled` and
+    /// `state` are fetched — other fields (column info, snapshot_lsn, etc.) are
+    /// not externally mutable and are left unchanged in the cache.
+    pub async fn get_mapping_enabled_states(
+        &self,
+        ids: &[i32],
+    ) -> Result<HashMap<i32, (bool, String)>, tokio_postgres::Error> {
+        let rows = self
+            .client
+            .query(
+                "SELECT id, enabled, state FROM duckpipe.table_mappings \
+                 WHERE id = ANY($1)",
+                &[&ids],
+            )
+            .await?;
+
+        Ok(rows
+            .iter()
+            .map(|row| {
+                let id: i32 = row.get(0);
+                let enabled: bool = row.get(1);
+                let state: String = row.get(2);
+                (id, (enabled, state))
+            })
+            .collect())
     }
 
     /// Check if a replication slot exists.
