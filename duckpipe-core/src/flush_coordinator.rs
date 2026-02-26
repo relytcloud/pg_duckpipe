@@ -97,6 +97,16 @@ pub struct FlushCoordinator {
     backpressure: Arc<BackpressureState>,
     flush_batch_threshold: usize,
     flush_interval_ms: u64,
+    /// In-memory per-table applied (flushed) LSN, updated from flush thread results via mpsc.
+    ///
+    /// Used to compute `flushed_lsn` for `StandbyStatusUpdate` and PG `confirmed_lsn`
+    /// persistence without the PG race (flush threads commit to PG *before* sending
+    /// the mpsc result, so values here are always >= the corresponding PG applied_lsn).
+    per_table_lsn: HashMap<i32, u64>, // mapping_id -> latest applied LSN
+
+    /// Cache: target_key → mapping_id.  Populated in `ensure_queue`, used in
+    /// `get_min_applied_lsn_in_coordinator` to avoid O(n) mutex locks per call.
+    target_to_mapping: HashMap<String, i32>,
 }
 
 impl FlushCoordinator {
@@ -121,20 +131,32 @@ impl FlushCoordinator {
             }),
             flush_batch_threshold: flush_batch_threshold as usize,
             flush_interval_ms: flush_interval_ms as u64,
+            per_table_lsn: HashMap::new(),
+            target_to_mapping: HashMap::new(),
         }
     }
 
     /// Ensure a queue + flush thread exists for the given target table.
     /// Creates and spawns if new. No-op if the entry already exists and the thread is alive.
     /// If the thread has died (join_handle finished), respawns it.
+    ///
+    /// `initial_applied_lsn` seeds the in-memory LSN map if no entry exists yet.
+    /// Callers should pass the PG `applied_lsn` from the table mapping so that the
+    /// in-memory state is bootstrapped correctly from persistent metadata on first use.
     pub fn ensure_queue(
         &mut self,
         target_key: &str,
         mapping_id: i32,
+        initial_applied_lsn: u64,
         attnames: Vec<String>,
         key_attrs: Vec<usize>,
         atttypes: Vec<u32>,
     ) {
+        // Seed in-memory LSN from the persistent PG value if we haven't seen this table yet.
+        // `or_insert` preserves any higher value already tracked from a completed flush.
+        self.per_table_lsn.entry(mapping_id).or_insert(initial_applied_lsn);
+        // Cache target_key → mapping_id for lock-free lookup in get_min_applied_lsn_in_coordinator.
+        self.target_to_mapping.insert(target_key.to_string(), mapping_id);
         // Check if entry exists and thread is alive
         let needs_spawn = match self.threads.get(target_key) {
             None => true,
@@ -246,6 +268,50 @@ impl FlushCoordinator {
         self.backpressure.total_queued.load(Ordering::Relaxed)
     }
 
+    /// Compute the minimum applied LSN across all tables tracked in `per_table_lsn`.
+    ///
+    /// Returns 0 if:
+    /// - `per_table_lsn` is empty (no tables seeded or received changes yet).
+    /// - Any tracked table has applied_lsn == 0 (never completed a flush).
+    ///
+    /// The map is populated from two sources:
+    /// 1. `seed_table_lsns()` — called each cycle with PG metadata for all active
+    ///    STREAMING/CATCHUP tables (ensures CATCHUP tables with no WAL changes are visible).
+    /// 2. `ensure_queue()` / `collect_results()` — tables that received WAL changes or
+    ///    completed flushes during this session.
+    ///
+    /// Because flush threads commit to PG *before* sending the mpsc result, values here
+    /// are always >= the corresponding PG applied_lsn, eliminating the stale-read race.
+    pub fn get_min_applied_lsn_in_coordinator(&self) -> u64 {
+        if self.per_table_lsn.is_empty() {
+            return 0;
+        }
+
+        let mut min_lsn: Option<u64> = None;
+
+        for &lsn in self.per_table_lsn.values() {
+            if lsn == 0 {
+                // A table has never completed a flush: don't advance.
+                return 0;
+            }
+            min_lsn = Some(min_lsn.map_or(lsn, |m: u64| m.min(lsn)));
+        }
+
+        min_lsn.unwrap_or(0)
+    }
+
+    /// Seed the in-memory per-table LSN map from a list of (mapping_id, applied_lsn) pairs.
+    ///
+    /// Uses `or_insert` so existing in-memory values (which may be higher than PG due to
+    /// recently completed flushes) are never overwritten.  Called at the start of each cycle
+    /// with `get_active_table_lsns()` results to ensure CATCHUP tables with no WAL changes
+    /// are visible to `get_min_applied_lsn_in_coordinator()`.
+    pub fn seed_table_lsns(&mut self, table_lsns: &[(i32, u64)]) {
+        for &(mapping_id, applied_lsn) in table_lsns {
+            self.per_table_lsn.entry(mapping_id).or_insert(applied_lsn);
+        }
+    }
+
     /// Per-table synchronous drain: signal one flush thread to drain, wait for completion.
     /// Used for TRUNCATE — must flush pending changes before DELETE.
     pub fn drain_and_wait_table(&mut self, target_key: &str) {
@@ -305,9 +371,20 @@ impl FlushCoordinator {
     }
 
     /// Non-blocking drain of the mpsc result channel.
-    pub fn collect_results(&self) -> Vec<FlushThreadResult> {
+    ///
+    /// Also updates the in-memory per-table LSN map from Success results.
+    /// The ordering guarantee holds here: flush threads commit applied_lsn to PG
+    /// *before* sending the mpsc result, so entries added to `per_table_lsn` by
+    /// this method imply PG is already up-to-date for those mapping_ids.
+    pub fn collect_results(&mut self) -> Vec<FlushThreadResult> {
         let mut results = Vec::new();
         while let Ok(r) = self.result_rx.try_recv() {
+            if let FlushThreadResult::Success { mapping_id, last_lsn, .. } = &r {
+                let entry = self.per_table_lsn.entry(*mapping_id).or_insert(0);
+                if *last_lsn > *entry {
+                    *entry = *last_lsn;
+                }
+            }
             results.push(r);
         }
         results
@@ -328,11 +405,16 @@ impl FlushCoordinator {
     }
 
     /// Shutdown all threads + recreate mpsc channel (used for panic recovery).
+    /// Clears all in-memory LSN state — per_table_lsn re-seeds from PG on next
+    /// ensure_queue. Callers must also clear the consumers map so the next cycle
+    /// reconnects from `confirmed_lsn` (the crash-safe restart point from PG).
     pub fn clear(&mut self) {
         self.shutdown();
         let (tx, rx) = mpsc::channel();
         self.result_tx = tx;
         self.result_rx = rx;
+        self.per_table_lsn.clear();
+        self.target_to_mapping.clear();
     }
 
     /// Get the PG connection string.

@@ -1,12 +1,13 @@
 //! Streaming replication slot consumer using `pgwire-replication`.
 //!
 //! Implements `START_REPLICATION` streaming via the PostgreSQL wire protocol
-//! for near-zero latency WAL consumption. Falls back to SQL polling when
-//! streaming is unavailable.
+//! for near-zero latency WAL consumption.
 //!
-//! Design: reconnect-per-cycle. Each worker cycle creates a fresh streaming
-//! connection, receives available WAL, processes it, sends a
-//! StandbyStatusUpdate, then disconnects. Unix socket reconnect is ~1ms.
+//! Design: persistent connection. The consumer is kept alive across sync
+//! cycles, avoiding per-cycle reconnect overhead. On error, the consumer is
+//! dropped and the next cycle reconnects from `confirmed_lsn` (the crash-safe
+//! restart point from PG metadata). `is_connected()` is checked each cycle to
+//! detect dead connections.
 
 use std::time::Duration;
 

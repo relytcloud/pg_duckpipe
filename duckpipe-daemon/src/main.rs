@@ -3,6 +3,7 @@
 //! Shares the same `duckpipe-core` logic as the PG background worker,
 //! but runs as an independent process connecting over TCP.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use clap::Parser;
@@ -10,7 +11,7 @@ use tokio::signal;
 use tracing::{error, info};
 
 use duckpipe_core::flush_coordinator::FlushCoordinator;
-use duckpipe_core::service::{self, ServiceConfig, SlotConnectParams};
+use duckpipe_core::service::{self, ServiceConfig, SlotConnectParams, SlotState};
 
 /// DuckPipe — standalone CDC sync daemon for PostgreSQL → DuckLake.
 #[derive(Parser, Debug)]
@@ -166,13 +167,16 @@ async fn main() {
 
     let poll_interval = Duration::from_millis(args.poll_interval as u64);
 
+    // Persistent slot state (consumer + rel_cache) — reused across cycles, cleared on error
+    let mut consumers: HashMap<String, SlotState> = HashMap::new();
+
     loop {
         tokio::select! {
             _ = signal::ctrl_c() => {
                 info!("DuckPipe daemon shutting down (Ctrl+C)");
                 break;
             }
-            result = service::run_sync_cycle(&config, &mut coordinator, &slot_params) => {
+            result = service::run_sync_cycle(&config, &mut coordinator, &slot_params, &mut consumers) => {
                 match result {
                     Ok(any_work) => {
                         if !any_work {
@@ -182,6 +186,7 @@ async fn main() {
                     Err(e) => {
                         error!("DuckPipe cycle error: {}", e);
                         coordinator.clear();
+                        consumers.clear();
                         tokio::time::sleep(poll_interval).await;
                     }
                 }

@@ -1,9 +1,10 @@
 use pgrx::prelude::*;
 use pgrx::pg_sys::panic::CaughtError;
+use std::collections::HashMap;
 use std::ffi::CString;
 
 use duckpipe_core::flush_coordinator::FlushCoordinator;
-use duckpipe_core::service::{self, ServiceConfig, SlotConnectParams};
+use duckpipe_core::service::{self, ServiceConfig, SlotConnectParams, SlotState};
 
 use crate::{BATCH_SIZE_PER_GROUP, DEBUG_LOG, ENABLED, FLUSH_BATCH_THRESHOLD, FLUSH_INTERVAL, MAX_QUEUED_CHANGES, POLL_INTERVAL};
 
@@ -124,53 +125,70 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
         config.max_queued_changes,
     );
 
-    // Main worker loop
-    while !should_shutdown() {
-        if BackgroundWorker::sighup_received() {
-            unsafe {
-                pg_sys::ProcessConfigFile(pg_sys::GucContext::PGC_SIGHUP);
-            }
-        }
-
-        if !ENABLED.get() {
-            BackgroundWorker::wait_latch(Some(std::time::Duration::from_millis(
-                POLL_INTERVAL.get() as u64,
-            )));
-            continue;
-        }
-
-        let config = read_config(&connstr);
-
-        // Run one cycle on the tokio runtime
+    // Main worker loop — wraps block_on in catch_unwind for panic recovery.
+    // The inner async loop keeps the tokio runtime active so that pgwire-replication's
+    // spawned background task (which reads WAL from the socket and responds to
+    // keepalives) stays alive between sync cycles.
+    loop {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let coord = &mut coordinator;
             rt.block_on(async {
-                service::run_sync_cycle(&config, coord, &slot_params).await
+                let mut consumers: HashMap<String, SlotState> = HashMap::new();
+
+                while !should_shutdown() {
+                    if BackgroundWorker::sighup_received() {
+                        unsafe {
+                            pg_sys::ProcessConfigFile(pg_sys::GucContext::PGC_SIGHUP);
+                        }
+                    }
+
+                    if !ENABLED.get() {
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            POLL_INTERVAL.get() as u64,
+                        ))
+                        .await;
+                        continue;
+                    }
+
+                    let config = read_config(&connstr);
+
+                    match service::run_sync_cycle(&config, coord, &slot_params, &mut consumers)
+                        .await
+                    {
+                        Ok(any_work) => {
+                            if should_shutdown() {
+                                break;
+                            }
+                            if !any_work {
+                                tokio::time::sleep(std::time::Duration::from_millis(
+                                    POLL_INTERVAL.get() as u64,
+                                ))
+                                .await;
+                            }
+                        }
+                        Err(msg) => {
+                            eprintln!("pg_duckpipe worker error: {}", msg);
+                            consumers.clear();
+                            if should_shutdown() {
+                                break;
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(
+                                POLL_INTERVAL.get() as u64,
+                            ))
+                            .await;
+                        }
+                    }
+                }
             })
         }));
 
         match result {
-            Ok(Ok(any_work)) => {
-                if should_shutdown() {
-                    break;
-                }
-                if !any_work {
-                    BackgroundWorker::wait_latch(Some(std::time::Duration::from_millis(
-                        POLL_INTERVAL.get() as u64,
-                    )));
-                }
-            }
-            Ok(Err(msg)) => {
-                eprintln!("pg_duckpipe worker error: {}", msg);
-                if should_shutdown() {
-                    break;
-                }
-                BackgroundWorker::wait_latch(Some(std::time::Duration::from_millis(
-                    POLL_INTERVAL.get() as u64,
-                )));
+            Ok(()) => {
+                // Normal shutdown (should_shutdown() was true)
+                break;
             }
             Err(err) => {
-                // Invalidate all persistent DuckDB connections to avoid inconsistent state
+                // Panic recovery: clear all persistent state
                 coordinator.clear();
                 let msg = if let Some(caught) = err.downcast_ref::<CaughtError>() {
                     match caught {
@@ -191,6 +209,8 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
                 if should_shutdown() {
                     break;
                 }
+                // Brief pause before retrying — use wait_latch here since
+                // the tokio runtime just exited (panic recovery path).
                 BackgroundWorker::wait_latch(Some(std::time::Duration::from_millis(
                     POLL_INTERVAL.get() as u64,
                 )));

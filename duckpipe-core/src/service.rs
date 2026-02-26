@@ -56,6 +56,16 @@ struct RelCacheWithMapping {
     mapping: Option<TableMapping>,
 }
 
+/// Persistent per-slot state: consumer + relation cache.
+///
+/// The relation cache must persist across cycles because with a persistent
+/// connection the server only sends Relation messages once per relation.
+/// Subsequent Update/Delete/Insert messages reference already-sent relation IDs.
+pub struct SlotState {
+    pub consumer: SlotConsumer,
+    rel_cache: HashMap<u32, RelCacheWithMapping>,
+}
+
 /// Helper: ensure a coordinator queue exists for a target table, loading metadata if needed.
 async fn ensure_coordinator_queue(
     coordinator: &mut FlushCoordinator,
@@ -78,7 +88,7 @@ async fn ensure_coordinator_queue(
         let types = vec![0u32; names.len()]; // unknown type → Text fallback
         (names, keys, types)
     };
-    coordinator.ensure_queue(target_key, mapping.id, attnames, key_attrs, atttypes);
+    coordinator.ensure_queue(target_key, mapping.id, mapping.applied_lsn, attnames, key_attrs, atttypes);
     Ok(())
 }
 
@@ -86,24 +96,31 @@ async fn ensure_coordinator_queue(
 ///
 /// Reads WAL via `SlotConsumer` (START_REPLICATION protocol), decodes, dispatches,
 /// flushes, and sends StandbyStatusUpdate. Near-zero latency.
-pub async fn process_sync_group_streaming(
+async fn process_sync_group_streaming(
     client: &Client,
     meta: &MetadataClient<'_>,
     group: &mut SyncGroup,
     config: &ServiceConfig,
     consumer: &mut SlotConsumer,
     coordinator: &mut FlushCoordinator,
+    rel_cache: &mut HashMap<u32, RelCacheWithMapping>,
 ) -> Result<ProcessResult, String> {
     let timing = config.debug_log;
     let group_start = if timing { Some(Instant::now()) } else { None };
 
     // Check backpressure — if flush threads are lagging behind, skip this poll round
     if coordinator.is_backpressured() {
-        // Still read confirmed_lsn from PG and advance slot even when backpressured
-        let min_lsn = meta
-            .get_min_applied_lsn(group.id)
-            .await
-            .unwrap_or(0);
+        // Still compute confirmed_lsn and advance slot even when backpressured.
+        // Prefer in-memory state (consistent with the main confirmed_lsn path);
+        // fall back to PG query when coordinator has no tables yet.
+        let min_lsn = {
+            let in_mem = coordinator.get_min_applied_lsn_in_coordinator();
+            if in_mem > 0 {
+                in_mem
+            } else {
+                meta.get_min_applied_lsn(group.id).await.unwrap_or(0)
+            }
+        };
         if min_lsn > 0 {
             let _ = meta.update_confirmed_lsn(group.id, min_lsn).await;
             consumer.send_status_update(min_lsn);
@@ -134,7 +151,7 @@ pub async fn process_sync_group_streaming(
 
     // Process the WAL messages (shared logic)
     let result =
-        process_wal_messages(client, meta, group, &wal_messages, coordinator).await?;
+        process_wal_messages(client, meta, group, &wal_messages, coordinator, rel_cache).await?;
 
     // Send StandbyStatusUpdate to advance the replication slot.
     // With streaming, we explicitly control slot advancement (unlike SQL polling
@@ -168,8 +185,8 @@ async fn process_wal_messages(
     group: &mut SyncGroup,
     wal_messages: &[(u64, Vec<u8>)],
     coordinator: &mut FlushCoordinator,
+    rel_cache: &mut HashMap<u32, RelCacheWithMapping>,
 ) -> Result<ProcessResult, String> {
-    let mut rel_cache: HashMap<u32, RelCacheWithMapping> = HashMap::new();
     let mut total_processed: i32 = 0;
 
     for (lsn, data) in wal_messages.iter() {
@@ -436,7 +453,10 @@ async fn process_wal_messages(
         total_processed += 1;
     }
 
-    // Collect flush results for error logging (non-blocking — no barrier)
+    // Drain flush results and update in-memory per-table LSN state.
+    // Must happen before confirmed_lsn computation — the ordering guarantee:
+    // flush threads commit applied_lsn to PG *before* sending the mpsc result,
+    // so any Success result here means PG is already up-to-date for that table.
     for r in &coordinator.collect_results() {
         if let FlushThreadResult::Error { target_key, error, .. } = r {
             eprintln!("pg_duckpipe: flush error for {}: {}", target_key, error);
@@ -467,15 +487,26 @@ async fn process_wal_messages(
             .map_err(|e| format!("transition_catchup: {}", e))?;
     }
 
-    // Update confirmed_lsn using min(applied_lsn) for crash-safe slot advancement.
-    // Only advance the slot to the minimum LSN that all active tables have flushed,
-    // so no table loses data on crash recovery.
+    // Update confirmed_lsn using the in-memory per-table LSN state for crash-safe slot
+    // advancement.  All active STREAMING/CATCHUP tables are seeded into per_table_lsn
+    // at cycle start (via seed_table_lsns), so the min covers all tables regardless of
+    // whether they received changes this cycle.
+    //
+    // Fall back to the PG query when the coordinator has no tables yet (e.g., first
+    // cycle after startup before any changes arrive, or all tables just errored out).
     let mut safe_confirmed_lsn: u64 = 0;
     if total_processed > 0 && group.pending_lsn != 0 {
-        let min_lsn = meta
-            .get_min_applied_lsn(group.id)
-            .await
-            .map_err(|e| format!("get_min_applied_lsn: {}", e))?;
+        let min_lsn = {
+            let in_mem = coordinator.get_min_applied_lsn_in_coordinator();
+            if in_mem > 0 {
+                in_mem
+            } else {
+                // No in-memory state yet — read from PG (startup / post-clear path).
+                meta.get_min_applied_lsn(group.id)
+                    .await
+                    .map_err(|e| format!("get_min_applied_lsn: {}", e))?
+            }
+        };
         if min_lsn > 0 {
             meta.update_confirmed_lsn(group.id, min_lsn)
                 .await
@@ -668,14 +699,18 @@ async fn process_snapshots(
     Ok(())
 }
 
-/// Run one complete sync cycle: connect, process all groups, disconnect.
+/// Run one complete sync cycle with persistent slot connections.
 ///
 /// Shared by both the PG background worker and the standalone daemon.
+/// `consumers` holds long-lived `SlotState` (consumer + relation cache) keyed by slot name.
+/// On error, the failed consumer is removed (drop = close); the next cycle
+/// reconnects from `confirmed_lsn` (the crash-safe restart point from PG).
 /// Returns whether any work was done (callers use this to decide whether to sleep).
 pub async fn run_sync_cycle(
     config: &ServiceConfig,
     coordinator: &mut FlushCoordinator,
     slot_params: &SlotConnectParams,
+    consumers: &mut HashMap<String, SlotState>,
 ) -> Result<bool, String> {
     // Establish metadata connection (short-lived per cycle)
     let (client, connection) = tokio_postgres::connect(&config.connstr, tokio_postgres::NoTls)
@@ -702,31 +737,81 @@ pub async fn run_sync_cycle(
         // Process snapshots — spawn all as parallel tasks
         process_snapshots(&meta, group, &config.connstr, config.debug_log).await?;
 
-        // Process WAL changes via streaming replication
-        let mut consumer = connect_slot_consumer(
-            slot_params,
-            &group.slot_name,
-            &group.publication,
-            group.confirmed_lsn,
-        )
-        .await
-        .map_err(|e| format!("streaming connect failed for {}: {}", group.slot_name, e))?;
+        // Seed per_table_lsn with all active (STREAMING/CATCHUP) tables from PG.
+        // This ensures CATCHUP tables that received no WAL changes this session are
+        // still visible to get_min_applied_lsn_in_coordinator(), preventing unsafe
+        // confirmed_lsn advancement past their needs.
+        if let Ok(active_lsns) = meta.get_active_table_lsns(group.id).await {
+            coordinator.seed_table_lsns(&active_lsns);
+        }
 
-        let result = process_sync_group_streaming(
-            &client, &meta, group, config, &mut consumer, coordinator,
-        )
-        .await
-        .map_err(|e| format!("process_sync_group_streaming: {}", e))?;
-
-        if let Err(e) = consumer.close().await {
-            if config.debug_log {
-                tracing::warn!(
-                    "DuckPipe: streaming close for {}: {}",
-                    group.slot_name,
-                    e
-                );
+        // Drain any flush results that arrived since the last cycle.  This updates
+        // per_table_lsn (flushed state) and logs errors.  Done before both the
+        // confirmed_lsn persistence step and the slot connection.
+        for r in &coordinator.collect_results() {
+            if let FlushThreadResult::Error { target_key, error, .. } = r {
+                eprintln!("pg_duckpipe: flush error for {}: {}", target_key, error);
             }
         }
+
+        // Persist the latest flushed position to PG (for crash recovery and WAL
+        // retention via StandbyStatusUpdate).  This is purely a bookkeeping update —
+        // it does NOT affect where the slot connects this cycle.
+        let fresh_flushed = coordinator.get_min_applied_lsn_in_coordinator();
+        if fresh_flushed > group.confirmed_lsn {
+            group.confirmed_lsn = fresh_flushed;
+            if let Err(e) = meta.update_confirmed_lsn(group.id, fresh_flushed).await {
+                eprintln!("pg_duckpipe: failed to persist confirmed_lsn for group {}: {}", group.id, e);
+            }
+        }
+
+        // Reuse persistent consumer or create a new one.
+        // Always start from confirmed_lsn — the crash-safe restart point from PG.
+        // Re-reading a small WAL window is cheap and avoids needing in-memory consumed_lsn.
+        let slot_start_lsn = group.confirmed_lsn;
+
+        let needs_connect = match consumers.get(&group.slot_name) {
+            Some(s) => !s.consumer.is_connected(),
+            None => true,
+        };
+        if needs_connect {
+            // Remove dead state if present (drop = close connection, clear rel_cache)
+            consumers.remove(&group.slot_name);
+            let consumer = connect_slot_consumer(
+                slot_params,
+                &group.slot_name,
+                &group.publication,
+                slot_start_lsn,
+            )
+            .await
+            .map_err(|e| format!("streaming connect failed for {}: {}", group.slot_name, e))?;
+            consumers.insert(group.slot_name.clone(), SlotState {
+                consumer,
+                rel_cache: HashMap::new(),
+            });
+        }
+
+        let state = consumers.get_mut(&group.slot_name).unwrap();
+
+        // Invalidate cached mappings so metadata (state, enabled) is refreshed from PG.
+        // Relation schema info (attnames, atttypes) is preserved.
+        for cached in state.rel_cache.values_mut() {
+            cached.mapping = None;
+        }
+
+        let result = match process_sync_group_streaming(
+            &client, &meta, group, config, &mut state.consumer, coordinator,
+            &mut state.rel_cache,
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                // Remove failed state — next cycle reconnects from confirmed_lsn
+                consumers.remove(&group.slot_name);
+                return Err(format!("process_sync_group_streaming: {}", e));
+            }
+        };
 
         if result.any_work {
             any_work = true;
