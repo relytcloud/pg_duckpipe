@@ -380,12 +380,24 @@ impl<'a> MetadataClient<'a> {
         &self,
         group_id: i32,
     ) -> Result<u64, tokio_postgres::Error> {
+        // For CATCHUP tables with NULL applied_lsn, use snapshot_lsn as the
+        // effective floor: everything up to snapshot_lsn is either in the
+        // snapshot copy or will be skipped by CATCHUP skip logic, so the slot
+        // does not need to replay WAL before snapshot_lsn for these tables.
+        // STREAMING tables with NULL applied_lsn (shouldn't normally occur)
+        // still block advancement — treat as not-yet-safe.
         let rows = self
             .client
             .query(
                 "SELECT \
-                     count(*) FILTER (WHERE applied_lsn IS NULL) AS null_count, \
-                     min(applied_lsn)::text AS min_lsn \
+                     count(*) FILTER ( \
+                         WHERE COALESCE(applied_lsn, \
+                             CASE WHEN state = 'CATCHUP' THEN snapshot_lsn END \
+                         ) IS NULL \
+                     ) AS null_count, \
+                     min(COALESCE(applied_lsn, \
+                         CASE WHEN state = 'CATCHUP' THEN snapshot_lsn END \
+                     ))::text AS min_lsn \
                  FROM duckpipe.table_mappings \
                  WHERE group_id = $1 AND enabled = true \
                  AND state IN ('STREAMING', 'CATCHUP')",
@@ -399,7 +411,7 @@ impl<'a> MetadataClient<'a> {
 
         let null_count: i64 = rows[0].get(0);
         if null_count > 0 {
-            // Some active tables haven't been flushed yet — don't advance slot
+            // Some active tables have no safe LSN floor yet — don't advance slot
             return Ok(0);
         }
 
@@ -407,11 +419,15 @@ impl<'a> MetadataClient<'a> {
         Ok(min_lsn_str.map(|s| parse_lsn(&s)).unwrap_or(0))
     }
 
-    /// Get (mapping_id, applied_lsn) for all enabled STREAMING/CATCHUP tables in a group.
+    /// Get (mapping_id, effective_lsn) for all enabled STREAMING/CATCHUP tables in a group.
     ///
     /// Used to seed the coordinator's `per_table_lsn` at the start of each cycle so that
     /// CATCHUP tables with no WAL changes are still visible for confirmed_lsn computation.
-    /// Returns applied_lsn = 0 for tables with NULL applied_lsn.
+    ///
+    /// For CATCHUP tables with NULL applied_lsn, returns snapshot_lsn as the effective
+    /// floor — everything before snapshot_lsn is either already in the snapshot copy or
+    /// skipped by CATCHUP logic, so the slot need not replay that WAL window.
+    /// Returns 0 for any table where no safe floor is available.
     pub async fn get_active_table_lsns(
         &self,
         group_id: i32,
@@ -419,7 +435,10 @@ impl<'a> MetadataClient<'a> {
         let rows = self
             .client
             .query(
-                "SELECT id, applied_lsn::text \
+                "SELECT id, \
+                     COALESCE(applied_lsn, \
+                         CASE WHEN state = 'CATCHUP' THEN snapshot_lsn END \
+                     )::text \
                  FROM duckpipe.table_mappings \
                  WHERE group_id = $1 AND enabled = true \
                  AND state IN ('STREAMING', 'CATCHUP')",

@@ -327,15 +327,22 @@ impl FlushCoordinator {
         min_lsn.unwrap_or(0)
     }
 
-    /// Seed the in-memory per-table LSN map from a list of (mapping_id, applied_lsn) pairs.
+    /// Seed the in-memory per-table LSN map from a list of (mapping_id, lsn) pairs.
     ///
-    /// Uses `or_insert` so existing in-memory values (which may be higher than PG due to
-    /// recently completed flushes) are never overwritten.  Called at the start of each cycle
-    /// with `get_active_table_lsns()` results to ensure CATCHUP tables with no WAL changes
-    /// are visible to `get_min_applied_lsn_in_coordinator()`.
+    /// Takes `max(current, seed)` so:
+    /// - Entries already set by flush-thread results (which may be ahead of PG due to
+    ///   in-flight flushes) are not regressed.
+    /// - Entries at 0 (never seeded, or seeded before snapshot_lsn was available) are
+    ///   updated to the snapshot_lsn floor provided by `get_active_table_lsns()`.
+    ///
+    /// Called at the start of each cycle so CATCHUP tables with no WAL changes are
+    /// visible to `get_min_applied_lsn_in_coordinator()`.
     pub fn seed_table_lsns(&mut self, table_lsns: &[(i32, u64)]) {
-        for &(mapping_id, applied_lsn) in table_lsns {
-            self.per_table_lsn.entry(mapping_id).or_insert(applied_lsn);
+        for &(mapping_id, lsn) in table_lsns {
+            let entry = self.per_table_lsn.entry(mapping_id).or_insert(lsn);
+            if lsn > *entry {
+                *entry = lsn;
+            }
         }
     }
 
