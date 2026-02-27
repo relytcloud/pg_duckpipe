@@ -4,6 +4,8 @@
 //! The expensive one-time setup (INSTALL+LOAD+ATTACH) happens once at creation.
 //! Subsequent flushes only create/drop the lightweight buffer table.
 
+use std::time::Instant;
+
 use duckdb::Connection;
 
 use crate::queue::TableQueue;
@@ -185,6 +187,13 @@ impl FlushWorker {
         let key_attrs = queue.key_attrs.clone();
         let changes = queue.drain();
         let applied_count = changes.len() as i64;
+        let flush_start = Instant::now();
+
+        // Track whether this batch contains any UPDATE or DELETE operations.
+        // Used below to annotate the timing log.
+        let has_non_inserts = changes
+            .iter()
+            .any(|c| !matches!(c.change_type, ChangeType::Insert));
 
         // Parse target schema.table
         let parts: Vec<&str> = target_key.splitn(2, '.').collect();
@@ -362,6 +371,13 @@ impl FlushWorker {
             .map_err(|e| format!("duckdb begin: {}", e))?;
 
         // Step 2b: DELETE — remove rows from target that match any compacted row's PK.
+        // This is always required for correctness: when confirmed_lsn = 0 the
+        // persistent slot replays from its restart_lsn and can re-deliver WAL
+        // INSERT events for rows already present in the snapshot copy.  The
+        // DELETE step acts as an upsert (remove old → insert new), ensuring no
+        // duplicates even on WAL replay.  For pure-insert catch-up batches this
+        // scan returns 0 matches but pays O(lake_size) Parquet I/O; this is a
+        // known DuckLake performance characteristic tracked in PROGRESS.md.
         let pk_where: Vec<String> = pk_cols
             .iter()
             .map(|c| format!("{target_ref}.{c} = compacted.{c}"))
@@ -402,6 +418,14 @@ impl FlushWorker {
         self.db
             .execute_batch("DROP TABLE IF EXISTS compacted; DROP TABLE IF EXISTS buffer;")
             .map_err(|e| format!("duckdb cleanup: {}", e))?;
+
+        tracing::info!(
+            "DuckPipe timing: action=duckdb_flush target={} rows={} has_non_inserts={} elapsed_ms={:.1}",
+            target_key,
+            applied_count,
+            has_non_inserts,
+            flush_start.elapsed().as_secs_f64() * 1000.0,
+        );
 
         Ok(DuckDbFlushResult {
             target_key,

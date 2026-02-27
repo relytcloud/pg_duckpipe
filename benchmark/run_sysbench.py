@@ -277,7 +277,7 @@ def benchmark_snapshot(args, db_params):
         prev_snapshot_count = target_count
         prev_snapshot_time = now
 
-        sys.stdout.write(f"\r    rows_synced: {synced:,} | Actual: {target_count:,}/{total_rows:,} | Pending: {not_streaming} | Rate: {interval_rate:.0f} rows/s | Time: {elapsed:.1f}s")
+        sys.stdout.write(f"\r    rows_synced: {synced:,} | Actual: {target_count:,}/{total_rows:,} | non-STREAMING: {not_streaming} | Rate: {interval_rate:.0f} rows/s | Time: {elapsed:.1f}s")
         sys.stdout.flush()
 
         if target_count >= total_rows and not_streaming == 0:

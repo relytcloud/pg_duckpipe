@@ -41,6 +41,8 @@
 - [ ] Inline data flush
 - [x] benchmark and identify bottleneck (see benchmark findings below)
 - [ ] **confirmed_lsn resets to 0 on table re-add** — when a CATCHUP table with NULL applied_lsn is added to an existing group, `get_min_applied_lsn()` returns 0, forcing WAL slot to replay from the slot's restart_lsn (DB creation). Fix: use `snapshot_lsn` as the effective floor for CATCHUP tables with NULL applied_lsn so confirmed_lsn doesn't regress to 0.
+- [ ] **Large catch-up batch stall** — when OLTP ends with a large WAL backlog (e.g. 200k changes), the flush thread drains all changes into local accumulator and flushes as one DuckDB batch. The `DELETE FROM lake WHERE EXISTS (SELECT 1 FROM compacted)` step scans all Parquet files in the DuckLake table even when the batch has no conflicting PKs, causing ~40s stalls for 200k-row catch-up batches (measured: ~4,500 rows/sec). The DELETE is necessary for correctness: when confirmed_lsn=0 the slot replays old WAL INSERTs for rows already in the snapshot copy — DELETE acts as an upsert guard. A DELETE-skip optimisation for pure-insert batches is UNSAFE (breaks `premature_catchup` test). Potential fix: persist `may_have_conflicts` flag per table (true initially, cleared after first zero-match DELETE), or add DuckLake-native upsert support.
+- [ ] **Parquet-over-PG write throughput** — DuckLake stores Parquet in PostgreSQL (large objects or bytea). INSERT of 200k rows takes ~20s (≈10k rows/sec write throughput). For very large catch-up batches the bottleneck shifts from DELETE to the INSERT path itself.
 
 #### Features
 - [ ] `source_uri` column for pg_mooncake compatibility
@@ -63,6 +65,7 @@
 #### Benchmark Script
 - [x] Catch-up rate displayed as cumulative average (falls during stalls, misleading) — fixed to windowed per-interval rate
 - [x] Final `lag_bytes` misleading after OLTP — WAL keeps advancing from checkpoints/autovacuum, lag stays large even when all DML is applied; fixed summary output to clarify
+- [x] Snapshot monitor `Pending: N` label misleading — N is the count of tables NOT in STREAMING state, not a queued-change count; renamed to `non-STREAMING: N`
 
 ### Phase 7: Standardized Logging
 - `duckpipe-core/src/log.rs` (new) — `init_subscriber(debug: bool)`: shared tracing-subscriber setup; `RUST_LOG` overrides the default filter
