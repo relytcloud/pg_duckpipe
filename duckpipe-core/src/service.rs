@@ -150,10 +150,18 @@ async fn process_sync_group_streaming(
         .await?;
 
     if wal_messages.is_empty() {
+        // No new WAL, but flush threads may have advanced confirmed_lsn since the
+        // last StandbyStatusUpdate (e.g. during catch-up after bulk OLTP ends).
+        // Send an update so the slot's confirmed_flush_lsn — and therefore lag_bytes
+        // in duckpipe.groups() — reflects flush progress each cycle.
+        let min_lsn = coordinator.get_min_applied_lsn_in_coordinator();
+        if min_lsn > 0 {
+            consumer.send_status_update(min_lsn);
+        }
         return Ok(ProcessResult {
             total_processed: 0,
             any_work: false,
-            confirmed_lsn: 0,
+            confirmed_lsn: min_lsn,
         });
     }
 
