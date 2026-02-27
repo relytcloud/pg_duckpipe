@@ -19,7 +19,7 @@ use crate::flush_coordinator::{FlushCoordinator, FlushThreadResult};
 use crate::metadata::MetadataClient;
 use crate::slot_consumer::SlotConsumer;
 use crate::snapshot;
-use crate::types::{Change, ChangeType, RelCacheEntry, SyncGroup, TableMapping};
+use crate::types::{Change, ChangeType, RelCacheEntry, SyncGroup, TableMapping, Value};
 
 /// Configuration for the DuckPipe service.
 #[derive(Debug, Clone)]
@@ -178,12 +178,15 @@ async fn process_one_wal_message(
                 .map(|c| c.entry.atttypes.as_slice())
                 .unwrap_or(&[]);
             let marker = read_byte(data, &mut cursor) as char;
-            let (old_values, has_old) = if marker == 'K' || marker == 'O' {
+            // 'O' = old full row (REPLICA IDENTITY FULL)
+            // 'K' = old key columns only (default replica identity)
+            // 'N' = no old tuple (marker is already the new-tuple marker)
+            let (old_values, old_marker) = if marker == 'K' || marker == 'O' {
                 let (vals, _) = parse_tuple_data(data, &mut cursor, atttypes);
                 let _new_marker = read_byte(data, &mut cursor);
-                (vals, true)
+                (vals, marker)
             } else {
-                (Vec::new(), false)
+                (Vec::new(), 'N')
             };
             let (new_values, new_unchanged) = parse_tuple_data(data, &mut cursor, atttypes);
             let has_unchanged = new_unchanged.iter().any(|&u| u);
@@ -205,12 +208,53 @@ async fn process_one_wal_message(
                     let target_key = format!("{}.{}", mapping.target_schema, mapping.target_table);
                     ensure_coordinator_queue(coordinator, &target_key, mapping, &cached.entry, meta)
                         .await?;
-                    let key_values = if has_old {
-                        old_values
+
+                    // key_values for the DELETE half: always extract by key position so the
+                    // flush path can index them as key_values[ki] (ki = ordinal within key_attrs).
+                    let key_values = if !old_values.is_empty() {
+                        extract_key_values(&old_values, &cached.entry.attkeys)
                     } else {
                         extract_key_values(&new_values, &cached.entry.attkeys)
                     };
-                    if has_unchanged {
+
+                    if has_unchanged && old_marker == 'O' {
+                        // REPLICA IDENTITY FULL: old tuple carries full row values.
+                        // pgoutput still uses 'u' for unchanged TOAST columns in the NEW
+                        // tuple, but we can fill them from the old tuple right here —
+                        // no flush-time resolution query needed.
+                        let filled_values: Vec<Value> = (0..new_values.len())
+                            .map(|i| {
+                                if new_unchanged.get(i).copied().unwrap_or(false) {
+                                    old_values.get(i).cloned().unwrap_or(Value::Null)
+                                } else {
+                                    new_values[i].clone()
+                                }
+                            })
+                            .collect();
+                        coordinator.push_change(
+                            &target_key,
+                            Change {
+                                change_type: ChangeType::Delete,
+                                lsn,
+                                col_values: Vec::new(),
+                                key_values: key_values.clone(),
+                                col_unchanged: Vec::new(),
+                            },
+                        );
+                        coordinator.push_change(
+                            &target_key,
+                            Change {
+                                change_type: ChangeType::Insert,
+                                lsn,
+                                col_values: filled_values,
+                                key_values: Vec::new(),
+                                col_unchanged: Vec::new(),
+                            },
+                        );
+                    } else if has_unchanged {
+                        // No full old tuple (not REPLICA IDENTITY FULL).
+                        // Push Update with col_unchanged; the flush path will surface an
+                        // error telling the operator to restore REPLICA IDENTITY FULL.
                         coordinator.push_change(
                             &target_key,
                             Change {

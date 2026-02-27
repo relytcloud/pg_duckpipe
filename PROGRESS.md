@@ -44,7 +44,7 @@
 - [ ] `source_uri` column for pg_mooncake compatibility
 - [ ] `conninfo` column in sync_groups for remote PG support
 - [ ] Schema DDL sync (ALTER TABLE ADD/DROP COLUMN propagation)
-- [ ] **`REPLICA IDENTITY FULL` opt-in** — Per-table option to issue `ALTER TABLE <src> REPLICA IDENTITY FULL` on add. Eliminates TOAST unchanged columns from WAL, removing the correlated-UPDATE resolution step in `duckdb_flush.rs` and the `col_unchanged` bookkeeping on `Change`. Trade-off: higher WAL volume on source.
+- [x] **`REPLICA IDENTITY FULL` enforced** — `add_table()` always issues `ALTER TABLE <src> REPLICA IDENTITY FULL`. The flush path has no TOAST-unchanged fallback: buffer table has no `{col}_unchanged` columns, appender rows are narrower (ncols not 2×ncols), and TOAST resolution is gone. Any `col_unchanged = true` in WAL (source identity changed after add) surfaces as a hard flush error triggering the existing backoff retry path. Trade-off: higher WAL volume on source.
 - [ ] Dockerfile for setting up a self-contained playground env
 
 ### Monitoring / Observability

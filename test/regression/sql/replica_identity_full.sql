@@ -1,0 +1,52 @@
+-- REPLICA IDENTITY FULL enforcement
+--
+-- add_table() always issues ALTER TABLE <src> REPLICA IDENTITY FULL so that
+-- pgoutput includes every column value in UPDATE WAL records.  The flush path
+-- has no TOAST-unchanged fallback: if a col_unchanged flag ever arrives it is
+-- treated as a hard error (source identity was changed after add_table()).
+
+SET client_min_messages = warning;
+SELECT duckpipe.start_worker();
+RESET client_min_messages;
+
+CREATE TABLE ri_test (id int PRIMARY KEY, small_col text, big_col text);
+
+-- Force TOAST storage for big_col
+ALTER TABLE ri_test ALTER COLUMN big_col SET STORAGE EXTERNAL;
+
+-- add_table always sets REPLICA IDENTITY FULL — no extra argument needed
+SELECT duckpipe.add_table('public.ri_test', NULL, 'default', false);
+
+-- Verify REPLICA IDENTITY FULL was set on the source table (relreplident = 'f')
+SELECT relreplident FROM pg_class WHERE relname = 'ri_test';
+
+-- Insert rows with large text (forces TOAST storage)
+INSERT INTO ri_test VALUES (1, 'small_1', repeat('x', 10000));
+INSERT INTO ri_test VALUES (2, 'small_2', repeat('y', 10000));
+
+SELECT pg_sleep(2);
+
+-- Verify initial sync
+SELECT id, small_col, length(big_col) AS big_col_len
+FROM public.ri_test_ducklake ORDER BY id;
+
+-- Update only small_col.  With REPLICA IDENTITY FULL, pgoutput sends the full
+-- row so big_col is always present in WAL — no TOAST resolution needed.
+UPDATE ri_test SET small_col = 'updated_1' WHERE id = 1;
+UPDATE ri_test SET small_col = 'updated_2' WHERE id = 2;
+
+SELECT pg_sleep(2);
+
+-- Verify: big_col must be preserved
+SELECT id, small_col, length(big_col) AS big_col_len,
+       big_col IS NULL AS big_col_is_null
+FROM public.ri_test_ducklake ORDER BY id;
+
+-- Cleanup
+SET client_min_messages = warning;
+SELECT duckpipe.stop_worker();
+RESET client_min_messages;
+
+SELECT duckpipe.remove_table('public.ri_test', false);
+DROP TABLE public.ri_test_ducklake;
+DROP TABLE ri_test;

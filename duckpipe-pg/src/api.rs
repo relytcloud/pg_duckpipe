@@ -468,7 +468,18 @@ fn add_table(
             let _ = client.update(&sql, None, &[]);
         }
 
-        // 7. Insert table mapping (with source OID for rename-safe matching)
+        // 7. Enforce REPLICA IDENTITY FULL on the source table so pgoutput
+        //    always includes every column value in UPDATE WAL records.
+        {
+            let sql = format!(
+                "ALTER TABLE {}.{} REPLICA IDENTITY FULL",
+                quote_ident(&schema),
+                quote_ident(&table)
+            );
+            client.update(&sql, None, &[]).unwrap();
+        }
+
+        // 8. Insert table mapping (with source OID for rename-safe matching)
         let initial_state = if copy_data { "SNAPSHOT" } else { "STREAMING" };
         let args = unsafe {
             [
@@ -493,7 +504,7 @@ fn add_table(
             )
             .unwrap();
 
-        // 8. Auto-start background worker if not running
+        // 9. Auto-start background worker if not running
         if !is_worker_running() {
             launch_worker();
         }

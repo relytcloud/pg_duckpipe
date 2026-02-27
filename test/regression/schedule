@@ -14,6 +14,8 @@ test: truncate
 test: stress_append
 # TOAST unchanged columns become NULL (bug confirmation test)
 test: toast_unchanged
+# REPLICA IDENTITY FULL opt-in (ALTER TABLE on add, full-row WAL, no TOAST resolution needed)
+test: replica_identity_full
 # Composite primary keys (multi-column PK UPDATE/DELETE)
 test: composite_pk
 # Large single transaction (mid-txn flush triggers)

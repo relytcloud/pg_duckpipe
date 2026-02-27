@@ -229,10 +229,26 @@ impl FlushWorker {
         let lake_info = self.lake_info.as_ref().unwrap();
         let t_discover_ms = t_phase.elapsed().as_secs_f64() * 1000.0;
 
+        // Enforce REPLICA IDENTITY FULL: all source tables must have it set so
+        // pgoutput always includes every column value in UPDATE WAL records.
+        // Any 'u'-status (TOAST unchanged) column reaching the flush path means
+        // the source table had its REPLICA IDENTITY changed after add_table().
+        if changes
+            .iter()
+            .any(|c| c.col_unchanged.iter().any(|&u| u))
+        {
+            return Err(
+                "TOAST unchanged column detected in WAL — source table must have \
+                 REPLICA IDENTITY FULL. Run: ALTER TABLE <name> REPLICA IDENTITY FULL"
+                    .to_string(),
+            );
+        }
+
         // Build buffer table schema:
-        // seq INTEGER, op_type INTEGER (0=INSERT, 1=UPDATE, 2=DELETE),
-        // all data columns with real types (from DuckLake catalog),
-        // for each column: <col>_unchanged BOOLEAN
+        // _seq INTEGER, _op_type INTEGER (0=INSERT, 1=UPDATE, 2=DELETE),
+        // all data columns with real types (from DuckLake catalog).
+        // No {col}_unchanged columns needed — REPLICA IDENTITY FULL guarantees
+        // every column value is present in every UPDATE record.
         let mut buf_cols = Vec::new();
         buf_cols.push("_seq INTEGER".to_string());
         buf_cols.push("_op_type INTEGER".to_string());
@@ -241,12 +257,6 @@ impl FlushWorker {
                 "\"{}\" {}",
                 name.replace('"', "\"\""),
                 lake_info.column_types[i]
-            ));
-        }
-        for name in &attnames {
-            buf_cols.push(format!(
-                "\"{}_unchanged\" BOOLEAN DEFAULT false",
-                name.replace('"', "\"\"")
             ));
         }
 
@@ -277,7 +287,7 @@ impl FlushWorker {
                 };
 
                 // Build row as Vec<Box<dyn ToSql>>
-                let mut row: Vec<Box<dyn duckdb::ToSql>> = Vec::with_capacity(2 + ncols * 2);
+                let mut row: Vec<Box<dyn duckdb::ToSql>> = Vec::with_capacity(2 + ncols);
                 row.push(Box::new(seq));
                 row.push(Box::new(op_type));
 
@@ -299,12 +309,6 @@ impl FlushWorker {
                             }
                         }
                     }
-                }
-
-                // _unchanged columns
-                for i in 0..ncols {
-                    let u = change.col_unchanged.get(i).copied().unwrap_or(false);
-                    row.push(Box::new(u));
                 }
 
                 let refs: Vec<&dyn duckdb::ToSql> = row.iter().map(|b| b.as_ref()).collect();
@@ -351,42 +355,9 @@ impl FlushWorker {
             .map(|n| format!("\"{}\"", n.replace('"', "\"\"")))
             .collect();
 
-        // Step 2a: Resolve TOAST unchanged columns BEFORE deleting old rows.
-        let t_phase = Instant::now();
-        let has_any_unchanged = changes
-            .iter()
-            .any(|c| c.col_unchanged.iter().any(|&u| u));
-
-        if has_any_unchanged {
-            let non_key_col_names: Vec<&str> = attnames
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| !key_attrs.contains(i))
-                .map(|(_, n)| n.as_str())
-                .collect();
-
-            for name in &non_key_col_names {
-                let qname = format!("\"{}\"", name.replace('"', "\"\""));
-                let unch = format!("\"{}_unchanged\"", name.replace('"', "\"\""));
-                let pk_match: Vec<String> = pk_cols
-                    .iter()
-                    .map(|c| format!("t.{c} = compacted.{c}"))
-                    .collect();
-                let resolve_sql = format!(
-                    "UPDATE compacted SET {qname} = ( \
-                         SELECT t.{qname} FROM {target_ref} t WHERE {pk_match} \
-                     ) WHERE _op_type = 1 AND {unch} = true",
-                    qname = qname,
-                    target_ref = target_ref,
-                    pk_match = pk_match.join(" AND "),
-                    unch = unch,
-                );
-                self.db
-                    .execute_batch(&resolve_sql)
-                    .map_err(|e| format!("duckdb resolve toast {}: {}", name, e))?;
-            }
-        }
-        let t_toast_ms = t_phase.elapsed().as_secs_f64() * 1000.0;
+        // (No TOAST resolution step — REPLICA IDENTITY FULL guarantees all column
+        // values are present in every UPDATE record.  Any violation was already
+        // caught by the col_unchanged check above.)
 
         // Wrap DELETE+INSERT in a transaction for atomicity.
         let t_phase = Instant::now();
@@ -477,7 +448,7 @@ impl FlushWorker {
         tracing::debug!(
             "DuckPipe perf: action=duckdb_flush target={} rows={} \
              discover_ms={:.1} buf_create_ms={:.1} load_ms={:.1} compact_ms={:.1} \
-             toast_ms={:.1} begin_ms={:.1} delete_ms={:.1} insert_ms={:.1} \
+             begin_ms={:.1} delete_ms={:.1} insert_ms={:.1} \
              commit_ms={:.1} cleanup_ms={:.1} total_ms={:.1}",
             target_key,
             applied_count,
@@ -485,7 +456,6 @@ impl FlushWorker {
             t_buf_create_ms,
             t_load_ms,
             t_compact_ms,
-            t_toast_ms,
             t_begin_ms,
             t_delete_ms,
             t_insert_ms,
