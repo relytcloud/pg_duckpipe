@@ -137,6 +137,18 @@ fn discover_lake_table_info(
 pub struct FlushWorker {
     db: Connection,
     lake_info: Option<LakeTableInfo>,
+    /// True while this worker may encounter duplicate PKs between the lake and an
+    /// incoming pure-insert batch (e.g., during WAL replay after initial snapshot
+    /// or after a resync).  The DELETE step is always run while this flag is set.
+    ///
+    /// Cleared to `false` after the first pure-insert batch (no UPDATEs/DELETEs)
+    /// that returns zero rows deleted from the lake — that outcome proves no
+    /// conflicting PKs exist and the WAL-replay window is over.  All subsequent
+    /// pure-insert batches can safely skip the O(lake_size) Parquet DELETE scan.
+    ///
+    /// Reset to `true` when the worker is recreated (after error or resync) so
+    /// the invariant is always established conservatively.
+    may_have_conflicts: bool,
 }
 
 impl FlushWorker {
@@ -167,6 +179,7 @@ impl FlushWorker {
         Ok(FlushWorker {
             db,
             lake_info: None,
+            may_have_conflicts: true,
         })
     }
 
@@ -371,13 +384,23 @@ impl FlushWorker {
             .map_err(|e| format!("duckdb begin: {}", e))?;
 
         // Step 2b: DELETE — remove rows from target that match any compacted row's PK.
-        // This is always required for correctness: when confirmed_lsn = 0 the
-        // persistent slot replays from its restart_lsn and can re-deliver WAL
-        // INSERT events for rows already present in the snapshot copy.  The
-        // DELETE step acts as an upsert (remove old → insert new), ensuring no
-        // duplicates even on WAL replay.  For pure-insert catch-up batches this
-        // scan returns 0 matches but pays O(lake_size) Parquet I/O; this is a
-        // known DuckLake performance characteristic tracked in PROGRESS.md.
+        //
+        // Correctness requirement: when confirmed_lsn = 0 (or just after a fresh
+        // snapshot), the slot can replay WAL INSERTs for rows already present in the
+        // snapshot copy.  DELETE removes the old copy before INSERT re-adds the new
+        // version, preventing duplicates.
+        //
+        // Optimisation — skip the expensive O(lake_size) Parquet scan when:
+        //   1. The batch is pure-insert (no UPDATEs/DELETEs in WAL), AND
+        //   2. `may_have_conflicts` is false (a prior pure-insert batch returned
+        //      zero deletes, proving the WAL-replay window is over).
+        //
+        // While `may_have_conflicts` is true (initial state and after any error/
+        // resync), DELETE always runs.  It clears to false the first time a
+        // pure-insert batch returns 0 — after that, pure-insert batches skip the
+        // scan entirely.
+        let skip_delete = !has_non_inserts && !self.may_have_conflicts;
+
         let pk_where: Vec<String> = pk_cols
             .iter()
             .map(|c| format!("{target_ref}.{c} = compacted.{c}"))
@@ -389,12 +412,24 @@ impl FlushWorker {
             target_ref = target_ref,
             pk_match = pk_where.join(" AND ")
         );
-        self.db
-            .execute_batch(&delete_sql)
-            .map_err(|e| {
-                let _ = self.db.execute_batch("ROLLBACK");
-                format!("duckdb delete from {}: {}", target_key, e)
-            })?;
+
+        let deleted_count: usize = if skip_delete {
+            0
+        } else {
+            self.db
+                .execute(&delete_sql, [])
+                .map_err(|e| {
+                    let _ = self.db.execute_batch("ROLLBACK");
+                    format!("duckdb delete from {}: {}", target_key, e)
+                })?
+        };
+
+        // If this was a pure-insert batch and DELETE matched nothing, the
+        // WAL-replay conflict window is over — clear the flag so future
+        // pure-insert batches skip the scan entirely.
+        if !has_non_inserts && deleted_count == 0 {
+            self.may_have_conflicts = false;
+        }
 
         // Step 2c: INSERT — re-insert rows for INSERT and UPDATE ops.
         let insert_sql = format!(
@@ -420,10 +455,14 @@ impl FlushWorker {
             .map_err(|e| format!("duckdb cleanup: {}", e))?;
 
         tracing::info!(
-            "DuckPipe timing: action=duckdb_flush target={} rows={} has_non_inserts={} elapsed_ms={:.1}",
+            "DuckPipe timing: action=duckdb_flush target={} rows={} has_non_inserts={} \
+             skip_delete={} deleted={} may_have_conflicts={} elapsed_ms={:.1}",
             target_key,
             applied_count,
             has_non_inserts,
+            skip_delete,
+            deleted_count,
+            self.may_have_conflicts,
             flush_start.elapsed().as_secs_f64() * 1000.0,
         );
 
