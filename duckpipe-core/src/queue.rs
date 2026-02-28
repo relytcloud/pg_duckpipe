@@ -58,4 +58,3 @@ impl TableQueue {
         self.changes.is_empty()
     }
 }
-

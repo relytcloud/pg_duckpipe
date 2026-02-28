@@ -1,5 +1,5 @@
-use pgrx::prelude::*;
 use pgrx::datum::{DatumWithOid, TimestampWithTimeZone};
+use pgrx::prelude::*;
 
 use crate::DATA_INLINING_ROW_LIMIT;
 
@@ -52,9 +52,8 @@ fn quote_literal(val: &str) -> String {
 
 /// Check if a pg_duckpipe worker is running for the current database
 fn is_worker_running() -> bool {
-    let result = Spi::get_one::<i64>(
-        "SELECT 1 FROM pg_stat_activity WHERE backend_type = 'pg_duckpipe'",
-    );
+    let result =
+        Spi::get_one::<i64>("SELECT 1 FROM pg_stat_activity WHERE backend_type = 'pg_duckpipe'");
     matches!(result, Ok(Some(_)))
 }
 
@@ -71,8 +70,8 @@ fn launch_worker() -> bool {
         };
 
         let mut worker: pg_sys::BackgroundWorker = std::mem::zeroed();
-        worker.bgw_flags = (pg_sys::BGWORKER_SHMEM_ACCESS
-            | pg_sys::BGWORKER_BACKEND_DATABASE_CONNECTION) as i32;
+        worker.bgw_flags =
+            (pg_sys::BGWORKER_SHMEM_ACCESS | pg_sys::BGWORKER_BACKEND_DATABASE_CONNECTION) as i32;
         worker.bgw_start_time = pg_sys::BgWorkerStartTime::BgWorkerStart_RecoveryFinished;
         worker.bgw_restart_time = -1; // BGW_NEVER_RESTART — re-launch on demand via add_table/start_worker
 
@@ -128,11 +127,7 @@ AS 'MODULE_PATHNAME', '@FUNCTION_NAME@'
 LANGUAGE C;
 REVOKE ALL ON FUNCTION duckpipe.create_group(TEXT, TEXT, TEXT) FROM PUBLIC;
 ")]
-fn create_group(
-    name: &str,
-    publication: Option<&str>,
-    slot_name: Option<&str>,
-) -> String {
+fn create_group(name: &str, publication: Option<&str>, slot_name: Option<&str>) -> String {
     let pub_name = publication
         .map(|s| s.to_string())
         .unwrap_or_else(|| format!("duckpipe_pub_{}", name));
@@ -203,9 +198,7 @@ REVOKE ALL ON FUNCTION duckpipe.drop_group(TEXT, BOOLEAN) FROM PUBLIC;
 fn drop_group(name: &str, drop_slot: bool) {
     Spi::connect_mut(|client| {
         // Get publication and slot_name
-        let args = unsafe {
-            [DatumWithOid::new(name, PgBuiltInOids::TEXTOID.value())]
-        };
+        let args = unsafe { [DatumWithOid::new(name, PgBuiltInOids::TEXTOID.value())] };
         let row = client
             .select(
                 "SELECT publication, slot_name FROM duckpipe.sync_groups WHERE name = $1",
@@ -241,10 +234,7 @@ fn drop_group(name: &str, drop_slot: bool) {
 
         // Drop slot if requested
         if drop_slot {
-            let sql = format!(
-                "SELECT pg_drop_replication_slot({})",
-                quote_literal(&slot)
-            );
+            let sql = format!("SELECT pg_drop_replication_slot({})", quote_literal(&slot));
             let _ = client.update(&sql, None, &[]);
         }
 
@@ -253,9 +243,7 @@ fn drop_group(name: &str, drop_slot: bool) {
         let _ = client.update(&sql, None, &[]);
 
         // Delete from sync_groups
-        let args = unsafe {
-            [DatumWithOid::new(name, PgBuiltInOids::TEXTOID.value())]
-        };
+        let args = unsafe { [DatumWithOid::new(name, PgBuiltInOids::TEXTOID.value())] };
         client
             .update(
                 "DELETE FROM duckpipe.sync_groups WHERE name = $1",
@@ -274,9 +262,7 @@ REVOKE ALL ON FUNCTION duckpipe.enable_group(TEXT) FROM PUBLIC;
 ")]
 fn enable_group(name: &str) {
     Spi::connect_mut(|client| {
-        let args = unsafe {
-            [DatumWithOid::new(name, PgBuiltInOids::TEXTOID.value())]
-        };
+        let args = unsafe { [DatumWithOid::new(name, PgBuiltInOids::TEXTOID.value())] };
         let result = client.update(
             "UPDATE duckpipe.sync_groups SET enabled = true WHERE name = $1",
             None,
@@ -304,9 +290,7 @@ REVOKE ALL ON FUNCTION duckpipe.disable_group(TEXT) FROM PUBLIC;
 ")]
 fn disable_group(name: &str) {
     Spi::connect_mut(|client| {
-        let args = unsafe {
-            [DatumWithOid::new(name, PgBuiltInOids::TEXTOID.value())]
-        };
+        let args = unsafe { [DatumWithOid::new(name, PgBuiltInOids::TEXTOID.value())] };
         let result = client.update(
             "UPDATE duckpipe.sync_groups SET enabled = false WHERE name = $1",
             None,
@@ -355,9 +339,7 @@ fn add_table(
 
     Spi::connect_mut(|client| {
         // 1. Get publication and slot name for this group
-        let args = unsafe {
-            [DatumWithOid::new(group, PgBuiltInOids::TEXTOID.value())]
-        };
+        let args = unsafe { [DatumWithOid::new(group, PgBuiltInOids::TEXTOID.value())] };
         let result = client
             .select(
                 "SELECT publication, slot_name FROM duckpipe.sync_groups WHERE name = $1",
@@ -387,7 +369,10 @@ fn add_table(
         // 2. Check if publication exists
         let pub_exists = {
             let args = unsafe {
-                [DatumWithOid::new(publication.as_str(), PgBuiltInOids::TEXTOID.value())]
+                [DatumWithOid::new(
+                    publication.as_str(),
+                    PgBuiltInOids::TEXTOID.value(),
+                )]
             };
             let result = client.select(
                 "SELECT 1 FROM pg_publication WHERE pubname = $1",
@@ -435,7 +420,10 @@ fn add_table(
         // 4. Auto-create target schema if needed
         {
             let args = unsafe {
-                [DatumWithOid::new(t_schema.as_str(), PgBuiltInOids::TEXTOID.value())]
+                [DatumWithOid::new(
+                    t_schema.as_str(),
+                    PgBuiltInOids::TEXTOID.value(),
+                )]
             };
             let result = client.select(
                 "SELECT 1 FROM pg_namespace WHERE nspname = $1",
@@ -763,7 +751,15 @@ fn groups() -> TableIterator<
                 let lag_bytes: i64 = row.get(6).unwrap().unwrap();
                 let last_sync: Option<TimestampWithTimeZone> = row.get(7).unwrap();
 
-                rows.push((name, publication, slot_name, enabled, table_count, lag_bytes, last_sync));
+                rows.push((
+                    name,
+                    publication,
+                    slot_name,
+                    enabled,
+                    table_count,
+                    lag_bytes,
+                    last_sync,
+                ));
             }
         }
     });
@@ -817,7 +813,14 @@ fn tables() -> TableIterator<
                 let rows_synced: i64 = row.get(5).unwrap().unwrap();
                 let last_sync: Option<TimestampWithTimeZone> = row.get(6).unwrap();
 
-                rows.push((source_table, target_table, sync_group, enabled, rows_synced, last_sync));
+                rows.push((
+                    source_table,
+                    target_table,
+                    sync_group,
+                    enabled,
+                    rows_synced,
+                    last_sync,
+                ));
             }
         }
     });

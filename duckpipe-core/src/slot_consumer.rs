@@ -32,12 +32,11 @@ impl SlotConsumer {
         publication: &str,
         start_lsn: u64,
     ) -> Result<Self, String> {
-        let config = ReplicationConfig::unix(
-            socket_dir, port, user, "", database, slot, publication,
-        )
-        .with_start_lsn(Lsn(start_lsn))
-        .with_status_interval(Duration::from_millis(500))
-        .with_wakeup_interval(Duration::from_millis(100));
+        let config =
+            ReplicationConfig::unix(socket_dir, port, user, "", database, slot, publication)
+                .with_start_lsn(Lsn(start_lsn))
+                .with_status_interval(Duration::from_millis(500))
+                .with_wakeup_interval(Duration::from_millis(100));
 
         let client = ReplicationClient::connect(config)
             .await
@@ -87,10 +86,14 @@ impl SlotConsumer {
     /// path is used.
     fn event_to_message(event: ReplicationEvent) -> Option<(u64, Vec<u8>)> {
         match event {
-            ReplicationEvent::XLogData { wal_start, data, .. } => {
-                Some((wal_start.0, data.to_vec()))
-            }
-            ReplicationEvent::Begin { final_lsn, xid, commit_time_micros } => {
+            ReplicationEvent::XLogData {
+                wal_start, data, ..
+            } => Some((wal_start.0, data.to_vec())),
+            ReplicationEvent::Begin {
+                final_lsn,
+                xid,
+                commit_time_micros,
+            } => {
                 // Synthesize pgoutput 'B' (Begin) binary message:
                 //   [type='B':u8] [final_lsn:i64] [commit_time:i64] [xid:i32]
                 let mut buf = Vec::with_capacity(21);
@@ -100,7 +103,11 @@ impl SlotConsumer {
                 buf.extend_from_slice(&(xid as i32).to_be_bytes());
                 Some((final_lsn.0, buf))
             }
-            ReplicationEvent::Commit { lsn, end_lsn, commit_time_micros } => {
+            ReplicationEvent::Commit {
+                lsn,
+                end_lsn,
+                commit_time_micros,
+            } => {
                 // Synthesize pgoutput 'C' (Commit) binary message:
                 //   [type='C':u8] [flags=0:u8] [commit_lsn:i64] [end_lsn:i64] [commit_time:i64]
                 let mut buf = Vec::with_capacity(26);

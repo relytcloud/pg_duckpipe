@@ -1,8 +1,8 @@
 mod api;
 mod worker;
 
-use pgrx::prelude::*;
 use pgrx::guc::{GucContext, GucFlags, GucRegistry, GucSetting};
+use pgrx::prelude::*;
 
 pg_module_magic!();
 extension_sql_file!("./sql/bootstrap.sql", bootstrap);

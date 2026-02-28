@@ -103,7 +103,14 @@ async fn ensure_coordinator_queue(
         let types = vec![0u32; names.len()]; // unknown type → Text fallback
         (names, keys, types)
     };
-    coordinator.ensure_queue(target_key, mapping.id, mapping.applied_lsn, attnames, key_attrs, atttypes);
+    coordinator.ensure_queue(
+        target_key,
+        mapping.id,
+        mapping.applied_lsn,
+        attnames,
+        key_attrs,
+        atttypes,
+    );
     Ok(())
 }
 
@@ -130,7 +137,13 @@ async fn process_one_wal_message(
     match msgtype {
         'R' => {
             let (rel_id, entry) = parse_relation_message(data, &mut cursor);
-            rel_cache.insert(rel_id, RelCacheWithMapping { entry, mapping: None });
+            rel_cache.insert(
+                rel_id,
+                RelCacheWithMapping {
+                    entry,
+                    mapping: None,
+                },
+            );
         }
         'I' => {
             let rel_id = read_i32(data, &mut cursor) as u32;
@@ -156,8 +169,14 @@ async fn process_one_wal_message(
                         return Ok(false);
                     }
                     let target_key = format!("{}.{}", mapping.target_schema, mapping.target_table);
-                    ensure_coordinator_queue(coordinator, &target_key, mapping, &cached.entry, meta)
-                        .await?;
+                    ensure_coordinator_queue(
+                        coordinator,
+                        &target_key,
+                        mapping,
+                        &cached.entry,
+                        meta,
+                    )
+                    .await?;
                     coordinator.push_change(
                         &target_key,
                         Change {
@@ -206,8 +225,14 @@ async fn process_one_wal_message(
                         return Ok(false);
                     }
                     let target_key = format!("{}.{}", mapping.target_schema, mapping.target_table);
-                    ensure_coordinator_queue(coordinator, &target_key, mapping, &cached.entry, meta)
-                        .await?;
+                    ensure_coordinator_queue(
+                        coordinator,
+                        &target_key,
+                        mapping,
+                        &cached.entry,
+                        meta,
+                    )
+                    .await?;
 
                     // key_values for the DELETE half: always extract by key position so the
                     // flush path can index them as key_values[ki] (ki = ordinal within key_attrs).
@@ -314,8 +339,14 @@ async fn process_one_wal_message(
                         return Ok(false);
                     }
                     let target_key = format!("{}.{}", mapping.target_schema, mapping.target_table);
-                    ensure_coordinator_queue(coordinator, &target_key, mapping, &cached.entry, meta)
-                        .await?;
+                    ensure_coordinator_queue(
+                        coordinator,
+                        &target_key,
+                        mapping,
+                        &cached.entry,
+                        meta,
+                    )
+                    .await?;
                     coordinator.push_change(
                         &target_key,
                         Change {
@@ -366,7 +397,9 @@ async fn process_one_wal_message(
                             if let Err(e) = client.execute(&delete_sql, &[]).await {
                                 tracing::error!(
                                     "pg_duckpipe: failed to clear target table {}.{}: {}",
-                                    mapping.target_schema, mapping.target_table, e
+                                    mapping.target_schema,
+                                    mapping.target_table,
+                                    e
                                 );
                             }
                         }
@@ -396,10 +429,20 @@ async fn run_heartbeat(
     // 1. Drain flush results; invalidate rel_cache entries for errored tables so
     //    the next WAL event re-fetches state (table may have transitioned to ERRORED).
     for r in &coordinator.collect_results() {
-        if let FlushThreadResult::Error { target_key, error, mapping_id, .. } = r {
+        if let FlushThreadResult::Error {
+            target_key,
+            error,
+            mapping_id,
+            ..
+        } = r
+        {
             tracing::error!("pg_duckpipe: flush error for {}: {}", target_key, error);
             for cached in rel_cache.values_mut() {
-                if cached.mapping.as_ref().map_or(false, |m| &m.id == mapping_id) {
+                if cached
+                    .mapping
+                    .as_ref()
+                    .map_or(false, |m| &m.id == mapping_id)
+                {
                     cached.mapping = None;
                     break;
                 }
@@ -413,12 +456,15 @@ async fn run_heartbeat(
             if let Err(e) = meta.retry_errored_table(table.id).await {
                 tracing::error!(
                     "pg_duckpipe: failed to retry errored table {}.{}: {}",
-                    table.source_schema, table.source_table, e
+                    table.source_schema,
+                    table.source_table,
+                    e
                 );
             } else {
                 tracing::info!(
                     "pg_duckpipe: auto-retrying errored table {}.{}",
-                    table.source_schema, table.source_table
+                    table.source_schema,
+                    table.source_table
                 );
                 // Mirror ERRORED → STREAMING in the rel_cache so routing resumes
                 // immediately without waiting for the next periodic refresh.
@@ -498,7 +544,11 @@ async fn process_sync_group_streaming(
             let _ = meta.update_confirmed_lsn(group.id, min_lsn).await;
             consumer.send_status_update(min_lsn);
         }
-        return Ok(ProcessResult { total_processed: 0, any_work: false, confirmed_lsn: min_lsn });
+        return Ok(ProcessResult {
+            total_processed: 0,
+            any_work: false,
+            confirmed_lsn: min_lsn,
+        });
     }
 
     // first_msg_timeout: how long to wait for the very first WAL message this cycle.
@@ -527,14 +577,25 @@ async fn process_sync_group_streaming(
             break;
         }
 
-        let timeout = if !have_first { first_msg_timeout } else { recv_fast };
+        let timeout = if !have_first {
+            first_msg_timeout
+        } else {
+            recv_fast
+        };
         match consumer.recv_one(timeout).await? {
             None => break,
             Some((lsn, data)) => {
                 have_first = true;
-                let is_commit =
-                    process_one_wal_message(client, meta, group, lsn, &data, coordinator, rel_cache)
-                        .await?;
+                let is_commit = process_one_wal_message(
+                    client,
+                    meta,
+                    group,
+                    lsn,
+                    &data,
+                    coordinator,
+                    rel_cache,
+                )
+                .await?;
                 total_processed += 1;
                 if is_commit {
                     commits_since_heartbeat += 1;
@@ -717,7 +778,13 @@ async fn process_snapshots(
 
         let handle = tokio::spawn(async move {
             let result = snapshot::process_snapshot_task(
-                &src_schema, &src_table, &tgt_schema, &tgt_table, &cs, timing, task_id,
+                &src_schema,
+                &src_table,
+                &tgt_schema,
+                &tgt_table,
+                &cs,
+                timing,
+                task_id,
             )
             .await;
             snapshot::SnapshotResult {
@@ -746,9 +813,7 @@ async fn process_snapshots(
                     }
                 }
                 Err(e) => {
-                    let _ = meta
-                        .record_error_message(snap_result.task_id, &e)
-                        .await;
+                    let _ = meta.record_error_message(snap_result.task_id, &e).await;
                     tracing::warn!(
                         "DuckPipe: snapshot failed for {}.{}: {}",
                         snap_result.source_schema,
@@ -819,7 +884,10 @@ pub async fn run_sync_cycle(
         // later do targeted rel_cache invalidation for errored mappings.
         let prev_results = coordinator.collect_results();
         for r in &prev_results {
-            if let FlushThreadResult::Error { target_key, error, .. } = r {
+            if let FlushThreadResult::Error {
+                target_key, error, ..
+            } = r
+            {
                 tracing::error!("pg_duckpipe: flush error for {}: {}", target_key, error);
             }
         }
@@ -831,7 +899,11 @@ pub async fn run_sync_cycle(
         if fresh_flushed > group.confirmed_lsn {
             group.confirmed_lsn = fresh_flushed;
             if let Err(e) = meta.update_confirmed_lsn(group.id, fresh_flushed).await {
-                tracing::error!("pg_duckpipe: failed to persist confirmed_lsn for group {}: {}", group.id, e);
+                tracing::error!(
+                    "pg_duckpipe: failed to persist confirmed_lsn for group {}: {}",
+                    group.id,
+                    e
+                );
             }
         }
 
@@ -855,12 +927,15 @@ pub async fn run_sync_cycle(
             )
             .await
             .map_err(|e| format!("streaming connect failed for {}: {}", group.slot_name, e))?;
-            consumers.insert(group.slot_name.clone(), SlotState {
-                consumer,
-                rel_cache: HashMap::new(),
-                // Fresh connection — cache is empty, so no immediate refresh needed.
-                last_enabled_check: Instant::now(),
-            });
+            consumers.insert(
+                group.slot_name.clone(),
+                SlotState {
+                    consumer,
+                    rel_cache: HashMap::new(),
+                    // Fresh connection — cache is empty, so no immediate refresh needed.
+                    last_enabled_check: Instant::now(),
+                },
+            );
         }
 
         let slot_state = consumers.get_mut(&group.slot_name).unwrap();
@@ -871,7 +946,11 @@ pub async fn run_sync_cycle(
         for r in &prev_results {
             if let FlushThreadResult::Error { mapping_id, .. } = r {
                 for cached in slot_state.rel_cache.values_mut() {
-                    if cached.mapping.as_ref().map_or(false, |m| &m.id == mapping_id) {
+                    if cached
+                        .mapping
+                        .as_ref()
+                        .map_or(false, |m| &m.id == mapping_id)
+                    {
                         cached.mapping = None;
                         break;
                     }
@@ -884,7 +963,9 @@ pub async fn run_sync_cycle(
         // errors) are mirrored in-place as they happen, so this only needs to catch
         // external changes such as a user toggling `enabled` via direct SQL.
         if slot_state.last_enabled_check.elapsed() >= ENABLED_REFRESH_INTERVAL {
-            let ids: Vec<i32> = slot_state.rel_cache.values()
+            let ids: Vec<i32> = slot_state
+                .rel_cache
+                .values()
                 .filter_map(|c| c.mapping.as_ref().map(|m| m.id))
                 .collect();
             if !ids.is_empty() {
@@ -902,7 +983,8 @@ pub async fn run_sync_cycle(
                     Err(e) => {
                         tracing::warn!(
                             "pg_duckpipe: periodic enabled/state refresh failed for slot {}: {}",
-                            group.slot_name, e
+                            group.slot_name,
+                            e
                         );
                     }
                 }
@@ -911,7 +993,12 @@ pub async fn run_sync_cycle(
         }
 
         let result = match process_sync_group_streaming(
-            &client, &meta, group, config, &mut slot_state.consumer, coordinator,
+            &client,
+            &meta,
+            group,
+            config,
+            &mut slot_state.consumer,
+            coordinator,
             &mut slot_state.rel_cache,
         )
         .await

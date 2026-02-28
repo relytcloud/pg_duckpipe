@@ -160,18 +160,19 @@ impl FlushCoordinator {
     ) {
         // Seed in-memory LSN from the persistent PG value if we haven't seen this table yet.
         // `or_insert` preserves any higher value already tracked from a completed flush.
-        self.per_table_lsn.entry(mapping_id).or_insert(initial_applied_lsn);
+        self.per_table_lsn
+            .entry(mapping_id)
+            .or_insert(initial_applied_lsn);
         // Cache target_key → mapping_id for lock-free lookup in get_min_applied_lsn_in_coordinator.
-        self.target_to_mapping.insert(target_key.to_string(), mapping_id);
+        self.target_to_mapping
+            .insert(target_key.to_string(), mapping_id);
         // Check if entry exists and thread is alive
         let needs_spawn = match self.threads.get(target_key) {
             None => true,
-            Some(entry) => {
-                match &entry.join_handle {
-                    Some(h) => h.is_finished(),
-                    None => true,
-                }
-            }
+            Some(entry) => match &entry.join_handle {
+                Some(h) => h.is_finished(),
+                None => true,
+            },
         };
 
         if !needs_spawn {
@@ -264,7 +265,9 @@ impl FlushCoordinator {
                 guard.last_lsn = change.lsn;
             }
             guard.changes.push(change);
-            self.backpressure.total_queued.fetch_add(1, Ordering::Relaxed);
+            self.backpressure
+                .total_queued
+                .fetch_add(1, Ordering::Relaxed);
             entry.queue_handle.condvar.notify_one();
         }
     }
@@ -413,7 +416,12 @@ impl FlushCoordinator {
     pub fn collect_results(&mut self) -> Vec<FlushThreadResult> {
         let mut results = Vec::new();
         while let Ok(r) = self.result_rx.try_recv() {
-            if let FlushThreadResult::Success { mapping_id, last_lsn, .. } = &r {
+            if let FlushThreadResult::Success {
+                mapping_id,
+                last_lsn,
+                ..
+            } = &r
+            {
                 let entry = self.per_table_lsn.entry(*mapping_id).or_insert(0);
                 if *last_lsn > *entry {
                     *entry = *last_lsn;
@@ -539,7 +547,9 @@ fn flush_thread_main(
             if control.shutdown.load(Ordering::Acquire) {
                 // Drop in-memory changes — confirmed_lsn was never advanced past them,
                 // so PostgreSQL will re-deliver them on the next startup.
-                backpressure.total_queued.fetch_sub(accumulated_count, Ordering::Relaxed);
+                backpressure
+                    .total_queued
+                    .fetch_sub(accumulated_count, Ordering::Relaxed);
                 pending_local.store(0, Ordering::Relaxed);
                 if control.drain_requested.load(Ordering::Acquire) {
                     signal_drain_complete(&drain_complete, &control);
@@ -622,7 +632,9 @@ fn flush_thread_main(
                 );
             }
             accumulated.clear();
-            backpressure.total_queued.fetch_sub(accumulated_count, Ordering::Relaxed);
+            backpressure
+                .total_queued
+                .fetch_sub(accumulated_count, Ordering::Relaxed);
             accumulated_count = 0;
             pending_local.store(0, Ordering::Relaxed);
             accumulated_lsn = 0;
@@ -697,7 +709,8 @@ fn do_flush(
             )) {
                 tracing::error!(
                     "pg_duckpipe: metrics update failed for {}: {}",
-                    result.target_key, e
+                    result.target_key,
+                    e
                 );
             }
             // Clear error state on success

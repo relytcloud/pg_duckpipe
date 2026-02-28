@@ -113,14 +113,12 @@ fn discover_lake_table_info(
 
     let mut column_types = Vec::with_capacity(expected_attnames.len());
     for name in expected_attnames {
-        let dtype = lake_col_map
-            .get(&name.to_lowercase())
-            .ok_or_else(|| {
-                format!(
-                    "column '{}' not found in DuckLake table {}.{}",
-                    name, lake_schema, target_table
-                )
-            })?;
+        let dtype = lake_col_map.get(&name.to_lowercase()).ok_or_else(|| {
+            format!(
+                "column '{}' not found in DuckLake table {}.{}",
+                name, lake_schema, target_table
+            )
+        })?;
         column_types.push(dtype.clone());
     }
 
@@ -175,7 +173,7 @@ impl FlushWorker {
         db.execute_batch(
             "SET ducklake_retry_wait_ms = 100; \
              SET ducklake_retry_backoff = 2.0; \
-             SET ducklake_max_retry_count = 10;"
+             SET ducklake_max_retry_count = 10;",
         )
         .map_err(|e| format!("duckdb set retry: {}", e))?;
 
@@ -236,10 +234,7 @@ impl FlushWorker {
         // pgoutput always includes every column value in UPDATE WAL records.
         // Any 'u'-status (TOAST unchanged) column reaching the flush path means
         // the source table had its REPLICA IDENTITY changed after add_table().
-        if changes
-            .iter()
-            .any(|c| c.col_unchanged.iter().any(|&u| u))
-        {
+        if changes.iter().any(|c| c.col_unchanged.iter().any(|&u| u)) {
             return Err(
                 "TOAST unchanged column detected in WAL — source table must have \
                  REPLICA IDENTITY FULL. Run: ALTER TABLE <name> REPLICA IDENTITY FULL"
@@ -403,12 +398,10 @@ impl FlushWorker {
         let deleted_count: usize = if skip_delete {
             0
         } else {
-            self.db
-                .execute(&delete_sql, [])
-                .map_err(|e| {
-                    let _ = self.db.execute_batch("ROLLBACK");
-                    format!("duckdb delete from {}: {}", target_key, e)
-                })?
+            self.db.execute(&delete_sql, []).map_err(|e| {
+                let _ = self.db.execute_batch("ROLLBACK");
+                format!("duckdb delete from {}: {}", target_key, e)
+            })?
         };
         let t_delete_ms = t_phase.elapsed().as_secs_f64() * 1000.0;
 
@@ -427,12 +420,10 @@ impl FlushWorker {
             target_ref = target_ref,
             cols = all_cols.join(", ")
         );
-        self.db
-            .execute_batch(&insert_sql)
-            .map_err(|e| {
-                let _ = self.db.execute_batch("ROLLBACK");
-                format!("duckdb insert into {}: {}", target_key, e)
-            })?;
+        self.db.execute_batch(&insert_sql).map_err(|e| {
+            let _ = self.db.execute_batch("ROLLBACK");
+            format!("duckdb insert into {}: {}", target_key, e)
+        })?;
         let t_insert_ms = t_phase.elapsed().as_secs_f64() * 1000.0;
 
         let t_phase = Instant::now();
@@ -485,7 +476,6 @@ impl FlushWorker {
         })
     }
 }
-
 
 /// Result of a DuckDB-based flush.
 #[derive(Debug)]

@@ -1,9 +1,9 @@
 pub mod decoder;
-pub mod log;
 pub mod duckdb_flush;
 pub mod error;
 pub mod flush_coordinator;
 pub mod flush_worker;
+pub mod log;
 pub mod metadata;
 pub mod queue;
 pub mod service;

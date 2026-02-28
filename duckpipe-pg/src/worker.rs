@@ -1,12 +1,15 @@
-use pgrx::prelude::*;
 use pgrx::pg_sys::panic::CaughtError;
+use pgrx::prelude::*;
 use std::collections::HashMap;
 use std::ffi::CString;
 
 use duckpipe_core::flush_coordinator::FlushCoordinator;
 use duckpipe_core::service::{self, ServiceConfig, SlotConnectParams, SlotState};
 
-use crate::{BATCH_SIZE_PER_GROUP, DEBUG_LOG, ENABLED, FLUSH_BATCH_THRESHOLD, FLUSH_INTERVAL, MAX_QUEUED_CHANGES, POLL_INTERVAL};
+use crate::{
+    BATCH_SIZE_PER_GROUP, DEBUG_LOG, ENABLED, FLUSH_BATCH_THRESHOLD, FLUSH_INTERVAL,
+    MAX_QUEUED_CHANGES, POLL_INTERVAL,
+};
 
 /// Check if shutdown has been requested.
 fn should_shutdown() -> bool {
@@ -54,9 +57,7 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
                 format!("database with OID {} does not exist", dboid)
             );
         } else {
-            std::ffi::CStr::from_ptr(name)
-                .to_string_lossy()
-                .to_string()
+            std::ffi::CStr::from_ptr(name).to_string_lossy().to_string()
         };
 
         // Read port and socket dir while still in transaction
@@ -80,11 +81,7 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
             let dirs = std::ffi::CStr::from_ptr(sock_ptr)
                 .to_string_lossy()
                 .to_string();
-            dirs.split(',')
-                .next()
-                .unwrap_or("/tmp")
-                .trim()
-                .to_string()
+            dirs.split(',').next().unwrap_or("/tmp").trim().to_string()
         };
 
         pg_sys::CommitTransactionCommand();
@@ -155,7 +152,7 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
 
                     if !ENABLED.get() {
                         tokio::time::sleep(std::time::Duration::from_millis(
-                            POLL_INTERVAL.get() as u64,
+                            POLL_INTERVAL.get() as u64
                         ))
                         .await;
                         continue;

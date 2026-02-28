@@ -105,13 +105,12 @@ pub async fn process_snapshot_task(
     // Step 2: Open data connection and copy data using the exported snapshot.
     // Wrap in an inner async block so we always clean up the control connection.
     let copy_result = async {
-        let (client, connection) =
-            tokio_postgres::connect(connstr, NoTls).await.map_err(|e| {
-                format!(
-                    "snapshot data connect for {}.{}: {}",
-                    source_schema, source_table, e
-                )
-            })?;
+        let (client, connection) = tokio_postgres::connect(connstr, NoTls).await.map_err(|e| {
+            format!(
+                "snapshot data connect for {}.{}: {}",
+                source_schema, source_table, e
+            )
+        })?;
 
         let conn_handle = tokio::spawn(async move {
             if let Err(e) = connection.await {

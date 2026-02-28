@@ -72,7 +72,9 @@ pub async fn update_error_state(
                 .await;
             tracing::warn!(
                 "pg_duckpipe: mapping {} transitioned to ERRORED after {} failures, retry in {}s",
-                mapping_id, count, backoff
+                mapping_id,
+                count,
+                backoff
             );
         }
     }
@@ -84,10 +86,7 @@ pub async fn update_error_state(
 }
 
 /// Clear error state on successful flush: reset consecutive_failures and error_message.
-pub async fn clear_error_on_success(
-    connstr: &str,
-    mapping_id: i32,
-) -> Result<(), String> {
+pub async fn clear_error_on_success(connstr: &str, mapping_id: i32) -> Result<(), String> {
     let (client, connection) = tokio_postgres::connect(connstr, NoTls)
         .await
         .map_err(|e| format!("clear_error connect: {}", e))?;

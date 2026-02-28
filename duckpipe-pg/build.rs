@@ -10,7 +10,10 @@ fn main() {
         }
     } else {
         // Try default pg_config
-        if let Ok(output) = std::process::Command::new("pg_config").arg("--libdir").output() {
+        if let Ok(output) = std::process::Command::new("pg_config")
+            .arg("--libdir")
+            .output()
+        {
             let libdir = String::from_utf8_lossy(&output.stdout).trim().to_string();
             println!("cargo:rustc-link-search=native={}", libdir);
         }

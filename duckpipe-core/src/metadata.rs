@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use tokio_postgres::Client;
 
-use crate::types::{SyncGroup, TableMapping, format_lsn, parse_lsn};
+use crate::types::{format_lsn, parse_lsn, SyncGroup, TableMapping};
 
 /// Async metadata client wrapping a tokio-postgres connection.
 pub struct MetadataClient<'a> {
@@ -35,9 +35,7 @@ impl<'a> MetadataClient<'a> {
                 let publication: String = row.get(2);
                 let slot_name: String = row.get(3);
                 let confirmed_lsn_str: Option<String> = row.get(4);
-                let confirmed_lsn = confirmed_lsn_str
-                    .map(|s| parse_lsn(&s))
-                    .unwrap_or(0);
+                let confirmed_lsn = confirmed_lsn_str.map(|s| parse_lsn(&s)).unwrap_or(0);
                 SyncGroup {
                     id,
                     name,
@@ -81,16 +79,12 @@ impl<'a> MetadataClient<'a> {
         let target_table: String = row.get(4);
         let state: String = row.get(5);
         let snapshot_lsn_str: Option<String> = row.get(6);
-        let snapshot_lsn = snapshot_lsn_str
-            .map(|s| parse_lsn(&s))
-            .unwrap_or(0);
+        let snapshot_lsn = snapshot_lsn_str.map(|s| parse_lsn(&s)).unwrap_or(0);
         let enabled: bool = row.get(7);
         let source_oid: Option<i64> = row.get(8);
         let error_message: Option<String> = row.get(9);
         let applied_lsn_str: Option<String> = row.get(10);
-        let applied_lsn = applied_lsn_str
-            .map(|s| parse_lsn(&s))
-            .unwrap_or(0);
+        let applied_lsn = applied_lsn_str.map(|s| parse_lsn(&s)).unwrap_or(0);
 
         Ok(Some(TableMapping {
             id,
@@ -247,10 +241,7 @@ impl<'a> MetadataClient<'a> {
     }
 
     /// Auto-retry: transition ERRORED table back to STREAMING, clear error and failures.
-    pub async fn retry_errored_table(
-        &self,
-        mapping_id: i32,
-    ) -> Result<(), tokio_postgres::Error> {
+    pub async fn retry_errored_table(&self, mapping_id: i32) -> Result<(), tokio_postgres::Error> {
         self.client
             .execute(
                 "UPDATE duckpipe.table_mappings SET state = 'STREAMING', \
@@ -376,10 +367,7 @@ impl<'a> MetadataClient<'a> {
     /// Get the minimum applied_lsn across all active (STREAMING/CATCHUP) tables in a group.
     /// Returns 0 if any active table has NULL applied_lsn (not yet flushed), or if
     /// there are no active tables.
-    pub async fn get_min_applied_lsn(
-        &self,
-        group_id: i32,
-    ) -> Result<u64, tokio_postgres::Error> {
+    pub async fn get_min_applied_lsn(&self, group_id: i32) -> Result<u64, tokio_postgres::Error> {
         // For CATCHUP tables with NULL applied_lsn, use snapshot_lsn as the
         // effective floor: everything up to snapshot_lsn is either in the
         // snapshot copy or will be skipped by CATCHUP skip logic, so the slot
