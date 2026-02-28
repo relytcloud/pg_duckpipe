@@ -69,7 +69,9 @@ Control post-run data verification with `--consistency-mode`:
 ## Sample Results
 
 **Environment**: MacBook Pro M1, PostgreSQL 18.1
+
 **Config**: `flush_batch_threshold=10000`, `data_inlining_row_limit=1000`, `poll_interval=10000`
+
 **Workload**: `oltp_insert`, 1 thread, 30 s, 1 table x 100k rows
 
 ```
