@@ -6,7 +6,7 @@
 
 use std::time::Instant;
 
-use duckdb::Connection;
+use duckdb::{Config, Connection};
 
 use crate::queue::TableQueue;
 use crate::types::{ChangeType, Value};
@@ -155,7 +155,10 @@ impl FlushWorker {
     /// Create a new FlushWorker with a persistent DuckDB connection.
     /// Performs one-time setup: open in-memory DB, INSTALL+LOAD ducklake, ATTACH to PG.
     pub fn new(pg_connstr: &str, ducklake_schema: &str) -> Result<Self, String> {
-        let db = Connection::open_in_memory()
+        let config = Config::default()
+            .allow_unsigned_extensions()
+            .map_err(|e| format!("duckdb config: {}", e))?;
+        let db = Connection::open_in_memory_with_flags(config)
             .map_err(|e| format!("duckdb open: {}", e))?;
 
         db.execute_batch("INSTALL ducklake; LOAD ducklake;")

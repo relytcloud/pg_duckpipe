@@ -14,13 +14,13 @@ fn should_shutdown() -> bool {
 }
 
 /// Read current GUC config.
-fn read_config(connstr: &str) -> ServiceConfig {
+fn read_config(connstr: &str, duckdb_pg_connstr: &str) -> ServiceConfig {
     ServiceConfig {
         poll_interval_ms: POLL_INTERVAL.get(),
         batch_size_per_group: BATCH_SIZE_PER_GROUP.get(),
         debug_log: DEBUG_LOG.get(),
         connstr: connstr.to_string(),
-        duckdb_pg_connstr: connstr.to_string(),
+        duckdb_pg_connstr: duckdb_pg_connstr.to_string(),
         ducklake_schema: "ducklake".to_string(),
         flush_interval_ms: FLUSH_INTERVAL.get(),
         flush_batch_threshold: FLUSH_BATCH_THRESHOLD.get(),
@@ -115,12 +115,19 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
     let slot_params = SlotConnectParams::Unix {
         socket_dir: socket_dir.clone(),
         port: port_num,
-        user: os_user,
+        user: os_user.clone(),
         dbname: db.clone(),
     };
 
+    // DuckDB's postgres_scanner speaks TCP, not unix sockets.
+    // Build a loopback TCP connstr for the DuckLake ATTACH inside flush workers.
+    let duckdb_pg_connstr = format!(
+        "host=127.0.0.1 port={} dbname={} user={}",
+        port, db, os_user
+    );
+
     // Create persistent flush coordinator (survives across cycles, cleared on panic)
-    let config = read_config(&connstr);
+    let config = read_config(&connstr, &duckdb_pg_connstr);
     let mut coordinator = FlushCoordinator::new(
         connstr.clone(),
         "ducklake".to_string(),
@@ -154,7 +161,7 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
                         continue;
                     }
 
-                    let config = read_config(&connstr);
+                    let config = read_config(&connstr, &duckdb_pg_connstr);
 
                     match service::run_sync_cycle(&config, coord, &slot_params, &mut consumers)
                         .await
