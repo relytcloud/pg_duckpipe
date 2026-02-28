@@ -45,7 +45,8 @@
 - [ ] `conninfo` column in sync_groups for remote PG support
 - [ ] Schema DDL sync (ALTER TABLE ADD/DROP COLUMN propagation)
 - [x] **`REPLICA IDENTITY FULL` enforced** — `add_table()` always issues `ALTER TABLE <src> REPLICA IDENTITY FULL`. The flush path has no TOAST-unchanged fallback: buffer table has no `{col}_unchanged` columns, appender rows are narrower (ncols not 2×ncols), and TOAST resolution is gone. Any `col_unchanged = true` in WAL (source identity changed after add) surfaces as a hard flush error triggering the existing backoff retry path. Trade-off: higher WAL volume on source.
-- [ ] Dockerfile for setting up a self-contained playground env
+- [x] Dockerfile for setting up a self-contained playground env
+- [ ] CI: `cargo chef` pattern to cache Rust dependency compilation across GHA runs
 
 ### Monitoring / Observability
 - [ ] `applied_lsn` stays NULL during SNAPSHOT/CATCHUP — should be set to `snapshot_lsn` after snapshot completes
