@@ -1,146 +1,86 @@
+<div align="center">
+
 # pg_duckpipe
 
-PostgreSQL extension and daemon for CDC synchronization from heap tables (row store) to DuckLake tables (column store), enabling HTAP in one system.
+PostgreSQL extension for real-time CDC to pg_ducklake
+
+[![dockerhub](https://img.shields.io/docker/pulls/pgducklake/pgduckpipe?logo=docker)](https://hub.docker.com/r/pgducklake/pgduckpipe)
+[![License](https://img.shields.io/badge/License-MIT-blue)](https://github.com/YuweiXIAO/pg_duckpipe/blob/main/LICENSE)
+
+</div>
 
 ## Overview
 
-`pg_duckpipe` tails PostgreSQL WAL via logical replication (`pgoutput`), decodes row changes, and applies them to DuckLake targets managed by `pg_duckdb`.
+`pg_duckpipe` brings real-time change data capture (CDC) to PostgreSQL, enabling HTAP by continuously syncing your row tables to [DuckLake](https://github.com/relytcloud/pg_ducklake/) columnar tables. Run transactional and analytical workloads in a single database.
 
-```
-Heap table writes -> WAL -> replication slot (pgoutput) -> duckpipe worker -> DuckLake table
-```
-
-The project is a Rust workspace:
-
-- `duckpipe-pg`: `pgrx` extension (`CREATE EXTENSION pg_duckpipe`)
-- `duckpipe-core`: shared CDC engine
-- `duckpipe-daemon`: standalone binary using the same core engine
+![pg_duckpipe architecture](images/arch.png)
 
 ## Key Features
 
-- Streaming replication path (`START_REPLICATION`) with crash-safe slot advancement
-- Per-table state machine: `SNAPSHOT -> CATCHUP -> STREAMING` (+ `ERRORED`)
-- Sync groups: multiple tables share one publication + one replication slot
-- Automatic target creation (`USING ducklake`) via `duckpipe.add_table(...)`
-- TOAST-unchanged UPDATE preservation (no NULL corruption on unchanged TOAST columns)
-- Per-table error isolation with exponential backoff auto-retry
-- Backpressure when queued changes exceed a configured threshold
-- Rename safety via source-table OID tracking
-- Dynamic background worker auto-start on `add_table()`
+- **One-command setup**: `duckpipe.add_table()` creates the columnar target and starts syncing automatically
+- **Real-time CDC**: streams WAL changes continuously with ~5 s default flush latency (tunable)
+- **Sync groups**: group multiple tables to share a single publication and replication slot
 
-## Quick Start (Extension Mode)
+## Quick Start
+
+```bash
+# Start PostgreSQL with pg_duckpipe (includes pg_duckdb + pg_ducklake)
+docker run -d --name duckpipe \
+  -p 15432:5432 \
+  -e POSTGRES_PASSWORD=duckdb \
+  pgducklake/pgduckpipe:18-main
+
+# Connect
+PGPASSWORD=duckdb psql -h localhost -p 15432 -U postgres
+```
+
+Create a table, add it to sync, insert some rows, and query the columnar copy:
 
 ```sql
--- Install extension (requires pg_duckdb)
-CREATE EXTENSION pg_duckpipe CASCADE;
+-- Create a source table (must have a primary key)
+CREATE TABLE orders (id BIGSERIAL PRIMARY KEY, customer_id BIGINT, total INT);
 
--- Source table must have a primary key
-CREATE TABLE public.orders (
-  id BIGSERIAL PRIMARY KEY,
-  customer_id BIGINT NOT NULL,
-  amount NUMERIC NOT NULL
-);
+-- Insert some existing data
+INSERT INTO orders(customer_id, total) VALUES (101, 4250), (102, 9900);
 
--- Add table to sync (auto-creates public.orders_ducklake, starts worker if needed)
+-- Start syncing to DuckLake (snapshots existing rows, then streams new changes)
 SELECT duckpipe.add_table('public.orders');
 
--- Write OLTP data
-INSERT INTO public.orders(customer_id, amount) VALUES (101, 42.50);
+-- New writes are captured in real time
+INSERT INTO orders(customer_id, total) VALUES (103, 1575);
 
--- Observe sync state
-SELECT source_table, state, rows_synced, applied_lsn
-FROM duckpipe.status();
-```
+-- Query the columnar copy (wait a few seconds for CDC to flush)
+SELECT * FROM orders_ducklake;
 
-## SQL API
-
-### Sync groups
-
-```sql
-duckpipe.create_group(name, [publication], [slot_name]) -> text
-duckpipe.drop_group(name, [drop_slot])
-duckpipe.enable_group(name)
-duckpipe.disable_group(name)
-```
-
-### Table management
-
-```sql
-duckpipe.add_table(source_table, [target_table], [sync_group], [copy_data])
-duckpipe.remove_table(source_table, [drop_target])
-duckpipe.move_table(source_table, new_group)
-duckpipe.resync_table(source_table)
-```
-
-### Worker control
-
-```sql
-duckpipe.start_worker()
-duckpipe.stop_worker()
-```
-
-### Monitoring
-
-```sql
-duckpipe.groups()
-duckpipe.tables()
-duckpipe.status()
-duckpipe.worker_status()
-```
-
-`duckpipe.status()` includes per-table `state`, `queued_changes`, `error_message`,
-`consecutive_failures`, `retry_at`, and `applied_lsn`.
-
-## Configuration (GUCs)
-
-| GUC | Default | Context | Notes |
-|-----|---------|---------|-------|
-| `duckpipe.poll_interval` | `1000` | `SIGHUP` | Poll interval in ms (100..3600000) |
-| `duckpipe.batch_size_per_group` | `100000` | `SIGHUP` | Max WAL messages per group per cycle |
-| `duckpipe.enabled` | `on` | `SIGHUP` | Enable/disable worker loop |
-| `duckpipe.debug_log` | `off` | `SIGHUP` | Emit critical-path timing logs |
-| `duckpipe.flush_interval` | `1000` | `SIGHUP` | Flush interval in ms (100..60000) |
-| `duckpipe.flush_batch_threshold` | `10000` | `SIGHUP` | Queue size that triggers immediate flush |
-| `duckpipe.max_queued_changes` | `500000` | `SIGHUP` | Backpressure threshold |
-| `duckpipe.data_inlining_row_limit` | `0` | `USERSET` | DuckLake data inlining row limit |
-
-Example:
-
-```sql
-ALTER SYSTEM SET duckpipe.flush_interval = 200;
-ALTER SYSTEM SET duckpipe.flush_batch_threshold = 1000;
-SELECT pg_reload_conf();
+-- Monitor sync state
+SELECT source_table, state, rows_synced FROM duckpipe.status();
 ```
 
 ## Requirements
 
-- PostgreSQL 14+
-- `pg_duckdb` extension available
-- Source tables require a `PRIMARY KEY`
-- Logical replication enabled (`wal_level=logical`, slots/senders configured)
+> The Docker image ships everything preconfigured. The notes below apply when installing from source.
 
-## Build
+- **PostgreSQL 18** — currently the only tested version; older versions may work but are unsupported
+- **pg_ducklake** (which bundles pg_duckdb and libduckdb) must be installed
+- `wal_level = logical` with sufficient `max_replication_slots` and `max_wal_senders`
+- Both extensions must be preloaded: `shared_preload_libraries = 'pg_duckdb, pg_duckpipe'`
+- Source tables must have a **PRIMARY KEY** (required by logical replication to identify rows)
 
-```bash
-make
-make install
-```
-
-## Test
+## Build & Test
 
 ```bash
-make installcheck
-make check-regression TEST=api
+make && make install             # Build and install the extension
+make installcheck                # Run all regression tests
+make check-regression TEST=api   # Run a single test
 ```
-
-Current regression schedule contains 20 tests under `test/regression/`.
 
 ## Documentation
 
-- [doc/USAGE.md](doc/USAGE.md): SQL usage and operations guide
-- [doc/CODE_WALKTHROUGH.md](doc/CODE_WALKTHROUGH.md): source-level architecture walkthrough
-- [doc/DESIGN_V2.md](doc/DESIGN_V2.md): historical v2 design notes
-- [benchmark/README.md](benchmark/README.md): benchmark harness
+| Doc | Description |
+|-----|-------------|
+| [doc/USAGE.md](doc/USAGE.md) | SQL usage, monitoring, **configuration (GUCs)**, and tuning |
+| [doc/DESIGN_V2.md](doc/DESIGN_V2.md) | Historical v2 design notes |
+| [benchmark/README.md](benchmark/README.md) | Benchmark harness |
 
 ## License
 
