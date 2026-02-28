@@ -56,6 +56,7 @@ jobs:
         id: run-tests
         run: |
           docker run --rm \
+            -v ${{ github.workspace }}/test:/build/test \
             -v /tmp/regression-output-${{ matrix.pg_version }}:/results \
             pg_duckpipe:builder-${{ matrix.pg_version }} bash -c '
               set -euo pipefail
