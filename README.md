@@ -25,7 +25,10 @@ PostgreSQL extension for real-time CDC to pg_ducklake
 
 ```bash
 # Start PostgreSQL with pg_duckpipe (includes pg_duckdb + pg_ducklake)
-docker run -d --name duckpipe -p 15432:5432 -e POSTGRES_PASSWORD=duckdb pgducklake/pgduckpipe:18-main
+docker run -d --name duckpipe \
+  -p 15432:5432 \
+  -e POSTGRES_PASSWORD=duckdb \
+  pgducklake/pgduckpipe:18-main
 
 # Connect
 PGPASSWORD=duckdb psql -h localhost -p 15432 -U postgres
