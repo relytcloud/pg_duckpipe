@@ -9,5 +9,6 @@ pub mod queue;
 pub mod service;
 pub mod slot_consumer;
 pub mod snapshot;
+pub mod snapshot_manager;
 pub mod state;
 pub mod types;

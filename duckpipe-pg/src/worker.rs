@@ -5,6 +5,7 @@ use std::ffi::CString;
 
 use duckpipe_core::flush_coordinator::FlushCoordinator;
 use duckpipe_core::service::{self, ServiceConfig, SlotConnectParams, SlotState};
+use duckpipe_core::snapshot_manager::SnapshotManager;
 
 use crate::{
     BATCH_SIZE_PER_GROUP, DEBUG_LOG, ENABLED, FLUSH_BATCH_THRESHOLD, FLUSH_INTERVAL,
@@ -132,6 +133,7 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
         config.flush_interval_ms,
         config.max_queued_changes,
     );
+    let mut snapshot_manager = SnapshotManager::new();
 
     // Main worker loop — wraps block_on in catch_unwind for panic recovery.
     // The inner async loop keeps the tokio runtime active so that pgwire-replication's
@@ -140,6 +142,7 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
     loop {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let coord = &mut coordinator;
+            let snap_mgr = &mut snapshot_manager;
             rt.block_on(async {
                 let mut consumers: HashMap<String, SlotState> = HashMap::new();
 
@@ -160,7 +163,7 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
 
                     let config = read_config(&connstr, &duckdb_pg_connstr);
 
-                    match service::run_sync_cycle(&config, coord, &slot_params, &mut consumers)
+                    match service::run_sync_cycle(&config, coord, &slot_params, &mut consumers, snap_mgr)
                         .await
                     {
                         Ok(any_work) => {
@@ -168,9 +171,11 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
                                 break;
                             }
                             if !any_work {
-                                tokio::time::sleep(std::time::Duration::from_millis(
-                                    POLL_INTERVAL.get() as u64,
-                                ))
+                                snap_mgr.sleep_unless_snapshot_ready(
+                                    std::time::Duration::from_millis(
+                                        POLL_INTERVAL.get() as u64,
+                                    ),
+                                )
                                 .await;
                             }
                         }
@@ -198,6 +203,7 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
             Err(err) => {
                 // Panic recovery: clear all persistent state
                 coordinator.clear();
+                snapshot_manager.clear();
                 let msg = if let Some(caught) = err.downcast_ref::<CaughtError>() {
                     match caught {
                         CaughtError::PostgresError(e) => format!("PG error: {}", e.message()),

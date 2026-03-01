@@ -50,6 +50,10 @@ struct TableQueueHandle {
 struct ThreadControl {
     shutdown: AtomicBool,
     drain_requested: AtomicBool,
+    /// When true, the flush thread accumulates changes but does not flush.
+    /// Used during SNAPSHOT: WAL changes are buffered so they can be applied
+    /// after the snapshot completes (CATCHUP phase).
+    paused: AtomicBool,
 }
 
 /// Per-table coordinator entry tracking queue, control, and thread handle.
@@ -89,6 +93,10 @@ struct BackpressureState {
     /// after flush completes or accumulated data is cleared. Using Relaxed ordering
     /// is acceptable since backpressure is best-effort (off-by-a-few is fine).
     total_queued: AtomicI64,
+    /// Subset of total_queued for paused (SNAPSHOT) tables.
+    /// Excluded from backpressure so buffered snapshot changes don't block
+    /// WAL streaming for other tables.
+    snapshot_queued: AtomicI64,
     /// Maximum allowed queued changes before backpressure kicks in.
     max_queued: i64,
 }
@@ -133,6 +141,7 @@ impl FlushCoordinator {
             result_rx: rx,
             backpressure: Arc::new(BackpressureState {
                 total_queued: AtomicI64::new(0),
+                snapshot_queued: AtomicI64::new(0),
                 max_queued: max_queued_changes as i64,
             }),
             flush_batch_threshold: flush_batch_threshold as usize,
@@ -149,6 +158,9 @@ impl FlushCoordinator {
     /// `initial_applied_lsn` seeds the in-memory LSN map if no entry exists yet.
     /// Callers should pass the PG `applied_lsn` from the table mapping so that the
     /// in-memory state is bootstrapped correctly from persistent metadata on first use.
+    ///
+    /// `paused`: when true, the flush thread accumulates changes but does not flush.
+    /// Used for SNAPSHOT tables — WAL changes are buffered until the snapshot completes.
     pub fn ensure_queue(
         &mut self,
         target_key: &str,
@@ -157,6 +169,7 @@ impl FlushCoordinator {
         attnames: Vec<String>,
         key_attrs: Vec<usize>,
         atttypes: Vec<u32>,
+        paused: bool,
     ) {
         // Seed in-memory LSN from the persistent PG value if we haven't seen this table yet.
         // `or_insert` preserves any higher value already tracked from a completed flush.
@@ -208,6 +221,7 @@ impl FlushCoordinator {
         let control = Arc::new(ThreadControl {
             shutdown: AtomicBool::new(false),
             drain_requested: AtomicBool::new(false),
+            paused: AtomicBool::new(paused),
         });
 
         let drain_complete = Arc::new((Mutex::new(false), Condvar::new()));
@@ -268,13 +282,22 @@ impl FlushCoordinator {
             self.backpressure
                 .total_queued
                 .fetch_add(1, Ordering::Relaxed);
+            if entry.control.paused.load(Ordering::Relaxed) {
+                self.backpressure
+                    .snapshot_queued
+                    .fetch_add(1, Ordering::Relaxed);
+            }
             entry.queue_handle.condvar.notify_one();
         }
     }
 
     /// Check if backpressure should pause WAL consumption.
+    /// Excludes changes queued for paused (SNAPSHOT) tables so that buffered
+    /// snapshot WAL changes don't block streaming for other tables.
     pub fn is_backpressured(&self) -> bool {
-        self.backpressure.total_queued.load(Ordering::Relaxed) >= self.backpressure.max_queued
+        let total = self.backpressure.total_queued.load(Ordering::Relaxed);
+        let snapshot = self.backpressure.snapshot_queued.load(Ordering::Relaxed);
+        (total - snapshot) >= self.backpressure.max_queued
     }
 
     /// Get the current total queued changes count (for observability).
@@ -459,6 +482,30 @@ impl FlushCoordinator {
         self.target_to_mapping.clear();
     }
 
+    /// Unpause a table's flush thread after snapshot completion.
+    ///
+    /// The entire adjustment (snapshot_queued subtraction + paused=false) is done
+    /// while holding the queue lock. Since `push_change` also holds this lock when
+    /// checking `paused` and incrementing `snapshot_queued`, there is no race window
+    /// where a concurrent push sees stale `paused=true` after the subtraction.
+    pub fn unpause_table(&self, target_key: &str) {
+        if let Some(entry) = self.threads.get(target_key) {
+            // Hold queue lock for the entire operation to synchronize with push_change.
+            let guard = entry.queue_handle.inner.lock().unwrap();
+            let shared = guard.changes.len() as i64;
+            let local = entry.pending_local.load(Ordering::Relaxed);
+            self.backpressure
+                .snapshot_queued
+                .fetch_sub(shared + local, Ordering::Relaxed);
+            // Clear paused while still holding the lock ��� push_change cannot
+            // observe paused=true after this point.
+            entry.control.paused.store(false, Ordering::Release);
+            drop(guard);
+            // Wake the flush thread so it starts flushing accumulated data.
+            entry.queue_handle.condvar.notify_one();
+        }
+    }
+
     /// Get the PG connection string.
     pub fn pg_connstr(&self) -> &str {
         &self.pg_connstr
@@ -605,7 +652,11 @@ fn flush_thread_main(
         }
 
         // Determine whether to flush
-        let should_flush = if drain_requested {
+        let should_flush = if control.paused.load(Ordering::Acquire) {
+            // Paused (SNAPSHOT in progress): accumulate only, don't flush.
+            // WAL changes are buffered until snapshot completes and unpause_table() is called.
+            false
+        } else if drain_requested {
             // Explicit drain request (TRUNCATE or shutdown) — always flush
             true
         } else if accumulated.is_empty() {

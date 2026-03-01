@@ -18,7 +18,7 @@ use crate::decoder::{
 use crate::flush_coordinator::{FlushCoordinator, FlushThreadResult};
 use crate::metadata::MetadataClient;
 use crate::slot_consumer::SlotConsumer;
-use crate::snapshot;
+use crate::snapshot_manager::SnapshotManager;
 use crate::types::{Change, ChangeType, RelCacheEntry, SyncGroup, TableMapping, Value};
 
 /// Configuration for the DuckPipe service.
@@ -131,6 +131,7 @@ async fn ensure_coordinator_queue(
         (names, types)
     };
 
+    let paused = mapping.state == "SNAPSHOT";
     coordinator.ensure_queue(
         target_key,
         mapping.id,
@@ -138,6 +139,7 @@ async fn ensure_coordinator_queue(
         attnames,
         key_attrs,
         atttypes,
+        paused,
     );
     Ok(())
 }
@@ -784,90 +786,6 @@ async fn connect_slot_consumer(
     }
 }
 
-/// Process snapshot tasks for a sync group.
-///
-/// Spawns all snapshot tasks concurrently, each with its own connection.
-/// Results are recorded in metadata (set_catchup_state on success,
-/// record_error_message on failure).
-async fn process_snapshots(
-    meta: &MetadataClient<'_>,
-    group: &SyncGroup,
-    connstr: &str,
-    timing: bool,
-) -> Result<(), String> {
-    let snapshot_tasks = meta
-        .get_snapshot_tasks(group.id)
-        .await
-        .map_err(|e| format!("get_snapshot_tasks: {}", e))?;
-
-    if snapshot_tasks.is_empty() {
-        return Ok(());
-    }
-
-    let mut handles = Vec::new();
-    for task in &snapshot_tasks {
-        let task_id = task.id;
-        let src_schema = task.source_schema.clone();
-        let src_table = task.source_table.clone();
-        let tgt_schema = task.target_schema.clone();
-        let tgt_table = task.target_table.clone();
-        let cs = connstr.to_string();
-
-        let handle = tokio::spawn(async move {
-            let result = snapshot::process_snapshot_task(
-                &src_schema,
-                &src_table,
-                &tgt_schema,
-                &tgt_table,
-                &cs,
-                timing,
-                task_id,
-            )
-            .await;
-            snapshot::SnapshotResult {
-                task_id,
-                source_schema: src_schema,
-                source_table: src_table,
-                result,
-            }
-        });
-        handles.push(handle);
-    }
-
-    for handle in handles {
-        match handle.await {
-            Ok(snap_result) => match snap_result.result {
-                Ok((snapshot_lsn, rows_copied)) => {
-                    meta.set_catchup_state(snap_result.task_id, snapshot_lsn)
-                        .await
-                        .map_err(|e| format!("set_catchup_state: {}", e))?;
-                    // Credit snapshot rows to rows_synced so the metric reflects all
-                    // data delivered to the target, not just WAL-streamed changes.
-                    if rows_copied > 0 {
-                        let _ = meta
-                            .update_table_metrics(snap_result.task_id, rows_copied as i64)
-                            .await;
-                    }
-                }
-                Err(e) => {
-                    let _ = meta.record_error_message(snap_result.task_id, &e).await;
-                    tracing::warn!(
-                        "DuckPipe: snapshot failed for {}.{}: {}",
-                        snap_result.source_schema,
-                        snap_result.source_table,
-                        e
-                    );
-                }
-            },
-            Err(e) => {
-                tracing::warn!("DuckPipe: snapshot task panicked: {}", e);
-            }
-        }
-    }
-
-    Ok(())
-}
-
 /// Run one complete sync cycle with persistent slot connections.
 ///
 /// Shared by both the PG background worker and the standalone daemon.
@@ -880,6 +798,7 @@ pub async fn run_sync_cycle(
     coordinator: &mut FlushCoordinator,
     slot_params: &SlotConnectParams,
     consumers: &mut HashMap<String, SlotState>,
+    snapshot_manager: &mut SnapshotManager,
 ) -> Result<bool, String> {
     // Establish metadata connection (short-lived per cycle)
     // TODO tls mode
@@ -903,9 +822,69 @@ pub async fn run_sync_cycle(
 
     let mut any_work = false;
 
+    // Collect completed snapshot results once (globally, before the group loop).
+    // This ensures results from any group are processed and rel_cache invalidation
+    // is applied across ALL consumers, not just the current group's slot.
+    let snap_results = snapshot_manager.collect_results();
+    for snap in &snap_results {
+        match &snap.result {
+            Ok((snapshot_lsn, rows_copied)) => {
+                meta.set_catchup_state(snap.task_id, *snapshot_lsn)
+                    .await
+                    .map_err(|e| format!("set_catchup_state: {}", e))?;
+                if *rows_copied > 0 {
+                    let _ = meta
+                        .update_table_metrics(snap.task_id, *rows_copied as i64)
+                        .await;
+                }
+                // Unpause flush thread — buffered WAL changes can now be flushed
+                let target_key =
+                    format!("{}.{}", snap.target_schema, snap.target_table);
+                coordinator.unpause_table(&target_key);
+            }
+            Err(e) => {
+                let _ = meta.record_error_message(snap.task_id, e).await;
+                tracing::warn!(
+                    "DuckPipe: snapshot failed for {}.{}: {}",
+                    snap.source_schema,
+                    snap.source_table,
+                    e
+                );
+            }
+        }
+    }
+
+    // Invalidate cached mappings for tables that just transitioned SNAPSHOT → CATCHUP
+    // so the WAL handler re-resolves them with the new state (CATCHUP + snapshot_lsn).
+    // Scanned across ALL consumers (all groups) to avoid stale rel_cache entries.
+    for snap in &snap_results {
+        if snap.result.is_ok() {
+            for slot_state in consumers.values_mut() {
+                for cached in slot_state.rel_cache.values_mut() {
+                    if cached
+                        .mapping
+                        .as_ref()
+                        .map_or(false, |m| m.id == snap.task_id)
+                    {
+                        cached.mapping = None;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     for group in groups.iter_mut() {
-        // Process snapshots — spawn all as parallel tasks
-        process_snapshots(&meta, group, &config.connstr, config.debug_log).await?;
+        // Kick new snapshots (fire-and-forget, never blocks)
+        let snapshot_tasks = meta
+            .get_snapshot_tasks(group.id)
+            .await
+            .map_err(|e| format!("get_snapshot_tasks: {}", e))?;
+        if !snapshot_tasks.is_empty() {
+            snapshot_manager.kick_snapshots(snapshot_tasks, &config.connstr, config.debug_log);
+        }
+
+        // Continue to streaming immediately
 
         // Seed per_table_lsn with all active (STREAMING/CATCHUP) tables from PG.
         // This ensures CATCHUP tables that received no WAL changes this session are

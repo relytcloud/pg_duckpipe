@@ -30,11 +30,13 @@
 - [x] Large catch-up batch stall (pure-insert path) — fixed via `may_have_conflicts` flag skipping DELETE scan
 - [x] `lag_bytes` flat during catch-up — fixed: `StandbyStatusUpdate` sent each cycle even when no new WAL
 - [x] Flush-thread drain capped at `batch_threshold` for incremental progress visibility
+- [x] Decoupled snapshots from sync cycle — SnapshotManager spawns fire-and-forget snapshot tasks; sync cycle kicks new ones and collects completed results non-blocking. WAL changes for SNAPSHOT tables are buffered in paused flush queues during snapshot, then flushed on completion.
 - [x] Mixed DML correctness — flush DELETE WHERE clause was using all columns (REPLICA IDENTITY FULL `attkeys`) instead of real PK from `pg_index`; fixed by caching `pk_key_attrs` per relation and using it for `extract_key_values` and flush queue setup
 
 ## TODO
 
 ### Performance / Scalability
+- [ ] Snapshot WAL buffering memory — during SNAPSHOT, WAL changes for snapshotting tables accumulate in paused flush queues unbounded; long-running snapshots on high-write tables can cause memory bloat. Consider spilling to disk or capping buffer size with snapshot-aware backpressure.
 - [ ] Flush thread pool — 1 OS thread + 1 tokio runtime + 1 DuckDB connection per table; fixed-size pool needed for 50+ tables
 - [ ] Batch compaction tuning — reduce Parquet file proliferation under sustained small-batch writes
 - [ ] Inline data flush

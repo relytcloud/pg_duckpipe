@@ -12,6 +12,7 @@ use tracing::{error, info};
 
 use duckpipe_core::flush_coordinator::FlushCoordinator;
 use duckpipe_core::service::{self, ServiceConfig, SlotConnectParams, SlotState};
+use duckpipe_core::snapshot_manager::SnapshotManager;
 
 /// DuckPipe — standalone CDC sync daemon for PostgreSQL → DuckLake.
 #[derive(Parser, Debug)]
@@ -148,6 +149,7 @@ async fn main() {
         args.flush_interval,
         args.max_queued_changes,
     );
+    let mut snapshot_manager = SnapshotManager::new();
 
     info!(
         "DuckPipe daemon starting (host={}, port={}, dbname={}, poll={}ms)",
@@ -165,16 +167,17 @@ async fn main() {
                 info!("DuckPipe daemon shutting down (Ctrl+C)");
                 break;
             }
-            result = service::run_sync_cycle(&config, &mut coordinator, &slot_params, &mut consumers) => {
+            result = service::run_sync_cycle(&config, &mut coordinator, &slot_params, &mut consumers, &mut snapshot_manager) => {
                 match result {
                     Ok(any_work) => {
                         if !any_work {
-                            tokio::time::sleep(poll_interval).await;
+                            snapshot_manager.sleep_unless_snapshot_ready(poll_interval).await;
                         }
                     }
                     Err(e) => {
                         error!("DuckPipe cycle error: {}", e);
                         coordinator.clear();
+                        snapshot_manager.clear();
                         consumers.clear();
                         tokio::time::sleep(poll_interval).await;
                     }

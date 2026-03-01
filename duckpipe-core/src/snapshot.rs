@@ -22,6 +22,8 @@ pub struct SnapshotResult {
     pub task_id: i32,
     pub source_schema: String,
     pub source_table: String,
+    pub target_schema: String,
+    pub target_table: String,
     /// Ok((consistent_point_lsn, rows_copied)) on success, Err(message) on failure.
     pub result: Result<(u64, u64), String>,
 }
