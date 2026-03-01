@@ -34,5 +34,7 @@ test: shutdown_recovery
 test: rename_table
 # Premature CATCHUP→STREAMING transition (many separate transactions)
 test: premature_catchup
+# WAL buffering during snapshot (paused flush queue correctness)
+test: snapshot_buffering
 # Snapshot race condition proof (uses background psql session)
 test: snapshot_race
