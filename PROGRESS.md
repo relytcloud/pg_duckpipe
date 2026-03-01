@@ -37,6 +37,9 @@
 
 ### Performance / Scalability
 - [ ] Snapshot WAL buffering memory — during SNAPSHOT, WAL changes for snapshotting tables accumulate in paused flush queues unbounded; long-running snapshots on high-write tables can cause memory bloat. Consider spilling to disk or capping buffer size with snapshot-aware backpressure.
+- [ ] Parallel snapshot writes crash on concurrent COMMIT (pg_duckdb bug) — snapshot `INSERT INTO target SELECT * FROM source` runs via `tokio_postgres` (each task creates its own PG backend). All N snapshots start concurrently and data copies complete quickly (~150-280ms each), but on COMMIT only 1 succeeds; the rest crash with `TransactionContext Error: Failed to commit: Attempted to dereference unique_ptr that is NULL!` (`DuckdbXactCallback_Cpp`). Failed snapshots retry on the next sync cycle (~5s gap from streaming timeout), producing strict sequential completion: 4x100k takes ~20s (4 rounds x ~5s). Benchmark: single=14,704 rows/s vs multi(4)=13,127 rows/s (zero parallelism). Fix: run snapshot copy on the service side using direct per-task DuckDB connections, bypassing pg_ducklake entirely.
+- [ ] Multi-table streaming lag 27x higher than single-table (benchmark suite) — multi-table append avg lag=67 MB vs single-table=2.5 MB during OLTP, despite similar TPS (9,656 vs 9,509). Standalone multi-table runs show 3.7 MB, so the regression is specific to running scenarios sequentially in `bench_suite.sh`. Likely cause: the concurrent COMMIT crash during snapshot phase leaves stale DuckDB/DuckLake state in the bgworker's PG backends that degrades subsequent flush performance. Also possible: leftover flush threads from scenario 1 (cleanup removes table mappings but does not shut down the bgworker's FlushCoordinator entries for tables outside the current scenario's range). Needs investigation: compare lag with fresh DB per scenario vs sequential suite.
+- [ ] Snapshot detection delay up to `poll_interval` — when bgworker is already running, `add_table()` is not detected until the next sync cycle. Benchmark shows ~10s delay (poll_interval=10s) in scenario 3 vs instant detection in scenario 1 (where `add_table()` starts the bgworker). This inflates measured snapshot throughput: single-table mixed DML shows 5,956 rows/s (16.8s wall clock) vs expected ~14,700 rows/s (6.8s) if detected immediately. The 16.8s breaks down as: ~10s detection delay + 0.15s copy + ~5s streaming timeout before result collection + ~1.6s CATCHUP transition. Consider: wake bgworker immediately on `add_table()` via pg_notify or latch signal.
 - [ ] Flush thread pool — 1 OS thread + 1 tokio runtime + 1 DuckDB connection per table; fixed-size pool needed for 50+ tables
 - [ ] Batch compaction tuning — reduce Parquet file proliferation under sustained small-batch writes
 - [ ] Inline data flush
@@ -63,6 +66,7 @@
 
 ### Bugs
 - [x] Mixed DML (oltp_read_write) consistency failure — fixed: flush DELETE used all-column WHERE clause instead of PK-only (see Done section)
+- [ ] Benchmark suite cleanup incomplete — `bench_suite.sh` only calls `remove_table` for `sbtest1..sbtest{N}` where N is the current scenario's table count. When a multi-table scenario (N=4) is followed by a single-table scenario (N=1), orphaned mappings for sbtest2-4 remain in `duckpipe.status()`, inflating `sum(rows_synced)` and potentially leaving stale flush threads running.
 
 ### Robustness
 - [ ] Snapshot failures have no retry backoff — risk of thrash on repeated failures
