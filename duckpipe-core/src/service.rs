@@ -67,6 +67,10 @@ pub struct ProcessResult {
 struct RelCacheWithMapping {
     entry: RelCacheEntry,
     mapping: Option<TableMapping>,
+    /// Real PK column indices from `pg_index` (loaded once, cached).
+    /// With REPLICA IDENTITY FULL, `entry.attkeys` includes ALL columns,
+    /// but this field contains only the actual PRIMARY KEY columns.
+    pk_key_attrs: Option<Vec<usize>>,
 }
 
 /// Persistent per-slot state: consumer + relation cache.
@@ -82,27 +86,51 @@ pub struct SlotState {
 }
 
 /// Helper: ensure a coordinator queue exists for a target table, loading metadata if needed.
+///
+/// Also populates `pk_key_attrs_cache` (real PK columns from `pg_index`) on first
+/// call for this relation.  The cache avoids a catalog query on every WAL message.
 async fn ensure_coordinator_queue(
     coordinator: &mut FlushCoordinator,
     target_key: &str,
     mapping: &TableMapping,
     entry: &RelCacheEntry,
+    pk_key_attrs_cache: &mut Option<Vec<usize>>,
     meta: &MetadataClient<'_>,
 ) -> Result<(), String> {
-    let (attnames, key_attrs, atttypes) = if !entry.attnames.is_empty() {
-        (
-            entry.attnames.clone(),
-            entry.attkeys.clone(),
-            entry.atttypes.clone(),
-        )
+    // Load the *real* PK columns from pg_index on the first call, then cache.
+    // With REPLICA IDENTITY FULL, pgoutput marks ALL columns as key (flags & 1),
+    // so `entry.attkeys` would be [0, 1, ..., ncols-1].  Using that as
+    // `key_attrs` causes the flush DELETE WHERE clause to match on ALL columns,
+    // which is both wasteful and broken for types whose SQL literal format
+    // doesn't round-trip (e.g., DECIMAL, TIMESTAMP).
+    //
+    // Use the RELATION message's name (`entry.nspname`/`entry.relname`) for the
+    // pg_index lookup, not `mapping.source_table`.  After ALTER TABLE RENAME the
+    // in-memory mapping may still carry the old name (update_source_name writes
+    // to the DB but doesn't mutate the cached mapping struct), so a lookup by
+    // `mapping.source_table` would fail to find the renamed table in pg_class.
+    let key_attrs = if let Some(ref cached) = pk_key_attrs_cache {
+        cached.clone()
     } else {
-        let (names, keys) = meta
-            .load_batch_metadata_from_source(&mapping.source_schema, &mapping.source_table)
+        let (_, attrs) = meta
+            .load_batch_metadata_from_source(&entry.nspname, &entry.relname)
+            .await
+            .map_err(|e| format!("load_batch_metadata (pk): {}", e))?;
+        *pk_key_attrs_cache = Some(attrs.clone());
+        attrs
+    };
+
+    let (attnames, atttypes) = if !entry.attnames.is_empty() {
+        (entry.attnames.clone(), entry.atttypes.clone())
+    } else {
+        let (names, _keys) = meta
+            .load_batch_metadata_from_source(&entry.nspname, &entry.relname)
             .await
             .map_err(|e| format!("load_batch_metadata: {}", e))?;
         let types = vec![0u32; names.len()]; // unknown type → Text fallback
-        (names, keys, types)
+        (names, types)
     };
+
     coordinator.ensure_queue(
         target_key,
         mapping.id,
@@ -142,6 +170,7 @@ async fn process_one_wal_message(
                 RelCacheWithMapping {
                     entry,
                     mapping: None,
+                    pk_key_attrs: None,
                 },
             );
         }
@@ -174,6 +203,7 @@ async fn process_one_wal_message(
                         &target_key,
                         mapping,
                         &cached.entry,
+                        &mut cached.pk_key_attrs,
                         meta,
                     )
                     .await?;
@@ -230,16 +260,18 @@ async fn process_one_wal_message(
                         &target_key,
                         mapping,
                         &cached.entry,
+                        &mut cached.pk_key_attrs,
                         meta,
                     )
                     .await?;
 
-                    // key_values for the DELETE half: always extract by key position so the
-                    // flush path can index them as key_values[ki] (ki = ordinal within key_attrs).
+                    // key_values for the DELETE half: extract only the real PK column
+                    // values (from pg_index), not all columns from RELATION attkeys.
+                    let pk_attrs = cached.pk_key_attrs.as_ref().unwrap();
                     let key_values = if !old_values.is_empty() {
-                        extract_key_values(&old_values, &cached.entry.attkeys)
+                        extract_key_values(&old_values, pk_attrs)
                     } else {
-                        extract_key_values(&new_values, &cached.entry.attkeys)
+                        extract_key_values(&new_values, pk_attrs)
                     };
 
                     if has_unchanged && old_marker == 'O' {
@@ -344,16 +376,21 @@ async fn process_one_wal_message(
                         &target_key,
                         mapping,
                         &cached.entry,
+                        &mut cached.pk_key_attrs,
                         meta,
                     )
                     .await?;
+                    // Extract only PK values — with REPLICA IDENTITY FULL,
+                    // old_values contains ALL columns, not just keys.
+                    let pk_attrs = cached.pk_key_attrs.as_ref().unwrap();
+                    let key_values = extract_key_values(&old_values, pk_attrs);
                     coordinator.push_change(
                         &target_key,
                         Change {
                             change_type: ChangeType::Delete,
                             lsn,
                             col_values: Vec::new(),
-                            key_values: old_values,
+                            key_values,
                             col_unchanged: Vec::new(),
                         },
                     );

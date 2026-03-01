@@ -16,6 +16,8 @@ test: stress_append
 test: toast_unchanged
 # REPLICA IDENTITY FULL opt-in (ALTER TABLE on add, full-row WAL, no TOAST resolution needed)
 test: replica_identity_full
+# Single-table mixed DML (INSERT + UPDATE + DELETE in same flush)
+test: mixed_dml
 # Composite primary keys (multi-column PK UPDATE/DELETE)
 test: composite_pk
 # Large single transaction (mid-txn flush triggers)
