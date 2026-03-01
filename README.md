@@ -68,7 +68,8 @@ SELECT source_table, state, rows_synced FROM duckpipe.status();
 
 ## Benchmark
 
-Sysbench results on Apple M1 Pro / 100k rows per table / 30s OLTP phase:
+Sysbench results on Apple M1 Pro / 100k rows per table / 30s OLTP phase.
+Mixed DML uses `oltp_read_write` (2 UPDATEs + 1 DELETE + 1 INSERT per txn on 100k-row base tables):
 
 | Scenario | Tables | Workload | Snapshot | OLTP TPS | Avg Lag | Catch-up | Consistency |
 |----------|--------|----------|----------|----------|---------|----------|-------------|
