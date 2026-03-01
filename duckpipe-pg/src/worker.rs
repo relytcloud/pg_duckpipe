@@ -163,20 +163,25 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
 
                     let config = read_config(&connstr, &duckdb_pg_connstr);
 
-                    match service::run_sync_cycle(&config, coord, &slot_params, &mut consumers, snap_mgr)
-                        .await
+                    match service::run_sync_cycle(
+                        &config,
+                        coord,
+                        &slot_params,
+                        &mut consumers,
+                        snap_mgr,
+                    )
+                    .await
                     {
                         Ok(any_work) => {
                             if should_shutdown() {
                                 break;
                             }
                             if !any_work {
-                                snap_mgr.sleep_unless_snapshot_ready(
-                                    std::time::Duration::from_millis(
+                                snap_mgr
+                                    .sleep_unless_snapshot_ready(std::time::Duration::from_millis(
                                         POLL_INTERVAL.get() as u64,
-                                    ),
-                                )
-                                .await;
+                                    ))
+                                    .await;
                             }
                         }
                         Err(msg) => {

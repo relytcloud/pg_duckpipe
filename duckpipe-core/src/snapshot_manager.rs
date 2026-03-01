@@ -55,7 +55,6 @@ impl SnapshotManager {
     /// respawning would cause slot-creation failures and churn. Panicked entries
     /// are cleaned up on `clear()` (panic recovery) or process restart.
     pub fn kick_snapshots(&mut self, tasks: Vec<SnapshotTask>, connstr: &str, timing: bool) {
-
         for task in tasks {
             if self.in_flight.contains_key(&task.id) {
                 continue; // Already in flight

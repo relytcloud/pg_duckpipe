@@ -53,4 +53,5 @@ Heap Tables → WAL → Replication Slot (pgoutput) → Decoder → FlushCoordin
 ## Dev Guidelines
 
 - **TDD**: failing test first → fix → `make installcheck` (all must pass)
+- **Format before commit**: always run `cargo fmt` before committing (CI enforces `cargo fmt --check`)
 - **Docs**: update `CLAUDE.md`, `doc/CODE_WALKTHROUGH.md`, `PROGRESS.md` after major changes

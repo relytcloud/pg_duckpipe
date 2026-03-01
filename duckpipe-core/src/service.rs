@@ -838,8 +838,7 @@ pub async fn run_sync_cycle(
                         .await;
                 }
                 // Unpause flush thread — buffered WAL changes can now be flushed
-                let target_key =
-                    format!("{}.{}", snap.target_schema, snap.target_table);
+                let target_key = format!("{}.{}", snap.target_schema, snap.target_table);
                 coordinator.unpause_table(&target_key);
             }
             Err(e) => {
