@@ -1,0 +1,336 @@
+-- Verify the doc/QUICKSTART.md examples work end-to-end
+SET client_min_messages = warning;
+SELECT duckpipe.start_worker();
+ start_worker 
+--------------
+ 
+(1 row)
+
+RESET client_min_messages;
+-------------------------------------------------------
+-- Section 1: Add Your First Table
+-------------------------------------------------------
+CREATE TABLE orders (
+    id    BIGSERIAL PRIMARY KEY,
+    customer TEXT,
+    total    INT
+);
+INSERT INTO orders(customer, total) VALUES
+    ('alice', 100),
+    ('bob',   250),
+    ('carol', 75);
+SELECT duckpipe.add_table('public.orders');
+ add_table 
+-----------
+ 
+(1 row)
+
+SELECT pg_sleep(3);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+-- Check sync state
+SELECT source_table, target_table, state, rows_synced
+FROM duckpipe.status()
+WHERE source_table = 'public.orders';
+ source_table  |      target_table      |  state  | rows_synced 
+---------------+------------------------+---------+-------------
+ public.orders | public.orders_ducklake | CATCHUP |           3
+(1 row)
+
+-- Query the columnar table
+SELECT * FROM orders_ducklake ORDER BY id;
+ id | customer | total 
+----+----------+-------
+  1 | alice    |   100
+  2 | bob      |   250
+  3 | carol    |    75
+(3 rows)
+
+-- Live DML streaming
+INSERT INTO orders(customer, total) VALUES ('dave', 300);
+UPDATE orders SET total = 500 WHERE customer = 'alice';
+DELETE FROM orders WHERE customer = 'bob';
+SELECT pg_sleep(3);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+SELECT * FROM orders_ducklake ORDER BY id;
+ id | customer | total 
+----+----------+-------
+  1 | alice    |   500
+  3 | carol    |    75
+  4 | dave     |   300
+(3 rows)
+
+-------------------------------------------------------
+-- Section 2: Remove a Table
+-------------------------------------------------------
+SELECT duckpipe.remove_table('public.orders');
+ remove_table 
+--------------
+ 
+(1 row)
+
+-- Verify removal from status
+SELECT count(*) AS remaining FROM duckpipe.status()
+WHERE source_table = 'public.orders';
+ remaining 
+-----------
+         0
+(1 row)
+
+-------------------------------------------------------
+-- Section 3: Re-Add a Table
+-------------------------------------------------------
+SELECT duckpipe.add_table('public.orders');
+NOTICE:  relation "orders_ducklake" already exists, skipping
+ add_table 
+-----------
+ 
+(1 row)
+
+SELECT pg_sleep(3);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+SELECT source_table, state, rows_synced
+FROM duckpipe.status()
+WHERE source_table = 'public.orders';
+ source_table  |  state  | rows_synced 
+---------------+---------+-------------
+ public.orders | CATCHUP |           3
+(1 row)
+
+-- Target should have current source data (3 rows after earlier DML)
+SELECT * FROM orders_ducklake ORDER BY id;
+ id | customer | total 
+----+----------+-------
+  1 | alice    |   500
+  3 | carol    |    75
+  4 | dave     |   300
+(3 rows)
+
+-- Clean up orders
+SELECT duckpipe.remove_table('public.orders', drop_target => true);
+ remove_table 
+--------------
+ 
+(1 row)
+
+DROP TABLE orders;
+-------------------------------------------------------
+-- Section 4: Add Multiple Tables
+-------------------------------------------------------
+CREATE TABLE orders (
+    id    BIGSERIAL PRIMARY KEY,
+    customer TEXT,
+    total    INT
+);
+CREATE TABLE customers (
+    id   BIGSERIAL PRIMARY KEY,
+    name TEXT,
+    email TEXT
+);
+CREATE TABLE products (
+    id    BIGSERIAL PRIMARY KEY,
+    name  TEXT,
+    price INT
+);
+SELECT duckpipe.add_table('public.orders');
+ add_table 
+-----------
+ 
+(1 row)
+
+SELECT duckpipe.add_table('public.customers');
+ add_table 
+-----------
+ 
+(1 row)
+
+SELECT duckpipe.add_table('public.products');
+ add_table 
+-----------
+ 
+(1 row)
+
+SELECT pg_sleep(3);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+SELECT source_table, target_table, sync_group, state
+FROM duckpipe.status()
+ORDER BY source_table;
+   source_table   |       target_table        | sync_group |  state  
+------------------+---------------------------+------------+---------
+ public.customers | public.customers_ducklake | default    | CATCHUP
+ public.orders    | public.orders_ducklake    | default    | CATCHUP
+ public.products  | public.products_ducklake  | default    | CATCHUP
+(3 rows)
+
+-- Clean up
+SELECT duckpipe.remove_table('public.orders', drop_target => true);
+ remove_table 
+--------------
+ 
+(1 row)
+
+SELECT duckpipe.remove_table('public.customers', drop_target => true);
+ remove_table 
+--------------
+ 
+(1 row)
+
+SELECT duckpipe.remove_table('public.products', drop_target => true);
+ remove_table 
+--------------
+ 
+(1 row)
+
+DROP TABLE orders;
+DROP TABLE customers;
+DROP TABLE products;
+-------------------------------------------------------
+-- Section 5: Resync a Table
+-------------------------------------------------------
+CREATE TABLE orders (
+    id    BIGSERIAL PRIMARY KEY,
+    customer TEXT,
+    total    INT
+);
+INSERT INTO orders(customer, total) VALUES ('alice', 100), ('bob', 250);
+SELECT duckpipe.add_table('public.orders');
+ add_table 
+-----------
+ 
+(1 row)
+
+SELECT pg_sleep(3);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+-- Verify initial snapshot
+SELECT * FROM orders_ducklake ORDER BY id;
+ id | customer | total 
+----+----------+-------
+  1 | alice    |   100
+  2 | bob      |   250
+(2 rows)
+
+-- Add more rows, then resync
+INSERT INTO orders(customer, total) VALUES ('carol', 75);
+SELECT pg_sleep(2);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+SELECT duckpipe.resync_table('public.orders');
+NOTICE:  Table 'public.orders' marked for resync
+ resync_table 
+--------------
+ 
+(1 row)
+
+SELECT pg_sleep(3);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+-- After resync, target should have all 3 rows
+SELECT source_table, state FROM duckpipe.status()
+WHERE source_table = 'public.orders';
+ source_table  |  state  
+---------------+---------
+ public.orders | CATCHUP
+(1 row)
+
+SELECT * FROM orders_ducklake ORDER BY id;
+ id | customer | total 
+----+----------+-------
+  1 | alice    |   100
+  2 | bob      |   250
+  3 | carol    |    75
+(3 rows)
+
+-- Clean up
+SELECT duckpipe.remove_table('public.orders', drop_target => true);
+ remove_table 
+--------------
+ 
+(1 row)
+
+DROP TABLE orders;
+-------------------------------------------------------
+-- Section 6: Monitor Sync Status
+-------------------------------------------------------
+CREATE TABLE orders (
+    id    BIGSERIAL PRIMARY KEY,
+    customer TEXT,
+    total    INT
+);
+INSERT INTO orders(customer, total) VALUES ('alice', 100);
+SELECT duckpipe.add_table('public.orders');
+ add_table 
+-----------
+ 
+(1 row)
+
+SELECT pg_sleep(3);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+-- Per-table status
+SELECT source_table, state, rows_synced, queued_changes
+FROM duckpipe.status();
+ source_table  |  state  | rows_synced | queued_changes 
+---------------+---------+-------------+----------------
+ public.orders | CATCHUP |           1 |              0
+(1 row)
+
+-- Group overview
+SELECT name, enabled, table_count
+FROM duckpipe.groups();
+  name   | enabled | table_count 
+---------+---------+-------------
+ default | t       |           1
+(1 row)
+
+-- Worker health
+SELECT is_backpressured
+FROM duckpipe.worker_status();
+ is_backpressured 
+------------------
+ f
+(1 row)
+
+-- Clean up
+SELECT duckpipe.remove_table('public.orders', drop_target => true);
+ remove_table 
+--------------
+ 
+(1 row)
+
+DROP TABLE orders;
+SET client_min_messages = warning;
+SELECT duckpipe.stop_worker();
+ stop_worker 
+-------------
+ 
+(1 row)
+
+RESET client_min_messages;
