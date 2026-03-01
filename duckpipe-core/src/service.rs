@@ -567,7 +567,7 @@ async fn process_sync_group_streaming(
     let group_start = if timing { Some(Instant::now()) } else { None };
 
     // Check backpressure — if flush threads are lagging behind, skip this poll round.
-    // Still compute confirmed_lsn and advance slot so lag_bytes stays current.
+    // Still compute confirmed_lsn and advance slot.
     if coordinator.is_backpressured() {
         let min_lsn = {
             let in_mem = coordinator.get_min_applied_lsn_in_coordinator();

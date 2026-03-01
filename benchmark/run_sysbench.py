@@ -85,9 +85,13 @@ def parse_int(value, default=0):
 
 
 def get_total_lag_bytes(db_params):
+    """Approximate WAL lag: pg_current_wal_lsn() - confirmed_lsn.
+    Includes non-DML WAL so it never reaches 0, but useful as a directional
+    indicator for benchmark progress monitoring and stall detection."""
     res = run_sql(
         db_params,
-        "SELECT COALESCE(sum(lag_bytes), 0) FROM duckpipe.groups() WHERE enabled",
+        "SELECT COALESCE(SUM((pg_current_wal_lsn() - confirmed_lsn)::int8), 0) "
+        "FROM duckpipe.sync_groups WHERE enabled",
     )
     return parse_int(res, 0)
 

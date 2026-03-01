@@ -100,14 +100,13 @@ FROM duckpipe.status();
 ### Group Overview
 
 ```sql
-SELECT name, enabled, table_count, lag_bytes, last_sync
+SELECT name, enabled, table_count, last_sync
 FROM duckpipe.groups();
 ```
 
 | Column | Description |
 |--------|-------------|
 | `table_count` | Number of tables in the group |
-| `lag_bytes` | Bytes between `confirmed_lsn` and current WAL tip |
 | `last_sync` | Timestamp of last confirmed LSN advancement |
 
 ### Worker Pipeline Status

@@ -708,7 +708,6 @@ CREATE FUNCTION duckpipe.groups() RETURNS TABLE(
     slot_name TEXT,
     enabled BOOLEAN,
     table_count INTEGER,
-    lag_bytes BIGINT,
     last_sync TIMESTAMPTZ
 )
 AS 'MODULE_PATHNAME', '@FUNCTION_NAME@'
@@ -722,7 +721,6 @@ fn groups() -> TableIterator<
         name!(slot_name, String),
         name!(enabled, bool),
         name!(table_count, i32),
-        name!(lag_bytes, i64),
         name!(last_sync, Option<TimestampWithTimeZone>),
     ),
 > {
@@ -732,9 +730,6 @@ fn groups() -> TableIterator<
         let result = client.select(
             "SELECT g.name, g.publication, g.slot_name, g.enabled, \
              (SELECT count(*) FROM duckpipe.table_mappings m WHERE m.group_id = g.id)::int4 as table_count, \
-             CASE WHEN g.confirmed_lsn IS NOT NULL \
-                  THEN (pg_current_wal_lsn() - g.confirmed_lsn)::int8 \
-                  ELSE 0::int8 END as lag_bytes, \
              g.last_sync_at \
              FROM duckpipe.sync_groups g ORDER BY g.name",
             None,
@@ -748,8 +743,7 @@ fn groups() -> TableIterator<
                 let slot_name: String = row.get(3).unwrap().unwrap();
                 let enabled: bool = row.get(4).unwrap().unwrap();
                 let table_count: i32 = row.get(5).unwrap().unwrap();
-                let lag_bytes: i64 = row.get(6).unwrap().unwrap();
-                let last_sync: Option<TimestampWithTimeZone> = row.get(7).unwrap();
+                let last_sync: Option<TimestampWithTimeZone> = row.get(6).unwrap();
 
                 rows.push((
                     name,
@@ -757,7 +751,6 @@ fn groups() -> TableIterator<
                     slot_name,
                     enabled,
                     table_count,
-                    lag_bytes,
                     last_sync,
                 ));
             }
