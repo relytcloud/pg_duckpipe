@@ -13,5 +13,8 @@ clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
 tokio-postgres = { version = "0.7", features = ["with-chrono-0_4"] }
 duckdb = { version = "=1.4.3" }
-pgwire-replication = "0.2"
+pgwire-replication = { version = "0.2", features = ["tls-rustls"] }
 futures-util = "0.3"
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+tokio-postgres-rustls = "0.13"
+webpki-roots = "0.26"

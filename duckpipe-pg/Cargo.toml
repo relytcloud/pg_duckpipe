@@ -23,7 +23,11 @@ pg18 = ["pgrx/pg18"]
 duckpipe-core = { path = "../duckpipe-core" }
 pgrx = "0.16.1"
 tokio.workspace = true
+tokio-postgres.workspace = true
 tracing.workspace = true
+rustls.workspace = true
+tokio-postgres-rustls.workspace = true
+webpki-roots.workspace = true
 
 [build-dependencies]
 pgrx-pg-config = "0.16.1"

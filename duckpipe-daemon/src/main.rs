@@ -10,8 +10,9 @@ use clap::Parser;
 use tokio::signal;
 use tracing::{error, info};
 
+use duckpipe_core::connstr::{build_tokio_pg_connstr, parse_connstr, to_slot_connect_params};
 use duckpipe_core::flush_coordinator::FlushCoordinator;
-use duckpipe_core::service::{self, ServiceConfig, SlotConnectParams, SlotState};
+use duckpipe_core::service::{self, ServiceConfig, SlotState};
 use duckpipe_core::snapshot_manager::SnapshotManager;
 
 /// DuckPipe — standalone CDC sync daemon for PostgreSQL → DuckLake.
@@ -52,67 +53,6 @@ struct Args {
     max_queued_changes: i32,
 }
 
-/// Parsed connection parameters for pgwire-replication (TCP).
-struct ConnParams {
-    host: String,
-    port: u16,
-    user: String,
-    password: String,
-    dbname: String,
-}
-
-/// Parse a libpq-style key=value connection string into individual fields.
-fn parse_connstr(connstr: &str) -> ConnParams {
-    let mut host = "localhost".to_string();
-    let mut port: u16 = 5432;
-    let mut user = std::env::var("USER")
-        .or_else(|_| std::env::var("PGUSER"))
-        .unwrap_or_else(|_| "postgres".to_string());
-    let mut password = String::new();
-    let mut dbname = "postgres".to_string();
-
-    for part in connstr.split_whitespace() {
-        if let Some((key, value)) = part.split_once('=') {
-            match key {
-                "host" => host = value.to_string(),
-                "hostaddr" => host = value.to_string(),
-                "port" => {
-                    if let Ok(p) = value.parse() {
-                        port = p;
-                    }
-                }
-                "user" => user = value.to_string(),
-                "password" => password = value.to_string(),
-                "dbname" => dbname = value.to_string(),
-                _ => {}
-            }
-        }
-    }
-
-    ConnParams {
-        host,
-        port,
-        user,
-        password,
-        dbname,
-    }
-}
-
-/// Build a tokio-postgres connection string from ConnParams.
-/// For tokio-postgres, Unix sockets use host= with a path, TCP uses host= with hostname.
-fn build_tokio_pg_connstr(params: &ConnParams) -> String {
-    let mut parts = vec![
-        format!("host={}", params.host),
-        format!("port={}", params.port),
-        format!("user={}", params.user),
-        format!("dbname={}", params.dbname),
-    ];
-    if !params.password.is_empty() {
-        parts.push(format!("password={}", params.password));
-    }
-    parts.join(" ")
-}
-
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let args = Args::parse();
@@ -134,13 +74,7 @@ async fn main() {
         max_queued_changes: args.max_queued_changes,
     };
 
-    let slot_params = SlotConnectParams::Tcp {
-        host: conn_params.host.clone(),
-        port: conn_params.port,
-        user: conn_params.user.clone(),
-        password: conn_params.password.clone(),
-        dbname: conn_params.dbname.clone(),
-    };
+    let slot_params = to_slot_connect_params(&conn_params);
 
     let mut coordinator = FlushCoordinator::new(
         pg_connstr,

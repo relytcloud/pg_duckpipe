@@ -1,7 +1,5 @@
 //! Flush worker utilities — metrics update via PG connection.
 
-use tokio_postgres::NoTls;
-
 use crate::metadata::MetadataClient;
 
 /// Update metrics and applied_lsn via a short-lived PG connection (used after DuckDB flush).
@@ -11,15 +9,9 @@ pub async fn update_metrics_via_pg(
     applied_count: i64,
     last_lsn: u64,
 ) -> Result<(), String> {
-    let (client, connection) = tokio_postgres::connect(connstr, NoTls)
+    let (client, conn_handle) = crate::connstr::pg_connect(connstr)
         .await
         .map_err(|e| format!("metrics connect: {}", e))?;
-
-    let conn_handle = tokio::spawn(async move {
-        if let Err(e) = connection.await {
-            tracing::error!("pg_duckpipe: metrics connection error: {}", e);
-        }
-    });
 
     let meta = MetadataClient::new(&client);
     meta.update_table_metrics(mapping_id, applied_count)
@@ -50,15 +42,9 @@ pub async fn update_error_state(
         return Ok(());
     }
 
-    let (client, connection) = tokio_postgres::connect(connstr, NoTls)
+    let (client, conn_handle) = crate::connstr::pg_connect(connstr)
         .await
         .map_err(|e| format!("error_state connect: {}", e))?;
-
-    let conn_handle = tokio::spawn(async move {
-        if let Err(e) = connection.await {
-            tracing::error!("pg_duckpipe: error_state connection error: {}", e);
-        }
-    });
 
     let meta = MetadataClient::new(&client);
     let _ = meta.record_error_message(mapping_id, error).await;
@@ -87,15 +73,9 @@ pub async fn update_error_state(
 
 /// Clear error state on successful flush: reset consecutive_failures and error_message.
 pub async fn clear_error_on_success(connstr: &str, mapping_id: i32) -> Result<(), String> {
-    let (client, connection) = tokio_postgres::connect(connstr, NoTls)
+    let (client, conn_handle) = crate::connstr::pg_connect(connstr)
         .await
         .map_err(|e| format!("clear_error connect: {}", e))?;
-
-    let conn_handle = tokio::spawn(async move {
-        if let Err(e) = connection.await {
-            tracing::error!("pg_duckpipe: clear_error connection error: {}", e);
-        }
-    });
 
     let meta = MetadataClient::new(&client);
     let _ = meta.clear_consecutive_failures(mapping_id).await;

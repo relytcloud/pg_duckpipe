@@ -63,6 +63,7 @@ pg_duckpipe/
 │   ├── Cargo.toml
 │   └── src/
 │       ├── lib.rs                  # Module exports
+│       ├── connstr.rs              # Shared connstr parsing (parse_connstr, build_tokio_pg_connstr)
 │       ├── types.rs                # Value enum, Change, SyncGroup, TableMapping, LSN helpers
 │       ├── state.rs                # SyncState enum + transition validation
 │       ├── error.rs                # DuckPipeError + ErrorClass
@@ -91,7 +92,7 @@ pg_duckpipe/
 │   └── src/
 │       └── main.rs                 # CLI (clap) + tokio::main → calls duckpipe-core
 │
-└── test/regression/                # SQL regression tests (19 tests)
+└── test/regression/                # SQL regression tests (25 tests)
     ├── regression.conf             # PG config: wal_level=logical, etc.
     ├── schedule                    # Test execution order
     ├── sql/                        # Test SQL files
@@ -581,12 +582,14 @@ pub enum SlotConnectParams {
 
 The top-level function called by both the bgworker and daemon. One complete cycle:
 
-1. **Connect** to PostgreSQL via `tokio-postgres`
-2. **Get enabled sync groups** from metadata
+1. **Connect** to PostgreSQL via `tokio-postgres` (local metadata connection)
+2. **Get enabled sync groups** from metadata (includes `conninfo`)
 3. **For each group:**
+   - **Remote groups** (`conninfo IS NOT NULL`): open a per-group `tokio-postgres` connection to the remote PG for catalog queries; build per-group `SlotConnectParams` from conninfo for WAL replication; use remote connstr for snapshot COPY
    - Process snapshots (concurrent `tokio::spawn` per table)
-   - Stream WAL via `SlotConsumer` (streaming replication)
-4. **Disconnect**
+   - Stream WAL via `SlotConsumer` (streaming replication, routed to remote PG for remote groups)
+   - Pass `source_client` through to PK metadata queries (uses remote PG for remote groups, local for local groups)
+4. **Disconnect** (remote source connections closed per-group)
 5. Return whether any work was done (caller uses this to decide sleep vs. immediate re-poll)
 
 **`process_snapshots(meta, group, connstr, timing)`** — spawns all SNAPSHOT tables as concurrent tokio tasks. Each runs `snapshot::process_snapshot_task()` independently. On success: `set_catchup_state()` stores the snapshot_lsn, duration_ms, and rows_copied. On failure: `record_error_message()` (table stays in SNAPSHOT for retry).
@@ -704,8 +707,7 @@ duckpipe --connstr "host=localhost port=5432 dbname=mydb user=replicator passwor
 ```
 
 **Unique to the daemon:**
-- `parse_connstr()` — parses libpq-style `key=value` connection strings into `{host, port, user, password, dbname}`
-- `build_tokio_pg_connstr()` — reconstructs a tokio-postgres compatible string
+- Uses `duckpipe_core::connstr::{parse_connstr, build_tokio_pg_connstr, to_slot_connect_params}` — shared connection string parsing module
 - Uses `tracing-subscriber` with env-filter for structured logging
 - Graceful shutdown via `signal::ctrl_c()`
 - Self-healing: on error, calls `coordinator.clear()` and retries next cycle

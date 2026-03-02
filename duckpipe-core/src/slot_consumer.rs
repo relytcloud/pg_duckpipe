@@ -45,10 +45,10 @@ impl SlotConsumer {
         Ok(Self { client })
     }
 
-    /// Connect to a replication slot via TCP.
+    /// Connect to a replication slot via TCP, with optional TLS.
     ///
-    /// Used by the standalone daemon which connects over the network
-    /// instead of Unix domain sockets.
+    /// Used by the standalone daemon and remote sync groups which connect
+    /// over the network instead of Unix domain sockets.
     pub async fn connect_tcp(
         host: &str,
         port: u16,
@@ -58,9 +58,12 @@ impl SlotConsumer {
         slot: &str,
         publication: &str,
         start_lsn: u64,
+        sslmode: &Option<String>,
     ) -> Result<Self, String> {
+        let tls_config = crate::connstr::make_pgwire_tls_config(sslmode);
         let config = ReplicationConfig::new(host, user, password, database, slot, publication)
             .with_port(port)
+            .with_tls(tls_config)
             .with_start_lsn(Lsn(start_lsn))
             .with_status_interval(Duration::from_millis(500))
             .with_wakeup_interval(Duration::from_millis(100));

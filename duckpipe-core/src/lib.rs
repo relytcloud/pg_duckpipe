@@ -1,3 +1,4 @@
+pub mod connstr;
 pub mod decoder;
 pub mod duckdb_flush;
 pub mod error;

@@ -18,7 +18,6 @@ use std::time::Instant;
 
 use duckdb::{Config, Connection};
 use futures_util::StreamExt;
-use tokio_postgres::NoTls;
 
 use crate::types::{format_lsn, parse_lsn};
 
@@ -64,19 +63,13 @@ pub async fn process_snapshot_task(
     let table_start = Instant::now();
 
     // Step 1: Open control connection — creates temp slot and runs COPY.
-    let (ctrl_client, ctrl_connection) =
-        tokio_postgres::connect(connstr, NoTls).await.map_err(|e| {
+    let (ctrl_client, ctrl_conn_handle) =
+        crate::connstr::pg_connect(connstr).await.map_err(|e| {
             format!(
                 "snapshot control connect for {}.{}: {}",
                 source_schema, source_table, e
             )
         })?;
-
-    let ctrl_conn_handle = tokio::spawn(async move {
-        if let Err(e) = ctrl_connection.await {
-            tracing::warn!("DuckPipe: snapshot control connection error: {}", e);
-        }
-    });
 
     // Use task_id in the slot name to avoid collisions under concurrent snapshots.
     let slot_name = format!("duckpipe_snap_{}", task_id);

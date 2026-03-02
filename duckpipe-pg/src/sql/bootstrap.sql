@@ -7,6 +7,7 @@ CREATE TABLE duckpipe.sync_groups (
     name            TEXT NOT NULL UNIQUE,
     publication     TEXT NOT NULL UNIQUE,
     slot_name       TEXT NOT NULL UNIQUE,
+    conninfo        TEXT,
     enabled         BOOLEAN DEFAULT true,
     confirmed_lsn   pg_lsn,
     last_sync_at    TIMESTAMPTZ,

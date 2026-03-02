@@ -68,6 +68,42 @@ SELECT duckpipe.drop_group('analytics');
 SELECT duckpipe.drop_group('analytics', false);
 ```
 
+### Remote Sync
+
+Sync tables from a **remote** PostgreSQL instance by providing a `conninfo` connection string when creating a group. The remote PG provides WAL replication and snapshots; the local PG holds metadata tables and DuckLake columnar targets.
+
+```sql
+-- Create a group connected to a remote PG
+SELECT duckpipe.create_group('remote_oltp',
+    conninfo => 'host=prod-db.example.com port=5432 dbname=myapp user=replicator password=secret');
+
+-- Add tables from the remote PG (introspects remote catalog, creates local target)
+SELECT duckpipe.add_table('public.orders', sync_group => 'remote_oltp');
+SELECT duckpipe.add_table('public.customers', sync_group => 'remote_oltp');
+
+-- Query synced data locally
+SELECT count(*) FROM public.orders_ducklake;
+
+-- Check group conninfo
+SELECT name, conninfo IS NOT NULL AS is_remote FROM duckpipe.groups();
+```
+
+**How it works:**
+
+| Connection | Local group | Remote group |
+|---|---|---|
+| WAL replication | local PG | remote PG |
+| Snapshot COPY | local PG | remote PG |
+| PK catalog query | local PG | remote PG |
+| Publication/slot DDL | local SPI | remote PG via tokio-postgres |
+| Target table CREATE | local SPI (`LIKE source`) | local SPI (explicit DDL from remote introspection) |
+
+**Requirements:**
+- Remote PG must have `wal_level = logical`
+- Source tables on remote PG must have a PRIMARY KEY
+- The `conninfo` user must have replication privileges on the remote PG
+- All tables in a group must come from the same PG instance (conninfo is per-group)
+
 ### Worker Control
 
 The background worker starts automatically when `add_table()` is called. Manual control:

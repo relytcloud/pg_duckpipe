@@ -42,3 +42,5 @@ test: snapshot_special_chars
 test: snapshot_race
 # LISTEN/NOTIFY wakeup (worker wakes immediately on add_table with long poll_interval)
 test: notify_wakeup
+# Remote sync: loopback TCP exercises tokio-postgres DDL path
+test: remote_sync

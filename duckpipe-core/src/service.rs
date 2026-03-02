@@ -89,6 +89,9 @@ pub struct SlotState {
 ///
 /// Also populates `pk_key_attrs_cache` (real PK columns from `pg_index`) on first
 /// call for this relation.  The cache avoids a catalog query on every WAL message.
+///
+/// `source_client`: optional separate PG connection for catalog queries (remote groups).
+/// Falls back to `meta.client()` when `None` (local groups).
 async fn ensure_coordinator_queue(
     coordinator: &mut FlushCoordinator,
     target_key: &str,
@@ -96,7 +99,10 @@ async fn ensure_coordinator_queue(
     entry: &RelCacheEntry,
     pk_key_attrs_cache: &mut Option<Vec<usize>>,
     meta: &MetadataClient<'_>,
+    source_client: Option<&Client>,
 ) -> Result<(), String> {
+    let catalog_client = source_client.unwrap_or(meta.client());
+
     // Load the *real* PK columns from pg_index on the first call, then cache.
     // With REPLICA IDENTITY FULL, pgoutput marks ALL columns as key (flags & 1),
     // so `entry.attkeys` would be [0, 1, ..., ncols-1].  Using that as
@@ -112,10 +118,10 @@ async fn ensure_coordinator_queue(
     let key_attrs = if let Some(ref cached) = pk_key_attrs_cache {
         cached.clone()
     } else {
-        let (_, attrs) = meta
-            .load_batch_metadata_from_source(&entry.nspname, &entry.relname)
-            .await
-            .map_err(|e| format!("load_batch_metadata (pk): {}", e))?;
+        let (_, attrs) =
+            crate::metadata::load_pk_metadata(catalog_client, &entry.nspname, &entry.relname)
+                .await
+                .map_err(|e| format!("load_batch_metadata (pk): {}", e))?;
         *pk_key_attrs_cache = Some(attrs.clone());
         attrs
     };
@@ -123,10 +129,10 @@ async fn ensure_coordinator_queue(
     let (attnames, atttypes) = if !entry.attnames.is_empty() {
         (entry.attnames.clone(), entry.atttypes.clone())
     } else {
-        let (names, _keys) = meta
-            .load_batch_metadata_from_source(&entry.nspname, &entry.relname)
-            .await
-            .map_err(|e| format!("load_batch_metadata: {}", e))?;
+        let (names, _keys) =
+            crate::metadata::load_pk_metadata(catalog_client, &entry.nspname, &entry.relname)
+                .await
+                .map_err(|e| format!("load_batch_metadata: {}", e))?;
         let types = vec![0u32; names.len()]; // unknown type → Text fallback
         (names, types)
     };
@@ -148,6 +154,8 @@ async fn ensure_coordinator_queue(
 ///
 /// Returns `true` if the message was a COMMIT (used by the caller to trigger
 /// periodic heartbeats). All other message types return `false`.
+///
+/// `source_client`: optional separate PG connection for catalog queries (remote groups).
 async fn process_one_wal_message(
     client: &Client,
     meta: &MetadataClient<'_>,
@@ -156,6 +164,7 @@ async fn process_one_wal_message(
     data: &[u8],
     coordinator: &mut FlushCoordinator,
     rel_cache: &mut HashMap<u32, RelCacheWithMapping>,
+    source_client: Option<&Client>,
 ) -> Result<bool, String> {
     if data.is_empty() {
         return Ok(false);
@@ -207,6 +216,7 @@ async fn process_one_wal_message(
                         &cached.entry,
                         &mut cached.pk_key_attrs,
                         meta,
+                        source_client,
                     )
                     .await?;
                     coordinator.push_change(
@@ -264,6 +274,7 @@ async fn process_one_wal_message(
                         &cached.entry,
                         &mut cached.pk_key_attrs,
                         meta,
+                        source_client,
                     )
                     .await?;
 
@@ -380,6 +391,7 @@ async fn process_one_wal_message(
                         &cached.entry,
                         &mut cached.pk_key_attrs,
                         meta,
+                        source_client,
                     )
                     .await?;
                     // Extract only PK values — with REPLICA IDENTITY FULL,
@@ -556,6 +568,8 @@ async fn run_heartbeat(
 /// Bookkeeping (flush results, auto-retry, CATCHUP→STREAMING, confirmed_lsn)
 /// runs via `run_heartbeat` every `HEARTBEAT_COMMITS` commits or
 /// `HEARTBEAT_INTERVAL` ms, whichever comes first.
+///
+/// `source_client`: optional separate PG connection for catalog queries (remote groups).
 async fn process_sync_group_streaming(
     client: &Client,
     meta: &MetadataClient<'_>,
@@ -564,6 +578,7 @@ async fn process_sync_group_streaming(
     consumer: &mut SlotConsumer,
     coordinator: &mut FlushCoordinator,
     rel_cache: &mut HashMap<u32, RelCacheWithMapping>,
+    source_client: Option<&Client>,
 ) -> Result<ProcessResult, String> {
     let timing = config.debug_log;
     let group_start = if timing { Some(Instant::now()) } else { None };
@@ -634,6 +649,7 @@ async fn process_sync_group_streaming(
                     &data,
                     coordinator,
                     rel_cache,
+                    source_client,
                 )
                 .await?;
                 total_processed += 1;
@@ -730,13 +746,14 @@ pub enum SlotConnectParams {
         user: String,
         dbname: String,
     },
-    /// TCP connection (used by standalone daemon).
+    /// TCP connection (used by standalone daemon and remote groups).
     Tcp {
         host: String,
         port: u16,
         user: String,
         password: String,
         dbname: String,
+        sslmode: Option<String>,
     },
 }
 
@@ -771,6 +788,7 @@ async fn connect_slot_consumer(
             user,
             password,
             dbname,
+            sslmode,
         } => {
             SlotConsumer::connect_tcp(
                 host,
@@ -781,6 +799,7 @@ async fn connect_slot_consumer(
                 slot_name,
                 publication,
                 confirmed_lsn,
+                sslmode,
             )
             .await
         }
@@ -802,16 +821,9 @@ pub async fn run_sync_cycle(
     snapshot_manager: &mut SnapshotManager,
 ) -> Result<bool, String> {
     // Establish metadata connection (short-lived per cycle)
-    // TODO tls mode
-    let (client, connection) = tokio_postgres::connect(&config.connstr, tokio_postgres::NoTls)
+    let (client, conn_handle) = crate::connstr::pg_connect(&config.connstr)
         .await
         .map_err(|e| format!("connect: {}", e))?;
-
-    let conn_handle = tokio::spawn(async move {
-        if let Err(e) = connection.await {
-            tracing::error!("DuckPipe: metadata connection error: {}", e);
-        }
-    });
 
     let meta = MetadataClient::new(&client);
 
@@ -875,6 +887,39 @@ pub async fn run_sync_cycle(
     }
 
     for group in groups.iter_mut() {
+        // --- Per-group remote source connection ---
+        // For remote groups (conninfo IS NOT NULL), open a separate connection to
+        // the remote PG for catalog queries (PK lookup) and snapshot COPY.
+        // WAL replication uses per-group SlotConnectParams derived from conninfo.
+        let remote_source: Option<(
+            tokio_postgres::Client,
+            tokio::task::JoinHandle<Result<(), tokio_postgres::Error>>,
+        )> = if let Some(ref conninfo) = group.conninfo {
+            let (rc, rh) = crate::connstr::pg_connect(conninfo)
+                .await
+                .map_err(|e| format!("remote source connect for group {}: {}", group.name, e))?;
+            Some((rc, rh))
+        } else {
+            None
+        };
+
+        let source_client_ref = remote_source.as_ref().map(|(c, _)| c);
+
+        // Per-group slot params: use remote PG for WAL replication if conninfo set.
+        let per_group_slot_params: Option<SlotConnectParams> = group.conninfo.as_ref().map(|ci| {
+            let p = crate::connstr::parse_connstr(ci);
+            crate::connstr::to_slot_connect_params(&p)
+        });
+        let effective_slot_params = per_group_slot_params.as_ref().unwrap_or(slot_params);
+
+        // Snapshot connstr: for remote groups, use the remote PG connstr.
+        let snapshot_connstr = if let Some(ref conninfo) = group.conninfo {
+            let p = crate::connstr::parse_connstr(conninfo);
+            crate::connstr::build_tokio_pg_connstr(&p)
+        } else {
+            config.connstr.clone()
+        };
+
         // Kick new snapshots (fire-and-forget, never blocks)
         let snapshot_tasks = meta
             .get_snapshot_tasks(group.id)
@@ -883,7 +928,7 @@ pub async fn run_sync_cycle(
         if !snapshot_tasks.is_empty() {
             snapshot_manager.kick_snapshots(
                 snapshot_tasks,
-                &config.connstr,
+                &snapshot_connstr,
                 coordinator.pg_connstr(),
                 coordinator.ducklake_schema(),
                 config.debug_log,
@@ -942,7 +987,7 @@ pub async fn run_sync_cycle(
             // Remove dead state if present (drop = close connection, clear rel_cache)
             consumers.remove(&group.slot_name);
             let consumer = connect_slot_consumer(
-                slot_params,
+                effective_slot_params,
                 &group.slot_name,
                 &group.publication,
                 slot_start_lsn,
@@ -1022,16 +1067,28 @@ pub async fn run_sync_cycle(
             &mut slot_state.consumer,
             coordinator,
             &mut slot_state.rel_cache,
+            source_client_ref,
         )
         .await
         {
             Ok(r) => r,
             Err(e) => {
+                // Clean up remote connection before returning error
+                if let Some((rc, rh)) = remote_source {
+                    drop(rc);
+                    let _ = rh.await;
+                }
                 // Remove failed state — next cycle reconnects from confirmed_lsn
                 consumers.remove(&group.slot_name);
                 return Err(format!("process_sync_group_streaming: {}", e));
             }
         };
+
+        // Clean up per-group remote connection
+        if let Some((rc, rh)) = remote_source {
+            drop(rc);
+            let _ = rh.await;
+        }
 
         if result.any_work {
             any_work = true;

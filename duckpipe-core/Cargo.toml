@@ -13,3 +13,6 @@ tokio-postgres.workspace = true
 duckdb.workspace = true
 pgwire-replication.workspace = true
 futures-util.workspace = true
+rustls.workspace = true
+tokio-postgres-rustls.workspace = true
+webpki-roots.workspace = true

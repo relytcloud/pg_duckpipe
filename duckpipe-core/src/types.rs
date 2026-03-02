@@ -68,6 +68,8 @@ pub struct SyncGroup {
     pub slot_name: String,
     pub pending_lsn: u64,
     pub confirmed_lsn: u64,
+    /// Remote PG connection string (NULL = local group).
+    pub conninfo: Option<String>,
 }
 
 /// Table mapping metadata

@@ -41,7 +41,7 @@
 ### Infrastructure
 - [x] PostgreSQL extension (pgrx): SQL API, GUCs, bgworker, bootstrap DDL
 - [x] Standalone daemon (duckpipe-daemon) over TCP
-- [x] 24 regression tests all passing
+- [x] 25 regression tests all passing
 - [x] Dockerfile for self-contained playground env
 
 ### Bug Fixes
@@ -68,7 +68,7 @@
 - [ ] Per-group NOTIFY channels (`duckpipe_wakeup_{group}`) — avoid thundering herd wakeups; depends on per-group bgworker
 - [ ] Per-group GUC overrides — nullable config columns in `sync_groups`; NULL falls back to global GUC
 - [ ] `source_uri` column for pg_mooncake compatibility
-- [ ] `conninfo` column in sync_groups for remote PG support
+- [x] `conninfo` column in sync_groups for remote PG support — group-level conninfo routes WAL replication, snapshots, and catalog queries to a remote PG while metadata and DuckLake targets stay local. `create_group(conninfo=>...)` creates slot+publication on remote, `add_table()` introspects remote pg_catalog for explicit DDL, `remove_table()`/`drop_group()` clean up remote objects. Shared `connstr` module extracted to `duckpipe-core/src/connstr.rs`.
 - [ ] Schema DDL sync (ALTER TABLE ADD/DROP COLUMN propagation)
 - [ ] Sync tables with no PK (ensure e2e EOS)
 - [ ] CI: `cargo chef` pattern for cached Rust dependency compilation

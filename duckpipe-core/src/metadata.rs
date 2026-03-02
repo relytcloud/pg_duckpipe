@@ -16,12 +16,17 @@ impl<'a> MetadataClient<'a> {
         Self { client }
     }
 
+    /// Access the underlying tokio-postgres client.
+    pub fn client(&self) -> &Client {
+        self.client
+    }
+
     /// Get all enabled sync groups.
     pub async fn get_enabled_sync_groups(&self) -> Result<Vec<SyncGroup>, tokio_postgres::Error> {
         let rows = self
             .client
             .query(
-                "SELECT id, name, publication, slot_name, confirmed_lsn::text \
+                "SELECT id, name, publication, slot_name, confirmed_lsn::text, conninfo \
                  FROM duckpipe.sync_groups WHERE enabled = true",
                 &[],
             )
@@ -36,6 +41,7 @@ impl<'a> MetadataClient<'a> {
                 let slot_name: String = row.get(3);
                 let confirmed_lsn_str: Option<String> = row.get(4);
                 let confirmed_lsn = confirmed_lsn_str.map(|s| parse_lsn(&s)).unwrap_or(0);
+                let conninfo: Option<String> = row.get(5);
                 SyncGroup {
                     id,
                     name,
@@ -43,6 +49,7 @@ impl<'a> MetadataClient<'a> {
                     slot_name,
                     pending_lsn: 0,
                     confirmed_lsn,
+                    conninfo,
                 }
             })
             .collect())
@@ -489,48 +496,7 @@ impl<'a> MetadataClient<'a> {
         source_schema: &str,
         source_table: &str,
     ) -> Result<(Vec<String>, Vec<usize>), tokio_postgres::Error> {
-        let mut attnames = Vec::new();
-
-        let rows = self
-            .client
-            .query(
-                "SELECT a.attname FROM pg_class c \
-                 JOIN pg_namespace n ON n.oid = c.relnamespace \
-                 JOIN pg_attribute a ON a.attrelid = c.oid \
-                 WHERE n.nspname = $1 AND c.relname = $2 \
-                 AND a.attnum > 0 AND NOT a.attisdropped \
-                 ORDER BY a.attnum",
-                &[&source_schema, &source_table],
-            )
-            .await?;
-
-        for row in &rows {
-            let name: String = row.get(0);
-            attnames.push(name);
-        }
-
-        let mut key_attrs = Vec::new();
-        let rows = self
-            .client
-            .query(
-                "SELECT k.attnum::int2 FROM pg_class c \
-                 JOIN pg_namespace n ON n.oid = c.relnamespace \
-                 JOIN pg_index i ON i.indrelid = c.oid AND i.indisprimary \
-                 JOIN unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord) ON true \
-                 WHERE n.nspname = $1 AND c.relname = $2 \
-                 ORDER BY k.ord",
-                &[&source_schema, &source_table],
-            )
-            .await?;
-
-        for row in &rows {
-            let attnum: i16 = row.get(0);
-            if attnum > 0 {
-                key_attrs.push((attnum - 1) as usize);
-            }
-        }
-
-        Ok((attnames, key_attrs))
+        load_pk_metadata(self.client, source_schema, source_table).await
     }
 
     /// Get snapshot tasks (tables in SNAPSHOT state).
@@ -670,4 +636,55 @@ pub struct SnapshotTask {
     pub source_table: String,
     pub target_schema: String,
     pub target_table: String,
+}
+
+/// Load column names and primary key attribute indices from any PG connection.
+///
+/// Standalone function that can operate on the local metadata client or a
+/// separate remote PG connection (for remote sync groups).
+pub async fn load_pk_metadata(
+    client: &Client,
+    source_schema: &str,
+    source_table: &str,
+) -> Result<(Vec<String>, Vec<usize>), tokio_postgres::Error> {
+    let mut attnames = Vec::new();
+
+    let rows = client
+        .query(
+            "SELECT a.attname FROM pg_class c \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             JOIN pg_attribute a ON a.attrelid = c.oid \
+             WHERE n.nspname = $1 AND c.relname = $2 \
+             AND a.attnum > 0 AND NOT a.attisdropped \
+             ORDER BY a.attnum",
+            &[&source_schema, &source_table],
+        )
+        .await?;
+
+    for row in &rows {
+        let name: String = row.get(0);
+        attnames.push(name);
+    }
+
+    let mut key_attrs = Vec::new();
+    let rows = client
+        .query(
+            "SELECT k.attnum::int2 FROM pg_class c \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             JOIN pg_index i ON i.indrelid = c.oid AND i.indisprimary \
+             JOIN unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord) ON true \
+             WHERE n.nspname = $1 AND c.relname = $2 \
+             ORDER BY k.ord",
+            &[&source_schema, &source_table],
+        )
+        .await?;
+
+    for row in &rows {
+        let attnum: i16 = row.get(0);
+        if attnum > 0 {
+            key_attrs.push((attnum - 1) as usize);
+        }
+    }
+
+    Ok((attnames, key_attrs))
 }
