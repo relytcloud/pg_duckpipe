@@ -361,7 +361,7 @@ Async operations against `duckpipe.sync_groups` and `duckpipe.table_mappings` vi
 - `update_applied_lsn(id, lsn)` — per-table flush checkpoint
 
 **State transitions:**
-- `set_catchup_state(id, snapshot_lsn)` — SNAPSHOT → CATCHUP
+- `set_catchup_state(id, snapshot_lsn, duration_ms, snapshot_rows)` — SNAPSHOT → CATCHUP, stores snapshot timing
 - `transition_catchup_to_streaming(group_id, pending_lsn)` — bulk promote CATCHUP tables where `snapshot_lsn <= pending_lsn`
 
 **Error tracking:**
@@ -589,7 +589,7 @@ The top-level function called by both the bgworker and daemon. One complete cycl
 4. **Disconnect**
 5. Return whether any work was done (caller uses this to decide sleep vs. immediate re-poll)
 
-**`process_snapshots(meta, group, connstr, timing)`** — spawns all SNAPSHOT tables as concurrent tokio tasks. Each runs `snapshot::process_snapshot_task()` independently. On success: `set_catchup_state()`. On failure: `record_error_message()` (table stays in SNAPSHOT for retry).
+**`process_snapshots(meta, group, connstr, timing)`** — spawns all SNAPSHOT tables as concurrent tokio tasks. Each runs `snapshot::process_snapshot_task()` independently. On success: `set_catchup_state()` stores the snapshot_lsn, duration_ms, and rows_copied. On failure: `record_error_message()` (table stays in SNAPSHOT for retry).
 
 **`process_sync_group_streaming(client, meta, group, config, consumer, coordinator)`** — streaming WAL consumption:
 1. Check backpressure — if flush threads are lagging, skip this poll round (but still read `min(applied_lsn)` from PG and advance slot)

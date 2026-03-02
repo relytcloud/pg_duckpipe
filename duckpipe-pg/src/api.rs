@@ -687,7 +687,8 @@ fn resync_table(source_table: &str) {
                 "UPDATE duckpipe.table_mappings SET state = 'SNAPSHOT', \
                  rows_synced = 0, last_sync_at = NULL, \
                  error_message = NULL, applied_lsn = NULL, snapshot_lsn = NULL, \
-                 consecutive_failures = 0, retry_at = NULL \
+                 consecutive_failures = 0, retry_at = NULL, \
+                 snapshot_duration_ms = NULL, snapshot_rows = NULL \
                  WHERE source_schema = $1 AND source_table = $2",
                 None,
                 &args,
@@ -834,7 +835,9 @@ CREATE FUNCTION duckpipe.status() RETURNS TABLE(
     error_message TEXT,
     consecutive_failures INTEGER,
     retry_at TIMESTAMPTZ,
-    applied_lsn TEXT
+    applied_lsn TEXT,
+    snapshot_duration_ms BIGINT,
+    snapshot_rows BIGINT
 )
 AS 'MODULE_PATHNAME', '@FUNCTION_NAME@'
 LANGUAGE C STRICT;
@@ -854,6 +857,8 @@ fn status() -> TableIterator<
         name!(consecutive_failures, i32),
         name!(retry_at, Option<TimestampWithTimeZone>),
         name!(applied_lsn, Option<String>),
+        name!(snapshot_duration_ms, Option<i64>),
+        name!(snapshot_rows, Option<i64>),
     ),
 > {
     let mut rows = Vec::new();
@@ -864,7 +869,8 @@ fn status() -> TableIterator<
              m.source_schema || '.' || m.source_table as source_table, \
              m.target_schema || '.' || m.target_table as target_table, \
              m.state, m.enabled, m.rows_synced, m.queued_changes, m.last_sync_at, \
-             m.error_message, m.consecutive_failures, m.retry_at, m.applied_lsn::text \
+             m.error_message, m.consecutive_failures, m.retry_at, m.applied_lsn::text, \
+             m.snapshot_duration_ms, m.snapshot_rows \
              FROM duckpipe.table_mappings m \
              JOIN duckpipe.sync_groups g ON m.group_id = g.id \
              ORDER BY g.name, m.source_schema, m.source_table",
@@ -886,6 +892,8 @@ fn status() -> TableIterator<
                 let consecutive_failures: i32 = row.get::<i32>(10).unwrap().unwrap_or(0);
                 let retry_at: Option<TimestampWithTimeZone> = row.get(11).unwrap();
                 let applied_lsn: Option<String> = row.get(12).unwrap();
+                let snapshot_duration_ms: Option<i64> = row.get(13).unwrap();
+                let snapshot_rows: Option<i64> = row.get(14).unwrap();
 
                 rows.push((
                     sync_group,
@@ -900,6 +908,8 @@ fn status() -> TableIterator<
                     consecutive_failures,
                     retry_at,
                     applied_lsn,
+                    snapshot_duration_ms,
+                    snapshot_rows,
                 ));
             }
         }

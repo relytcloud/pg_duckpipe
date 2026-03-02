@@ -560,18 +560,24 @@ impl<'a> MetadataClient<'a> {
             .collect())
     }
 
-    /// Update table state to CATCHUP with snapshot_lsn.
+    /// Update table state to CATCHUP with snapshot_lsn, duration, and row count.
     pub async fn set_catchup_state(
         &self,
         mapping_id: i32,
         snapshot_lsn: u64,
+        duration_ms: u64,
+        snapshot_rows: u64,
     ) -> Result<(), tokio_postgres::Error> {
         let lsn_str = format_lsn(snapshot_lsn);
+        let duration_ms_i64 = duration_ms as i64;
+        let snapshot_rows_i64 = snapshot_rows as i64;
         self.client
             .execute(
                 "UPDATE duckpipe.table_mappings SET state = 'CATCHUP', \
-                 snapshot_lsn = $1::text::pg_lsn WHERE id = $2",
-                &[&lsn_str, &mapping_id],
+                 snapshot_lsn = $1::text::pg_lsn, \
+                 snapshot_duration_ms = $2, snapshot_rows = $3 \
+                 WHERE id = $4",
+                &[&lsn_str, &duration_ms_i64, &snapshot_rows_i64, &mapping_id],
             )
             .await?;
         Ok(())

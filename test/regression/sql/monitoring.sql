@@ -13,7 +13,8 @@ SELECT source_table, target_table, sync_group, enabled FROM duckpipe.tables();
 
 -- Test duckpipe.status() returns state info including new observability columns
 SELECT sync_group, source_table, target_table, state, enabled,
-       queued_changes, consecutive_failures, retry_at, applied_lsn
+       queued_changes, consecutive_failures, retry_at, applied_lsn,
+       snapshot_duration_ms, snapshot_rows
 FROM duckpipe.status();
 
 -- Test duckpipe.worker_status() returns runtime state

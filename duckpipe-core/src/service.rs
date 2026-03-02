@@ -828,8 +828,8 @@ pub async fn run_sync_cycle(
     let snap_results = snapshot_manager.collect_results();
     for snap in &snap_results {
         match &snap.result {
-            Ok((snapshot_lsn, rows_copied)) => {
-                meta.set_catchup_state(snap.task_id, *snapshot_lsn)
+            Ok((snapshot_lsn, rows_copied, duration_ms)) => {
+                meta.set_catchup_state(snap.task_id, *snapshot_lsn, *duration_ms, *rows_copied)
                     .await
                     .map_err(|e| format!("set_catchup_state: {}", e))?;
                 if *rows_copied > 0 {

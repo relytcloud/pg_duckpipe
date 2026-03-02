@@ -40,8 +40,8 @@ pub struct SnapshotResult {
     pub source_table: String,
     pub target_schema: String,
     pub target_table: String,
-    /// Ok((consistent_point_lsn, rows_copied)) on success, Err(message) on failure.
-    pub result: Result<(u64, u64), String>,
+    /// Ok((consistent_point_lsn, rows_copied, duration_ms)) on success, Err(message) on failure.
+    pub result: Result<(u64, u64, u64), String>,
 }
 
 /// Process snapshot for a single table using a chunked COPY pipeline.
@@ -49,7 +49,7 @@ pub struct SnapshotResult {
 /// Creates a temporary logical replication slot via SQL to get a consistent_point,
 /// then streams COPY TO STDOUT through CSV chunk files into DuckDB via read_csv.
 ///
-/// Returns `(consistent_point_lsn, rows_copied)` on success.
+/// Returns `(consistent_point_lsn, rows_copied, duration_ms)` on success.
 pub async fn process_snapshot_task(
     source_schema: &str,
     source_table: &str,
@@ -60,8 +60,8 @@ pub async fn process_snapshot_task(
     ducklake_schema: &str,
     timing: bool,
     task_id: i32,
-) -> Result<(u64, u64), String> {
-    let table_start = if timing { Some(Instant::now()) } else { None };
+) -> Result<(u64, u64, u64), String> {
+    let table_start = Instant::now();
 
     // Step 1: Open control connection — creates temp slot and runs COPY.
     let (ctrl_client, ctrl_connection) =
@@ -201,6 +201,8 @@ pub async fn process_snapshot_task(
 
     let rows_copied = copy_result?;
 
+    let elapsed_ms = table_start.elapsed().as_millis() as u64;
+
     tracing::info!(
         "DuckPipe: Snapshot complete for {}.{}: {} rows copied (consistent_point={})",
         source_schema,
@@ -209,19 +211,19 @@ pub async fn process_snapshot_task(
         format_lsn(consistent_point)
     );
 
-    if let Some(start) = table_start {
+    if timing {
         tracing::info!(
-            "DuckPipe timing: action=snapshot_table source={}.{} target={}.{} rows={} elapsed_ms={:.3}",
+            "DuckPipe timing: action=snapshot_table source={}.{} target={}.{} rows={} elapsed_ms={}",
             source_schema,
             source_table,
             target_schema,
             target_table,
             rows_copied,
-            start.elapsed().as_secs_f64() * 1000.0
+            elapsed_ms
         );
     }
 
-    Ok((consistent_point, rows_copied))
+    Ok((consistent_point, rows_copied, elapsed_ms))
 }
 
 /// CSV producer: streams COPY TO STDOUT bytes into chunk files with headers.

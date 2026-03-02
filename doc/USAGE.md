@@ -96,6 +96,8 @@ FROM duckpipe.status();
 | `consecutive_failures` | Number of flush failures since last success (ERRORED triggers at 3) |
 | `retry_at` | Scheduled auto-retry time when in ERRORED state |
 | `error_message` | Last error message (empty when healthy) |
+| `snapshot_duration_ms` | Time taken by the initial snapshot (NULL before snapshot completes) |
+| `snapshot_rows` | Number of rows copied during the initial snapshot |
 
 ### Group Overview
 

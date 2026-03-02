@@ -64,7 +64,7 @@
 ### Monitoring / Observability
 - [ ] `applied_lsn` stays NULL during SNAPSHOT/CATCHUP — should be set to `snapshot_lsn` after snapshot completes
 - [ ] `worker_state` not updated during snapshot processing — stale metrics while snapshots run
-- [ ] Expose snapshot timing in `duckpipe.status()` — currently snapshot duration/rate is only logged to PG log (`DuckPipe timing: action=snapshot_table`), not queryable via SQL. Add columns like `snapshot_duration_ms` and `snapshot_rows` to `table_mappings` so users and benchmark scripts can read them directly. Would also make `analyze_results.py` Summary consistent with per-table timings (no need to parse PG logs).
+- [x] Expose snapshot timing in `duckpipe.status()` — added `snapshot_duration_ms` and `snapshot_rows` columns to `table_mappings` and `duckpipe.status()`. Snapshot duration is always measured (not gated on `timing` flag) and stored on CATCHUP transition. `resync_table()` resets both columns.
 - [x] Benchmark suite (`bench_suite.sh`) — 4 scenarios (single/multi × insert/mixed) with automated analysis report (`analyze_results.py`)
 
 ### Bugs

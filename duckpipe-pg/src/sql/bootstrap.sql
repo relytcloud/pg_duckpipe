@@ -33,6 +33,8 @@ CREATE TABLE duckpipe.table_mappings (
     error_message   TEXT,
     retry_at        TIMESTAMPTZ,
     consecutive_failures INTEGER DEFAULT 0,
+    snapshot_duration_ms BIGINT,
+    snapshot_rows        BIGINT,
     UNIQUE(source_schema, source_table)
 );
 
