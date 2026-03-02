@@ -880,7 +880,13 @@ pub async fn run_sync_cycle(
             .await
             .map_err(|e| format!("get_snapshot_tasks: {}", e))?;
         if !snapshot_tasks.is_empty() {
-            snapshot_manager.kick_snapshots(snapshot_tasks, &config.connstr, config.debug_log);
+            snapshot_manager.kick_snapshots(
+                snapshot_tasks,
+                &config.connstr,
+                coordinator.pg_connstr(),
+                coordinator.ducklake_schema(),
+                config.debug_log,
+            );
         }
 
         // Continue to streaming immediately

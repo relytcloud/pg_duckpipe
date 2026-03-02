@@ -36,5 +36,7 @@ test: rename_table
 test: premature_catchup
 # WAL buffering during snapshot (paused flush queue correctness)
 test: snapshot_buffering
+# Snapshot with special characters (CSV escaping: commas, quotes, newlines, Unicode)
+test: snapshot_special_chars
 # Snapshot race condition proof (uses background psql session)
 test: snapshot_race

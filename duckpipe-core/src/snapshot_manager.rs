@@ -54,7 +54,14 @@ impl SnapshotManager {
     /// snapshot slot name is deterministic (`duckpipe_snap_{task_id}`), so
     /// respawning would cause slot-creation failures and churn. Panicked entries
     /// are cleaned up on `clear()` (panic recovery) or process restart.
-    pub fn kick_snapshots(&mut self, tasks: Vec<SnapshotTask>, connstr: &str, timing: bool) {
+    pub fn kick_snapshots(
+        &mut self,
+        tasks: Vec<SnapshotTask>,
+        connstr: &str,
+        duckdb_pg_connstr: &str,
+        ducklake_schema: &str,
+        timing: bool,
+    ) {
         for task in tasks {
             if self.in_flight.contains_key(&task.id) {
                 continue; // Already in flight
@@ -68,6 +75,8 @@ impl SnapshotManager {
             let tgt_schema = task.target_schema.clone();
             let tgt_table = task.target_table.clone();
             let cs = connstr.to_string();
+            let ddb_cs = duckdb_pg_connstr.to_string();
+            let dl_schema = ducklake_schema.to_string();
             let tx = self.result_tx.clone();
             let notify = Arc::clone(&self.notify);
 
@@ -78,6 +87,8 @@ impl SnapshotManager {
                     &tgt_schema,
                     &tgt_table,
                     &cs,
+                    &ddb_cs,
+                    &dl_schema,
                     timing,
                     task_id,
                 )

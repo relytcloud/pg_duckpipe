@@ -12,3 +12,4 @@ tokio.workspace = true
 tokio-postgres.workspace = true
 duckdb.workspace = true
 pgwire-replication.workspace = true
+futures-util.workspace = true
