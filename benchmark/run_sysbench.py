@@ -104,6 +104,28 @@ def get_total_queued_changes(db_params):
     )
     return parse_int(res, 0)
 
+def get_snapshot_metrics(db_params, num_tables):
+    """Query duckpipe.status() for per-table snapshot timing from SQL-exposed metrics."""
+    table_filter = ", ".join([f"'public.sbtest{i}'" for i in range(1, num_tables + 1)])
+    res = run_sql(
+        db_params,
+        f"SELECT source_table, snapshot_duration_ms, snapshot_rows "
+        f"FROM duckpipe.status() "
+        f"WHERE source_table IN ({table_filter}) "
+        f"AND snapshot_duration_ms IS NOT NULL",
+    )
+    metrics = []
+    if res:
+        for line in res.strip().split("\n"):
+            parts = line.split("|")
+            if len(parts) == 3:
+                table = parts[0].strip()
+                duration_ms = float(parts[1].strip())
+                rows = int(parts[2].strip())
+                metrics.append((table, rows, duration_ms))
+    return metrics
+
+
 def get_benchmark_rows_synced(args, db_params):
     table_filter = ", ".join([f"'public.sbtest{i}'" for i in range(1, args.tables + 1)])
     res = run_sql(
@@ -286,9 +308,21 @@ def benchmark_snapshot(args, db_params):
 
         if target_count >= total_rows and not_streaming == 0:
             elapsed = time.time() - start_time
-            snapshot_rate = target_count / elapsed if elapsed > 0 else 0
+            wall_clock_rate = target_count / elapsed if elapsed > 0 else 0
             print(f"\n[+] Snapshot complete!")
-            return snapshot_rate
+
+            # Fetch per-table snapshot metrics from duckpipe.status()
+            snapshot_metrics = get_snapshot_metrics(db_params, args.tables)
+            if snapshot_metrics:
+                # Concurrent snapshots overlap; effective rate = total rows / max duration
+                max_duration_ms = max(ms for _, _, ms in snapshot_metrics)
+                total_snapshot_rows = sum(r for _, r, _ in snapshot_metrics)
+                snapshot_rate = total_snapshot_rows / max_duration_ms * 1000 if max_duration_ms > 0 else wall_clock_rate
+            else:
+                snapshot_rate = wall_clock_rate
+                snapshot_metrics = []
+
+            return snapshot_rate, snapshot_metrics
 
         # If all rows are physically copied but tables are stuck in CATCHUP (no SNAPSHOT
         # remaining), nudge the WAL consumer by emitting a transactional logical message.
@@ -579,7 +613,7 @@ def main():
     if not args.skip_prepare:
         prepare_env(args, db_params)
 
-    snapshot_rate = benchmark_snapshot(args, db_params)
+    snapshot_rate, snapshot_metrics = benchmark_snapshot(args, db_params)
     (streaming_tps, avg_lag, max_lag, final_lag,
      catchup_elapsed, catchup_throughput,
      actual_final_count, expected_final_count,
@@ -588,6 +622,9 @@ def main():
     print("\n===========================================================")
     print(" Final Results")
     print("===========================================================")
+    for table, rows, ms in snapshot_metrics:
+        rate = rows / ms * 1000 if ms > 0 else 0
+        print(f" Snapshot [{table}]  : {rows:,} rows in {ms:.0f}ms ({rate:,.0f} rows/s)")
     print(f" Snapshot Throughput  : {snapshot_rate:.0f} rows/sec")
     print(f" OLTP Throughput      : {streaming_tps:.2f} TPS")
     print(f" Avg Replication Lag  : {avg_lag/1024/1024:.1f} MB  [during OLTP]")

@@ -104,6 +104,16 @@ def parse_benchmark_log(path):
     elif "Consistency mismatches" in text:
         result.consistency = "FAIL"
 
+    # Per-table snapshot lines: Snapshot [public.sbtest1]  : 100,000 rows in 800ms (125,000 rows/s)
+    for m in re.finditer(
+        r"Snapshot \[(\S+)\]\s*:\s*([\d,]+)\s*rows in\s*([\d,]+)ms",
+        text,
+    ):
+        table = m.group(1)
+        rows = int(m.group(2).replace(",", ""))
+        ms = float(m.group(3).replace(",", ""))
+        result.snapshot_timings.append((table, rows, ms))
+
     return result
 
 
@@ -151,13 +161,6 @@ def parse_pg_log(result, path):
             "cleanup": float(m.group(10)),
             "total": float(m.group(11)),
         })
-
-    # DuckPipe timing: action=snapshot_table source=... rows=N elapsed_ms=X
-    for m in re.finditer(
-        r"DuckPipe timing: action=snapshot_table\s+source=(\S+)\s+target=\S+\s+rows=(\d+)\s+elapsed_ms=([\d.]+)",
-        text,
-    ):
-        result.snapshot_timings.append((m.group(1), int(m.group(2)), float(m.group(3))))
 
     # DuckPipe timing: action=process_sync_group_streaming ... elapsed_ms=X
     for m in re.finditer(

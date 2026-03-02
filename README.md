@@ -72,10 +72,10 @@ Sysbench on Apple M1 Pro, 100k rows/table, 30s OLTP phase:
 
 | Scenario | Snapshot | OLTP TPS | Avg Lag | Consistency |
 |----------|----------|----------|---------|-------------|
-| 1 table, `oltp_insert` | 14,569 rows/s | 9,261 | 2.7 MB | PASS |
-| 4 tables, `oltp_insert` | 26,353 rows/s | 8,076 | 55 MB | PASS |
-| 1 table, `oltp_read_write` | 6,020 rows/s | 614 | 154 MB | PASS |
-| 4 tables, `oltp_read_write` | 38,858 rows/s | 444 | 332 MB | PASS |
+| 1 table, `oltp_insert` | 136,240 rows/s | 10,102 | 3.3 MB | PASS |
+| 4 tables, `oltp_insert` | 163,599 rows/s | 9,413 | 64.6 MB | PASS |
+| 1 table, `oltp_read_write` | 132,450 rows/s | 627 | 170.8 MB | PASS |
+| 4 tables, `oltp_read_write` | 150,830 rows/s | 450 | 369.3 MB | PASS |
 
 Full breakdown (flush latency, phase timing, snapshot per-table, WAL cycles): [benchmark/results/report.md](benchmark/results/report.md)
 
