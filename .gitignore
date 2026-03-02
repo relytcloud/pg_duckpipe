@@ -14,7 +14,8 @@
 *.pc
 
 # Regression test output
-results/
+/results/
+test/regression/results/
 regression.diffs
 regression.out
 tmp_check/

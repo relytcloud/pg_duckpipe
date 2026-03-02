@@ -68,44 +68,20 @@ SELECT source_table, state, rows_synced FROM duckpipe.status();
 
 ## Benchmark
 
-Sysbench results on Apple M1 Pro / 100k rows per table / 30s OLTP phase.
-Mixed DML uses `oltp_read_write` (2 UPDATEs + 1 DELETE + 1 INSERT per txn on 100k-row base tables):
+Sysbench on Apple M1 Pro, 100k rows/table, 30s OLTP phase:
 
-| Scenario | Tables | Workload | Snapshot | OLTP TPS | Avg Lag | Catch-up | Consistency |
-|----------|--------|----------|----------|----------|---------|----------|-------------|
-| Single-table append | 1 | `oltp_insert` | 14,704 rows/s | 9,509 | 2.5 MB | 2.2 s | PASS |
-| Multi-table append | 4 | `oltp_insert` | 13,127 rows/s | 9,656 | 67.0 MB | 2.4 s | PASS |
-| Single-table mixed DML | 1 | `oltp_read_write` | 5,956 rows/s | 674 | 175.1 MB | 65.3 s | PASS |
-| Multi-table mixed DML | 4 | `oltp_read_write` | 14,772 rows/s | 496 | 364.6 MB | 68.7 s | PASS |
+| Scenario | Snapshot | OLTP TPS | Avg Lag | Consistency |
+|----------|----------|----------|---------|-------------|
+| 1 table, `oltp_insert` | 14,569 rows/s | 9,261 | 2.7 MB | PASS |
+| 4 tables, `oltp_insert` | 26,353 rows/s | 8,076 | 55 MB | PASS |
+| 1 table, `oltp_read_write` | 6,020 rows/s | 614 | 154 MB | PASS |
+| 4 tables, `oltp_read_write` | 38,858 rows/s | 444 | 332 MB | PASS |
 
-<details>
-<summary>Flush performance breakdown</summary>
-
-| Metric | 1 table insert | 4 tables insert | 1 table mixed | 4 tables mixed |
-|--------|----------------|-----------------|----------------|----------------|
-| Flush count | 30 | 121 | 30 | 122 |
-| Avg latency (ms) | 34.4 | 18.7 | 30.7 | 27.1 |
-| P99 latency (ms) | 64.3 | 123.7 | 43.9 | 103.9 |
-| Avg rows/flush | 9,509 | 2,394 | 4,045 | 732 |
-
-Phase breakdown (avg ms):
-
-| Phase | 1 table insert | 4 tables insert | 1 table mixed | 4 tables mixed |
-|-------|----------------|-----------------|----------------|----------------|
-| load | 16.5 | 4.6 | 7.2 | 1.8 |
-| compact | 4.9 | 3.6 | 3.8 | 3.3 |
-| delete | 0.2 | 0.2 | 15.0 | 8.3 |
-| insert | 8.8 | 4.5 | 2.0 | 1.6 |
-| commit | 2.0 | 4.2 | 1.7 | 11.2 |
-
-</details>
-
-Run benchmarks yourself:
+Full breakdown (flush latency, phase timing, snapshot per-table, WAL cycles): [benchmark/results/report.md](benchmark/results/report.md)
 
 ```bash
-./benchmark/bench_suite.sh              # All 4 scenarios (30s each)
+./benchmark/bench_suite.sh              # Run all 4 scenarios (30s each)
 ./benchmark/bench_suite.sh --duration 10  # Quick smoke test
-cat benchmark/results/report.md         # View the generated report
 ```
 
 ## Build & Test
