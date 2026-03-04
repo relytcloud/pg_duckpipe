@@ -75,6 +75,7 @@ jobs:
                 cp /build/test/regression/regression.diffs /results/ 2>/dev/null || true
                 cp -r /build/test/regression/log/ /results/log/ 2>/dev/null || true
                 cp -r /tmp/pg_duckpipe_test_log/ /results/pg_log/ 2>/dev/null || true
+                chmod -R a+r /results/ 2>/dev/null || true
                 exit 1
               }
             '
