@@ -2,6 +2,17 @@
 
 Sync tables from a **remote** PostgreSQL instance into local DuckLake columnar tables.
 
+```
+Remote PG (source)                    Local PG (target)
++-------------------+                 +---------------------------+
+| heap tables       |---WAL stream--->| duckpipe bgworker         |
+| publication       |---COPY--------->|   -> flush to DuckLake    |
+| replication slot  |                 |                           |
++-------------------+                 | DuckLake columnar tables  |
+                                      | (orders_ducklake, ...)    |
+                                      +---------------------------+
+```
+
 ## Quick Start
 
 ```sql
