@@ -25,10 +25,7 @@ async fn remote_connect(
     ),
     String,
 > {
-    let connstr = duckpipe_core::connstr::build_tokio_pg_connstr(
-        &duckpipe_core::connstr::parse_connstr(conninfo),
-    );
-    duckpipe_core::connstr::pg_connect(&connstr)
+    duckpipe_core::connstr::pg_connect(conninfo)
         .await
         .map_err(|e| format!("remote connect: {}", e))
 }
@@ -44,20 +41,7 @@ unsafe fn spi_exec_raw(sql: &str) -> i32 {
 /// Redact the password from a conninfo string for display purposes.
 /// Replaces `password=...` with `password=********`.
 fn redact_conninfo_password(conninfo: &str) -> String {
-    let params = duckpipe_core::connstr::parse_connstr(conninfo);
-    let mut parts = vec![
-        format!("host={}", params.host),
-        format!("port={}", params.port),
-        format!("user={}", params.user),
-        format!("dbname={}", params.dbname),
-    ];
-    if !params.password.is_empty() {
-        parts.push("password=********".to_string());
-    }
-    if let Some(ref mode) = params.sslmode {
-        parts.push(format!("sslmode={}", mode));
-    }
-    parts.join(" ")
+    duckpipe_core::connstr::redact_password(conninfo)
 }
 
 /// Parse a source_table argument into (schema, table) parts

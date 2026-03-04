@@ -10,7 +10,7 @@ use clap::Parser;
 use tokio::signal;
 use tracing::{error, info};
 
-use duckpipe_core::connstr::{build_tokio_pg_connstr, parse_connstr, to_slot_connect_params};
+use duckpipe_core::connstr::to_slot_connect_params;
 use duckpipe_core::flush_coordinator::FlushCoordinator;
 use duckpipe_core::service::{self, ServiceConfig, SlotState};
 use duckpipe_core::snapshot_manager::SnapshotManager;
@@ -59,25 +59,25 @@ async fn main() {
 
     duckpipe_core::log::init_subscriber(args.debug);
 
-    let conn_params = parse_connstr(&args.connstr);
-    let pg_connstr = build_tokio_pg_connstr(&conn_params);
-
     let config = ServiceConfig {
         poll_interval_ms: args.poll_interval,
         batch_size_per_group: args.batch_size_per_group,
         debug_log: args.debug,
-        connstr: pg_connstr.clone(),
-        duckdb_pg_connstr: pg_connstr.clone(),
+        connstr: args.connstr.clone(),
+        duckdb_pg_connstr: args.connstr.clone(),
         ducklake_schema: args.ducklake_schema.clone(),
         flush_interval_ms: args.flush_interval,
         flush_batch_threshold: args.flush_batch_threshold,
         max_queued_changes: args.max_queued_changes,
     };
 
-    let slot_params = to_slot_connect_params(&conn_params);
+    let slot_params = to_slot_connect_params(&args.connstr).unwrap_or_else(|e| {
+        eprintln!("Invalid connection string: {}", e);
+        std::process::exit(1);
+    });
 
     let mut coordinator = FlushCoordinator::new(
-        pg_connstr,
+        args.connstr.clone(),
         args.ducklake_schema,
         args.flush_batch_threshold,
         args.flush_interval,
@@ -86,8 +86,9 @@ async fn main() {
     let mut snapshot_manager = SnapshotManager::new();
 
     info!(
-        "DuckPipe daemon starting (host={}, port={}, dbname={}, poll={}ms)",
-        conn_params.host, conn_params.port, conn_params.dbname, args.poll_interval
+        "DuckPipe daemon starting (connstr={}, poll={}ms)",
+        duckpipe_core::connstr::redact_password(&args.connstr),
+        args.poll_interval
     );
 
     let poll_interval = Duration::from_millis(args.poll_interval as u64);

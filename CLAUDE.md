@@ -46,6 +46,7 @@ Heap Tables → WAL → Replication Slot (pgoutput) → Decoder → FlushCoordin
 | Doc | Purpose |
 |-----|---------|
 | `doc/USAGE.md` | User-facing: SQL API, monitoring, GUCs, tuning |
+| `doc/REMOTE_SYNC.md` | Remote sync: connection strings, TLS, architecture |
 | `doc/CODE_WALKTHROUGH.md` | Developer-facing: detailed code walkthrough |
 | `doc/DESIGN_V2.md` | Historical: original v2 architecture design |
 | `PROGRESS.md` | Implementation progress: done/todo checklist + detailed phase history |

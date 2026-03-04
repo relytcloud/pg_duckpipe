@@ -753,7 +753,7 @@ pub enum SlotConnectParams {
         user: String,
         password: String,
         dbname: String,
-        sslmode: Option<String>,
+        sslmode: tokio_postgres::config::SslMode,
     },
 }
 
@@ -799,7 +799,7 @@ async fn connect_slot_consumer(
                 slot_name,
                 publication,
                 confirmed_lsn,
-                sslmode,
+                *sslmode,
             )
             .await
         }
@@ -906,16 +906,19 @@ pub async fn run_sync_cycle(
         let source_client_ref = remote_source.as_ref().map(|(c, _)| c);
 
         // Per-group slot params: use remote PG for WAL replication if conninfo set.
-        let per_group_slot_params: Option<SlotConnectParams> = group.conninfo.as_ref().map(|ci| {
-            let p = crate::connstr::parse_connstr(ci);
-            crate::connstr::to_slot_connect_params(&p)
-        });
+        let per_group_slot_params: Option<SlotConnectParams> = match group.conninfo.as_ref() {
+            Some(ci) => Some(
+                crate::connstr::to_slot_connect_params(ci)
+                    .map_err(|e| format!("parse conninfo for group {}: {}", group.name, e))?,
+            ),
+            None => None,
+        };
         let effective_slot_params = per_group_slot_params.as_ref().unwrap_or(slot_params);
 
-        // Snapshot connstr: for remote groups, use the remote PG connstr.
+        // Snapshot connstr: for remote groups, use the remote PG connstr directly.
+        // tokio-postgres handles both key=value and URI formats natively.
         let snapshot_connstr = if let Some(ref conninfo) = group.conninfo {
-            let p = crate::connstr::parse_connstr(conninfo);
-            crate::connstr::build_tokio_pg_connstr(&p)
+            conninfo.clone()
         } else {
             config.connstr.clone()
         };

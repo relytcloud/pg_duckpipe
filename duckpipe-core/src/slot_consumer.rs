@@ -58,7 +58,7 @@ impl SlotConsumer {
         slot: &str,
         publication: &str,
         start_lsn: u64,
-        sslmode: &Option<String>,
+        sslmode: tokio_postgres::config::SslMode,
     ) -> Result<Self, String> {
         let tls_config = crate::connstr::make_pgwire_tls_config(sslmode);
         let config = ReplicationConfig::new(host, user, password, database, slot, publication)
