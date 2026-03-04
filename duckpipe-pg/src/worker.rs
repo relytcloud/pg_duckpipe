@@ -2,8 +2,12 @@ use pgrx::pg_sys::panic::CaughtError;
 use pgrx::prelude::*;
 use std::collections::HashMap;
 use std::ffi::CString;
+use std::sync::Arc;
+
+use tokio::sync::Notify;
 
 use duckpipe_core::flush_coordinator::FlushCoordinator;
+use duckpipe_core::listen;
 use duckpipe_core::service::{self, ServiceConfig, SlotConnectParams, SlotState};
 use duckpipe_core::snapshot_manager::SnapshotManager;
 
@@ -146,10 +150,47 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
             rt.block_on(async {
                 let mut consumers: HashMap<String, SlotState> = HashMap::new();
 
+                // Shared wakeup signal — notified by the LISTEN task when
+                // add_table / resync_table / enable_group fires NOTIFY.
+                let wakeup = Arc::new(Notify::new());
+
+                // Spawn the LISTEN helper.  On connection failure we log and
+                // continue (the worker still functions via poll_interval).
+                let listen_connstr =
+                    format!("{} user={} connect_timeout=5", connstr, os_user);
+                let mut listen_handle: Option<tokio::task::JoinHandle<()>> =
+                    match listen::spawn_listen_task(&listen_connstr, Arc::clone(&wakeup)).await {
+                        Ok(h) => {
+                            log!("pg_duckpipe LISTEN task started on {}", listen_connstr);
+                            Some(h)
+                        }
+                        Err(e) => {
+                            log!(
+                                "pg_duckpipe failed to start LISTEN task: {} (connstr: {})",
+                                e,
+                                listen_connstr
+                            );
+                            None
+                        }
+                    };
+
                 while !should_shutdown() {
                     if BackgroundWorker::sighup_received() {
                         unsafe {
                             pg_sys::ProcessConfigFile(pg_sys::GucContext::PGC_SIGHUP);
+                        }
+                    }
+
+                    // Auto-respawn the LISTEN task if it was running but exited
+                    // (connection lost).  Don't retry if the initial connect failed
+                    // (handle is None) — avoids blocking on connect_timeout each cycle.
+                    if matches!(&listen_handle, Some(h) if h.is_finished()) {
+                        match listen::spawn_listen_task(&listen_connstr, Arc::clone(&wakeup)).await {
+                            Ok(h) => listen_handle = Some(h),
+                            Err(e) => {
+                                tracing::warn!("failed to respawn LISTEN task: {e}");
+                                listen_handle = None;
+                            }
                         }
                     }
 
@@ -177,11 +218,15 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
                                 break;
                             }
                             if !any_work {
-                                snap_mgr
-                                    .sleep_unless_snapshot_ready(std::time::Duration::from_millis(
-                                        POLL_INTERVAL.get() as u64,
-                                    ))
-                                    .await;
+                                let poll_dur = std::time::Duration::from_millis(
+                                    POLL_INTERVAL.get() as u64,
+                                );
+                                let reason = tokio::select! {
+                                    _ = tokio::time::sleep(poll_dur) => "timeout",
+                                    _ = snap_mgr.snapshot_notify().notified(), if snap_mgr.has_in_flight() => "snapshot",
+                                    _ = wakeup.notified() => "notify",
+                                };
+                                log!("pg_duckpipe woke: reason={}, poll_interval={}ms", reason, POLL_INTERVAL.get());
                             }
                         }
                         Err(msg) => {
@@ -190,12 +235,20 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
                             if should_shutdown() {
                                 break;
                             }
-                            tokio::time::sleep(std::time::Duration::from_millis(
+                            let poll_dur = std::time::Duration::from_millis(
                                 POLL_INTERVAL.get() as u64,
-                            ))
-                            .await;
+                            );
+                            tokio::select! {
+                                _ = tokio::time::sleep(poll_dur) => {}
+                                _ = wakeup.notified() => {}
+                            }
                         }
                     }
+                }
+
+                // Shutdown: abort the LISTEN task.
+                if let Some(h) = listen_handle {
+                    h.abort();
                 }
             })
         }));

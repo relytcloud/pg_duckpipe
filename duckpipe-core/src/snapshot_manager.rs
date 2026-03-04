@@ -125,6 +125,12 @@ impl SnapshotManager {
         !self.in_flight.is_empty()
     }
 
+    /// Returns a reference to the internal `Notify` so callers can compose
+    /// their own `tokio::select!` with additional wakeup sources.
+    pub fn snapshot_notify(&self) -> &Notify {
+        &self.notify
+    }
+
     /// Sleep for `duration`, but wake early if a snapshot task completes.
     ///
     /// Callers should use this instead of `tokio::time::sleep` when snapshots

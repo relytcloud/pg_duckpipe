@@ -593,7 +593,8 @@ async fn process_sync_group_streaming(
     // first_msg_timeout: how long to wait for the very first WAL message this cycle.
     // loop_deadline: absolute deadline for the entire batch (set once, checked each iteration).
     // recv_fast: greedily drain subsequent messages with a minimal per-call timeout.
-    let first_msg_timeout = Duration::from_millis((config.poll_interval_ms / 2).max(100) as u64);
+    let first_msg_timeout =
+        Duration::from_millis((config.poll_interval_ms / 2).clamp(100, 2000) as u64);
     let loop_deadline = Instant::now() + first_msg_timeout;
     let recv_fast = Duration::from_millis(1);
 

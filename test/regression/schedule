@@ -40,3 +40,5 @@ test: snapshot_buffering
 test: snapshot_special_chars
 # Snapshot race condition proof (uses background psql session)
 test: snapshot_race
+# LISTEN/NOTIFY wakeup (worker wakes immediately on add_table with long poll_interval)
+test: notify_wakeup

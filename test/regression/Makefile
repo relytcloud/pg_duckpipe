@@ -11,6 +11,7 @@ check-regression:
 	--port=5555 \
 	--encoding=UTF8 \
 	--load-extension=pg_duckdb \
+	--load-extension=pg_ducklake \
 	--load-extension=pg_duckpipe \
 	$(if $(TEST),$(TEST),--schedule=schedule)
 

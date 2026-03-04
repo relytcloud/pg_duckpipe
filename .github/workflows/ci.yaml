@@ -73,7 +73,7 @@ jobs:
               " || {
                 mkdir -p /results
                 cp /build/test/regression/regression.diffs /results/ 2>/dev/null || true
-                cp /build/test/regression/log/postmaster.log /results/ 2>/dev/null || true
+                cp -r /build/test/regression/log/ /results/log/ 2>/dev/null || true
                 exit 1
               }
             '
@@ -85,12 +85,16 @@ jobs:
           name: regression-output-pg${{ matrix.pg_version }}
           path: /tmp/regression-output-${{ matrix.pg_version }}/
 
-      - name: Print regression.diffs on failure
+      - name: Print logs on failure
         if: failure() && steps.run-tests.outcome == 'failure'
         run: |
           echo "=== regression.diffs ==="
           cat /tmp/regression-output-${{ matrix.pg_version }}/regression.diffs || echo "(not found)"
           echo ""
-          echo "=== postmaster.log (last 100 lines) ==="
-          tail -100 /tmp/regression-output-${{ matrix.pg_version }}/postmaster.log || echo "(not found)"
+          for f in /tmp/regression-output-${{ matrix.pg_version }}/log/*; do
+            [ -f "$f" ] || continue
+            echo "=== $(basename "$f") (last 100 lines) ==="
+            tail -100 "$f"
+            echo ""
+          done
           exit 1

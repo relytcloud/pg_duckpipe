@@ -269,7 +269,10 @@ fn enable_group(name: &str) {
             &args,
         );
         match result {
-            Ok(status) if status.len() > 0 => {}
+            Ok(status) if status.len() > 0 => {
+                // Wake the worker so it picks up the enabled group immediately.
+                let _ = client.update("NOTIFY duckpipe_wakeup", None, &[]);
+            }
             _ => {
                 ereport!(
                     ERROR,
@@ -492,9 +495,13 @@ fn add_table(
             )
             .unwrap();
 
-        // 9. Auto-start background worker if not running
+        // 9. Auto-start background worker or wake existing one
         if !is_worker_running() {
             launch_worker();
+        } else {
+            // Worker is already running — send NOTIFY so it picks up
+            // the new table immediately instead of waiting for poll_interval.
+            let _ = client.update("NOTIFY duckpipe_wakeup", None, &[]);
         }
     });
 }
@@ -694,6 +701,9 @@ fn resync_table(source_table: &str) {
                 &args,
             )
             .unwrap();
+
+        // Wake the worker so it picks up the resync immediately.
+        let _ = client.update("NOTIFY duckpipe_wakeup", None, &[]);
     });
 
     let (s, t) = parse_source_table(source_table);

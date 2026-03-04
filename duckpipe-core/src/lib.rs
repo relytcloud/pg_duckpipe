@@ -3,6 +3,7 @@ pub mod duckdb_flush;
 pub mod error;
 pub mod flush_coordinator;
 pub mod flush_worker;
+pub mod listen;
 pub mod log;
 pub mod metadata;
 pub mod queue;
