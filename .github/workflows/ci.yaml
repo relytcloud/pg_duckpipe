@@ -75,7 +75,7 @@ jobs:
                 cp /build/test/regression/regression.diffs /results/ 2>/dev/null || true
                 cp -r /build/test/regression/log/ /results/log/ 2>/dev/null || true
                 cp -r /tmp/pg_duckpipe_test_log/ /results/pg_log/ 2>/dev/null || true
-                chmod -R a+r /results/ 2>/dev/null || true
+                chmod -R a+rX /results/ 2>/dev/null || true
                 exit 1
               }
             '
@@ -100,6 +100,9 @@ jobs:
             echo ""
           done
           echo "=== postgresql.log (last 200 lines) ==="
-          tail -200 /tmp/regression-output-${{ matrix.pg_version }}/pg_log/postgresql.log 2>/dev/null || echo "(not found)"
+          echo "--- ls pg_log dir ---"
+          ls -la /tmp/regression-output-${{ matrix.pg_version }}/pg_log/ 2>&1 || true
+          echo "---"
+          tail -200 /tmp/regression-output-${{ matrix.pg_version }}/pg_log/postgresql.log || echo "(not found)"
           echo ""
           exit 1
