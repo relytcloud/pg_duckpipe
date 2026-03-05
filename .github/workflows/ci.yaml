@@ -100,9 +100,6 @@ jobs:
             echo ""
           done
           echo "=== postgresql.log (last 200 lines) ==="
-          echo "--- ls pg_log dir ---"
-          ls -la /tmp/regression-output-${{ matrix.pg_version }}/pg_log/ 2>&1 || true
-          echo "---"
           tail -200 /tmp/regression-output-${{ matrix.pg_version }}/pg_log/postgresql.log || echo "(not found)"
           echo ""
           exit 1
