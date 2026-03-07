@@ -1,7 +1,7 @@
 -- Test snapshot with special characters that stress CSV parsing:
 -- commas, quotes, newlines, backslashes, NULLs, empty strings, Unicode.
 SELECT duckpipe.start_worker();
-NOTICE:  Background worker started for database regression
+NOTICE:  Started 1 background worker(s)
  start_worker 
 --------------
  

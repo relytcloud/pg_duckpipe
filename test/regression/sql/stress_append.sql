@@ -47,7 +47,7 @@ FROM c;
 
 -- Verify worker is still alive after stress load
 SELECT count(*) > 0 AS worker_alive FROM pg_stat_activity
-  WHERE backend_type = 'pg_duckpipe';
+  WHERE backend_type LIKE 'pg_duckpipe:%';
 
 -- Cleanup
 DROP PROCEDURE stress_insert_one_row_txn;

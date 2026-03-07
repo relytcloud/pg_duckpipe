@@ -1,6 +1,6 @@
 -- Test auto-start: add_table() should start background worker automatically
 -- Verify no worker is running yet
-SELECT count(*) AS workers_before FROM pg_stat_activity WHERE backend_type = 'pg_duckpipe';
+SELECT count(*) AS workers_before FROM pg_stat_activity WHERE backend_type LIKE 'pg_duckpipe:%';
  workers_before 
 ----------------
               0
@@ -23,7 +23,7 @@ SELECT pg_sleep(1);
 (1 row)
 
 -- Verify worker is now running
-SELECT count(*) AS workers_after FROM pg_stat_activity WHERE backend_type = 'pg_duckpipe';
+SELECT count(*) AS workers_after FROM pg_stat_activity WHERE backend_type LIKE 'pg_duckpipe:%';
  workers_after 
 ---------------
              1
@@ -31,7 +31,7 @@ SELECT count(*) AS workers_after FROM pg_stat_activity WHERE backend_type = 'pg_
 
 -- Verify start_worker() reports already running
 SELECT duckpipe.start_worker();
-NOTICE:  Background worker started for database regression
+NOTICE:  Started 0 background worker(s)
  start_worker 
 --------------
  
@@ -46,7 +46,7 @@ SELECT duckpipe.add_table('public.auto_test2', NULL, 'default', false);
 (1 row)
 
 -- Still exactly one worker
-SELECT count(*) AS workers_still_one FROM pg_stat_activity WHERE backend_type = 'pg_duckpipe';
+SELECT count(*) AS workers_still_one FROM pg_stat_activity WHERE backend_type LIKE 'pg_duckpipe:%';
  workers_still_one 
 -------------------
                  1

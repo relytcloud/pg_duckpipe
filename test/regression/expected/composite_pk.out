@@ -4,7 +4,7 @@
 -- Exercises the DuckDB compaction logic (ROW_NUMBER PARTITION BY pk1, pk2)
 -- and DELETE WHERE pk1 = ... AND pk2 = ... generation.
 SELECT duckpipe.start_worker();
-NOTICE:  Background worker started for database regression
+NOTICE:  Started 1 background worker(s)
  start_worker 
 --------------
  

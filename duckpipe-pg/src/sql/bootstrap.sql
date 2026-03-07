@@ -39,15 +39,13 @@ CREATE TABLE duckpipe.table_mappings (
     UNIQUE(source_schema, source_table)
 );
 
--- Worker runtime state (single-row, updated each sync cycle)
+-- Worker runtime state (one row per sync group, upserted each sync cycle)
 CREATE TABLE duckpipe.worker_state (
-    id                   INTEGER PRIMARY KEY DEFAULT 1,
+    group_id             INTEGER PRIMARY KEY REFERENCES duckpipe.sync_groups(id) ON DELETE CASCADE,
     total_queued_changes BIGINT DEFAULT 0,
     is_backpressured     BOOLEAN DEFAULT false,
     updated_at           TIMESTAMPTZ
 );
-
-INSERT INTO duckpipe.worker_state (id) VALUES (1);
 
 -- Default sync group
 INSERT INTO duckpipe.sync_groups (name, publication, slot_name)

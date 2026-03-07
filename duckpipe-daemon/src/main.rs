@@ -2,8 +2,10 @@
 //!
 //! Shares the same `duckpipe-core` logic as the PG background worker,
 //! but runs as an independent process connecting over TCP.
+//!
+//! Each daemon instance handles exactly one sync group (specified via
+//! `--group`).  Run multiple processes for multiple groups.
 
-use std::collections::HashMap;
 use std::time::Duration;
 
 use clap::Parser;
@@ -51,6 +53,10 @@ struct Args {
     /// Maximum total queued changes before backpressure pauses WAL consumption (min 1000, default 500000).
     #[arg(long, default_value_t = 500000, value_parser = clap::value_parser!(i32).range(1000..=10000000))]
     max_queued_changes: i32,
+
+    /// Sync group to process (must match a group name in duckpipe.sync_groups).
+    #[arg(long, default_value = "default")]
+    group: String,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -85,16 +91,19 @@ async fn main() {
     );
     let mut snapshot_manager = SnapshotManager::new();
 
+    let group_name = args.group;
+
     info!(
-        "DuckPipe daemon starting (connstr={}, poll={}ms)",
+        "DuckPipe daemon starting (connstr={}, group={}, poll={}ms)",
         duckpipe_core::connstr::redact_password(&args.connstr),
+        group_name,
         args.poll_interval
     );
 
     let poll_interval = Duration::from_millis(args.poll_interval as u64);
 
-    // Persistent slot state (consumer + rel_cache) — reused across cycles, cleared on error
-    let mut consumers: HashMap<String, SlotState> = HashMap::new();
+    // Single slot state for the one group — reused across cycles, cleared on error
+    let mut consumer: Option<SlotState> = None;
 
     loop {
         tokio::select! {
@@ -102,7 +111,7 @@ async fn main() {
                 info!("DuckPipe daemon shutting down (Ctrl+C)");
                 break;
             }
-            result = service::run_sync_cycle(&config, &mut coordinator, &slot_params, &mut consumers, &mut snapshot_manager) => {
+            result = service::run_group_sync_cycle(&config, &group_name, &mut coordinator, &slot_params, &mut consumer, &mut snapshot_manager) => {
                 match result {
                     Ok(any_work) => {
                         if !any_work {
@@ -113,7 +122,7 @@ async fn main() {
                         error!("DuckPipe cycle error: {}", e);
                         coordinator.clear();
                         snapshot_manager.clear();
-                        consumers.clear();
+                        consumer = None;
                         tokio::time::sleep(poll_interval).await;
                     }
                 }

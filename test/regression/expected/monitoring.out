@@ -31,11 +31,11 @@ FROM duckpipe.status();
  default    | public.mon_test | public.mon_test_ducklake | STREAMING | t       |              0 |                    0 |          |             |                      |              
 (1 row)
 
--- Test duckpipe.worker_status() returns runtime state
-SELECT total_queued_changes, is_backpressured FROM duckpipe.worker_status();
- total_queued_changes | is_backpressured 
-----------------------+------------------
-                    0 | f
+-- Test duckpipe.worker_status() returns runtime state (per group)
+SELECT sync_group, total_queued_changes, is_backpressured FROM duckpipe.worker_status();
+ sync_group | total_queued_changes | is_backpressured 
+------------+----------------------+------------------
+ default    |                    0 | f
 (1 row)
 
 -- Cleanup

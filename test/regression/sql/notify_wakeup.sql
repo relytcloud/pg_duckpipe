@@ -10,7 +10,7 @@ DECLARE
   i int := 0;
 BEGIN
   WHILE i < 50 LOOP
-    IF EXISTS (SELECT 1 FROM pg_stat_activity WHERE backend_type = 'pg_duckpipe') THEN
+    IF EXISTS (SELECT 1 FROM pg_stat_activity WHERE backend_type LIKE 'pg_duckpipe:%') THEN
       RETURN;
     END IF;
     PERFORM pg_sleep(0.1);
@@ -61,7 +61,7 @@ SELECT pg_sleep(3);
 CREATE TABLE notify_src (id int primary key, val text);
 INSERT INTO notify_src VALUES (1, 'one'), (2, 'two');
 
--- add_table fires NOTIFY duckpipe_wakeup → worker wakes immediately
+-- add_table fires NOTIFY duckpipe_wakeup_default → worker wakes immediately
 -- from its 30s sleep.
 SELECT duckpipe.add_table('public.notify_src');
 

@@ -806,18 +806,19 @@ async fn connect_slot_consumer(
     }
 }
 
-/// Run one complete sync cycle with persistent slot connections.
+/// Run one complete sync cycle for a single named group.
 ///
-/// Shared by both the PG background worker and the standalone daemon.
-/// `consumers` holds long-lived `SlotState` (consumer + relation cache) keyed by slot name.
-/// On error, the failed consumer is removed (drop = close); the next cycle
-/// reconnects from `confirmed_lsn` (the crash-safe restart point from PG).
-/// Returns whether any work was done (callers use this to decide whether to sleep).
-pub async fn run_sync_cycle(
+/// Used by both the PG background worker (one worker per group) and
+/// the standalone daemon (`--group` flag).
+///
+/// `consumer` is `Option<SlotState>` (at most one slot per group).
+/// Returns whether any work was done.
+pub async fn run_group_sync_cycle(
     config: &ServiceConfig,
+    group_name: &str,
     coordinator: &mut FlushCoordinator,
     slot_params: &SlotConnectParams,
-    consumers: &mut HashMap<String, SlotState>,
+    consumer: &mut Option<SlotState>,
     snapshot_manager: &mut SnapshotManager,
 ) -> Result<bool, String> {
     // Establish metadata connection (short-lived per cycle)
@@ -827,17 +828,23 @@ pub async fn run_sync_cycle(
 
     let meta = MetadataClient::new(&client);
 
-    // Get all enabled sync groups
-    let mut groups = meta
-        .get_enabled_sync_groups()
+    // Get this specific group (returns None if not found or disabled)
+    let mut group = match meta
+        .get_sync_group_by_name(group_name)
         .await
-        .map_err(|e| format!("get_sync_groups: {}", e))?;
+        .map_err(|e| format!("get_sync_group_by_name: {}", e))?
+    {
+        Some(g) => g,
+        None => {
+            drop(client);
+            let _ = conn_handle.await;
+            return Ok(false);
+        }
+    };
 
     let mut any_work = false;
 
-    // Collect completed snapshot results once (globally, before the group loop).
-    // This ensures results from any group are processed and rel_cache invalidation
-    // is applied across ALL consumers, not just the current group's slot.
+    // Collect completed snapshot results.
     let snap_results = snapshot_manager.collect_results();
     for snap in &snap_results {
         match &snap.result {
@@ -850,7 +857,6 @@ pub async fn run_sync_cycle(
                         .update_table_metrics(snap.task_id, *rows_copied as i64)
                         .await;
                 }
-                // Unpause flush thread — buffered WAL changes can now be flushed
                 let target_key = format!("{}.{}", snap.target_schema, snap.target_table);
                 coordinator.unpause_table(&target_key);
             }
@@ -867,11 +873,9 @@ pub async fn run_sync_cycle(
     }
 
     // Invalidate cached mappings for tables that just transitioned SNAPSHOT → CATCHUP
-    // so the WAL handler re-resolves them with the new state (CATCHUP + snapshot_lsn).
-    // Scanned across ALL consumers (all groups) to avoid stale rel_cache entries.
     for snap in &snap_results {
         if snap.result.is_ok() {
-            for slot_state in consumers.values_mut() {
+            if let Some(ref mut slot_state) = consumer {
                 for cached in slot_state.rel_cache.values_mut() {
                     if cached
                         .mapping
@@ -886,224 +890,201 @@ pub async fn run_sync_cycle(
         }
     }
 
-    for group in groups.iter_mut() {
-        // --- Per-group remote source connection ---
-        // For remote groups (conninfo IS NOT NULL), open a separate connection to
-        // the remote PG for catalog queries (PK lookup) and snapshot COPY.
-        // WAL replication uses per-group SlotConnectParams derived from conninfo.
-        let remote_source: Option<(
-            tokio_postgres::Client,
-            tokio::task::JoinHandle<Result<(), tokio_postgres::Error>>,
-        )> = if let Some(ref conninfo) = group.conninfo {
-            let (rc, rh) = crate::connstr::pg_connect(conninfo)
-                .await
-                .map_err(|e| format!("remote source connect for group {}: {}", group.name, e))?;
-            Some((rc, rh))
-        } else {
-            None
-        };
-
-        let source_client_ref = remote_source.as_ref().map(|(c, _)| c);
-
-        // Per-group slot params: use remote PG for WAL replication if conninfo set.
-        let per_group_slot_params: Option<SlotConnectParams> = match group.conninfo.as_ref() {
-            Some(ci) => Some(
-                crate::connstr::to_slot_connect_params(ci)
-                    .map_err(|e| format!("parse conninfo for group {}: {}", group.name, e))?,
-            ),
-            None => None,
-        };
-        let effective_slot_params = per_group_slot_params.as_ref().unwrap_or(slot_params);
-
-        // Snapshot connstr: for remote groups, use the remote PG connstr directly.
-        // tokio-postgres handles both key=value and URI formats natively.
-        let snapshot_connstr = if let Some(ref conninfo) = group.conninfo {
-            conninfo.clone()
-        } else {
-            config.connstr.clone()
-        };
-
-        // Kick new snapshots (fire-and-forget, never blocks)
-        let snapshot_tasks = meta
-            .get_snapshot_tasks(group.id)
+    // --- Remote source connection ---
+    // For remote groups (conninfo IS NOT NULL), open a separate connection to
+    // the remote PG for catalog queries (PK lookup) and snapshot COPY.
+    let remote_source: Option<(
+        tokio_postgres::Client,
+        tokio::task::JoinHandle<Result<(), tokio_postgres::Error>>,
+    )> = if let Some(ref conninfo) = group.conninfo {
+        let (rc, rh) = crate::connstr::pg_connect(conninfo)
             .await
-            .map_err(|e| format!("get_snapshot_tasks: {}", e))?;
-        if !snapshot_tasks.is_empty() {
-            snapshot_manager.kick_snapshots(
-                snapshot_tasks,
-                &snapshot_connstr,
-                coordinator.pg_connstr(),
-                coordinator.ducklake_schema(),
-                config.debug_log,
+            .map_err(|e| format!("remote source connect for group {}: {}", group.name, e))?;
+        Some((rc, rh))
+    } else {
+        None
+    };
+
+    let source_client_ref = remote_source.as_ref().map(|(c, _)| c);
+
+    // Per-group slot params: use remote PG for WAL replication if conninfo set.
+    let per_group_slot_params: Option<SlotConnectParams> = match group.conninfo.as_ref() {
+        Some(ci) => Some(
+            crate::connstr::to_slot_connect_params(ci)
+                .map_err(|e| format!("parse conninfo for group {}: {}", group.name, e))?,
+        ),
+        None => None,
+    };
+    let effective_slot_params = per_group_slot_params.as_ref().unwrap_or(slot_params);
+
+    // Snapshot connstr: for remote groups, use the remote PG connstr directly.
+    let snapshot_connstr = if let Some(ref conninfo) = group.conninfo {
+        conninfo.clone()
+    } else {
+        config.connstr.clone()
+    };
+
+    // Kick new snapshots (fire-and-forget, never blocks)
+    let snapshot_tasks = meta
+        .get_snapshot_tasks(group.id)
+        .await
+        .map_err(|e| format!("get_snapshot_tasks: {}", e))?;
+    if !snapshot_tasks.is_empty() {
+        snapshot_manager.kick_snapshots(
+            snapshot_tasks,
+            &snapshot_connstr,
+            coordinator.pg_connstr(),
+            coordinator.ducklake_schema(),
+            config.debug_log,
+        );
+    }
+
+    // Seed per_table_lsn with all active tables from PG.
+    if let Ok(active_lsns) = meta.get_active_table_lsns(group.id).await {
+        coordinator.seed_table_lsns(&active_lsns);
+    }
+
+    // Drain flush results from the previous cycle.
+    let prev_results = coordinator.collect_results();
+    for r in &prev_results {
+        if let FlushThreadResult::Error {
+            target_key, error, ..
+        } = r
+        {
+            tracing::error!("pg_duckpipe: flush error for {}: {}", target_key, error);
+        }
+    }
+
+    // Persist the latest flushed position.
+    let fresh_flushed = coordinator.get_min_applied_lsn_in_coordinator();
+    if fresh_flushed > group.confirmed_lsn {
+        group.confirmed_lsn = fresh_flushed;
+        if let Err(e) = meta.update_confirmed_lsn(group.id, fresh_flushed).await {
+            tracing::error!(
+                "pg_duckpipe: failed to persist confirmed_lsn for group {}: {}",
+                group.id,
+                e
             );
         }
+    }
 
-        // Continue to streaming immediately
+    // Reuse persistent consumer or create a new one.
+    let slot_start_lsn = group.confirmed_lsn;
 
-        // Seed per_table_lsn with all active (STREAMING/CATCHUP) tables from PG.
-        // This ensures CATCHUP tables that received no WAL changes this session are
-        // still visible to get_min_applied_lsn_in_coordinator(), preventing unsafe
-        // confirmed_lsn advancement past their needs.
-        if let Ok(active_lsns) = meta.get_active_table_lsns(group.id).await {
-            coordinator.seed_table_lsns(&active_lsns);
-        }
+    let needs_connect = match consumer {
+        Some(s) => !s.consumer.is_connected(),
+        None => true,
+    };
+    if needs_connect {
+        *consumer = None;
+        let new_consumer = connect_slot_consumer(
+            effective_slot_params,
+            &group.slot_name,
+            &group.publication,
+            slot_start_lsn,
+        )
+        .await
+        .map_err(|e| format!("streaming connect failed for {}: {}", group.slot_name, e))?;
+        *consumer = Some(SlotState {
+            consumer: new_consumer,
+            rel_cache: HashMap::new(),
+            last_enabled_check: Instant::now(),
+        });
+    }
 
-        // Drain flush results from the previous cycle.  This updates per_table_lsn
-        // (flushed state) and logs errors.  Done before both the confirmed_lsn
-        // persistence step and the slot connection.  Results are saved so we can
-        // later do targeted rel_cache invalidation for errored mappings.
-        let prev_results = coordinator.collect_results();
-        for r in &prev_results {
-            if let FlushThreadResult::Error {
-                target_key, error, ..
-            } = r
-            {
-                tracing::error!("pg_duckpipe: flush error for {}: {}", target_key, error);
-            }
-        }
+    let slot_state = consumer.as_mut().unwrap();
 
-        // Persist the latest flushed position to PG (for crash recovery and WAL
-        // retention via StandbyStatusUpdate).  This is purely a bookkeeping update —
-        // it does NOT affect where the slot connects this cycle.
-        let fresh_flushed = coordinator.get_min_applied_lsn_in_coordinator();
-        if fresh_flushed > group.confirmed_lsn {
-            group.confirmed_lsn = fresh_flushed;
-            if let Err(e) = meta.update_confirmed_lsn(group.id, fresh_flushed).await {
-                tracing::error!(
-                    "pg_duckpipe: failed to persist confirmed_lsn for group {}: {}",
-                    group.id,
-                    e
-                );
-            }
-        }
-
-        // Reuse persistent consumer or create a new one.
-        // Always start from confirmed_lsn — the crash-safe restart point from PG.
-        // Re-reading a small WAL window is cheap and avoids needing in-memory consumed_lsn.
-        let slot_start_lsn = group.confirmed_lsn;
-
-        let needs_connect = match consumers.get(&group.slot_name) {
-            Some(s) => !s.consumer.is_connected(),
-            None => true,
-        };
-        if needs_connect {
-            // Remove dead state if present (drop = close connection, clear rel_cache)
-            consumers.remove(&group.slot_name);
-            let consumer = connect_slot_consumer(
-                effective_slot_params,
-                &group.slot_name,
-                &group.publication,
-                slot_start_lsn,
-            )
-            .await
-            .map_err(|e| format!("streaming connect failed for {}: {}", group.slot_name, e))?;
-            consumers.insert(
-                group.slot_name.clone(),
-                SlotState {
-                    consumer,
-                    rel_cache: HashMap::new(),
-                    // Fresh connection — cache is empty, so no immediate refresh needed.
-                    last_enabled_check: Instant::now(),
-                },
-            );
-        }
-
-        let slot_state = consumers.get_mut(&group.slot_name).unwrap();
-
-        // Targeted invalidation: mappings that had flush errors may have transitioned
-        // to ERRORED in PG.  Clearing only those entries forces a re-fetch before the
-        // next WAL event for those tables, so routing picks up the new state promptly.
-        for r in &prev_results {
-            if let FlushThreadResult::Error { mapping_id, .. } = r {
-                for cached in slot_state.rel_cache.values_mut() {
-                    if cached
-                        .mapping
-                        .as_ref()
-                        .map_or(false, |m| &m.id == mapping_id)
-                    {
-                        cached.mapping = None;
-                        break;
-                    }
+    // Targeted invalidation for errored mappings.
+    for r in &prev_results {
+        if let FlushThreadResult::Error { mapping_id, .. } = r {
+            for cached in slot_state.rel_cache.values_mut() {
+                if cached
+                    .mapping
+                    .as_ref()
+                    .map_or(false, |m| &m.id == mapping_id)
+                {
+                    cached.mapping = None;
+                    break;
                 }
             }
         }
+    }
 
-        // Periodic refresh of `enabled` + `state` for all cached mappings.
-        // State transitions owned by the service (CATCHUP→STREAMING, retries, flush
-        // errors) are mirrored in-place as they happen, so this only needs to catch
-        // external changes such as a user toggling `enabled` via direct SQL.
-        if slot_state.last_enabled_check.elapsed() >= ENABLED_REFRESH_INTERVAL {
-            let ids: Vec<i32> = slot_state
-                .rel_cache
-                .values()
-                .filter_map(|c| c.mapping.as_ref().map(|m| m.id))
-                .collect();
-            if !ids.is_empty() {
-                match meta.get_mapping_enabled_states(&ids).await {
-                    Ok(meta_map) => {
-                        for cached in slot_state.rel_cache.values_mut() {
-                            if let Some(ref mut mapping) = cached.mapping {
-                                if let Some((enabled, state_str)) = meta_map.get(&mapping.id) {
-                                    mapping.enabled = *enabled;
-                                    mapping.state = state_str.clone();
-                                }
+    // Periodic refresh of `enabled` + `state`.
+    if slot_state.last_enabled_check.elapsed() >= ENABLED_REFRESH_INTERVAL {
+        let ids: Vec<i32> = slot_state
+            .rel_cache
+            .values()
+            .filter_map(|c| c.mapping.as_ref().map(|m| m.id))
+            .collect();
+        if !ids.is_empty() {
+            match meta.get_mapping_enabled_states(&ids).await {
+                Ok(meta_map) => {
+                    for cached in slot_state.rel_cache.values_mut() {
+                        if let Some(ref mut mapping) = cached.mapping {
+                            if let Some((enabled, state_str)) = meta_map.get(&mapping.id) {
+                                mapping.enabled = *enabled;
+                                mapping.state = state_str.clone();
                             }
                         }
                     }
-                    Err(e) => {
-                        tracing::warn!(
-                            "pg_duckpipe: periodic enabled/state refresh failed for slot {}: {}",
-                            group.slot_name,
-                            e
-                        );
-                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "pg_duckpipe: periodic enabled/state refresh failed for slot {}: {}",
+                        group.slot_name,
+                        e
+                    );
                 }
             }
-            slot_state.last_enabled_check = Instant::now();
         }
+        slot_state.last_enabled_check = Instant::now();
+    }
 
-        let result = match process_sync_group_streaming(
-            &client,
-            &meta,
-            group,
-            config,
-            &mut slot_state.consumer,
-            coordinator,
-            &mut slot_state.rel_cache,
-            source_client_ref,
-        )
-        .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                // Clean up remote connection before returning error
-                if let Some((rc, rh)) = remote_source {
-                    drop(rc);
-                    let _ = rh.await;
-                }
-                // Remove failed state — next cycle reconnects from confirmed_lsn
-                consumers.remove(&group.slot_name);
-                return Err(format!("process_sync_group_streaming: {}", e));
+    let result = match process_sync_group_streaming(
+        &client,
+        &meta,
+        &mut group,
+        config,
+        &mut slot_state.consumer,
+        coordinator,
+        &mut slot_state.rel_cache,
+        source_client_ref,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            // Clean up remote connection before returning error
+            if let Some((rc, rh)) = remote_source {
+                drop(rc);
+                let _ = rh.await;
             }
-        };
-
-        // Clean up per-group remote connection
-        if let Some((rc, rh)) = remote_source {
-            drop(rc);
-            let _ = rh.await;
+            *consumer = None;
+            return Err(format!("process_sync_group_streaming: {}", e));
         }
+    };
 
-        if result.any_work {
-            any_work = true;
-        }
+    // Clean up remote source connection
+    if let Some((rc, rh)) = remote_source {
+        drop(rc);
+        let _ = rh.await;
+    }
+
+    if result.any_work {
+        any_work = true;
     }
 
     // Update worker runtime state for observability
     let _ = meta
-        .update_worker_state(coordinator.total_queued(), coordinator.is_backpressured())
+        .update_worker_state(
+            group.id,
+            coordinator.total_queued(),
+            coordinator.is_backpressured(),
+        )
         .await;
 
-    // Update per-table queued_changes for per-table accumulator visibility
+    // Update per-table queued_changes
     let pending_counts = coordinator.table_pending_counts();
     if !pending_counts.is_empty() {
         let _ = meta.update_table_queued_changes(&pending_counts).await;

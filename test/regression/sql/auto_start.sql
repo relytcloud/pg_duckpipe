@@ -1,7 +1,7 @@
 -- Test auto-start: add_table() should start background worker automatically
 
 -- Verify no worker is running yet
-SELECT count(*) AS workers_before FROM pg_stat_activity WHERE backend_type = 'pg_duckpipe';
+SELECT count(*) AS workers_before FROM pg_stat_activity WHERE backend_type LIKE 'pg_duckpipe:%';
 
 -- Create source table
 CREATE TABLE auto_test (id int primary key, val text);
@@ -13,7 +13,7 @@ SELECT duckpipe.add_table('public.auto_test', NULL, 'default', false);
 SELECT pg_sleep(1);
 
 -- Verify worker is now running
-SELECT count(*) AS workers_after FROM pg_stat_activity WHERE backend_type = 'pg_duckpipe';
+SELECT count(*) AS workers_after FROM pg_stat_activity WHERE backend_type LIKE 'pg_duckpipe:%';
 
 -- Verify start_worker() reports already running
 SELECT duckpipe.start_worker();
@@ -23,7 +23,7 @@ CREATE TABLE auto_test2 (id int primary key, val text);
 SELECT duckpipe.add_table('public.auto_test2', NULL, 'default', false);
 
 -- Still exactly one worker
-SELECT count(*) AS workers_still_one FROM pg_stat_activity WHERE backend_type = 'pg_duckpipe';
+SELECT count(*) AS workers_still_one FROM pg_stat_activity WHERE backend_type LIKE 'pg_duckpipe:%';
 
 -- Cleanup
 SELECT duckpipe.remove_table('public.auto_test', false);
