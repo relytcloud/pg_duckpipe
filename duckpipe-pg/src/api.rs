@@ -1,6 +1,8 @@
 use pgrx::datum::{DatumWithOid, TimestampWithTimeZone};
 use pgrx::prelude::*;
 
+use duckpipe_core::listen;
+
 use crate::DATA_INLINING_ROW_LIMIT;
 
 /// Run an async block on a short-lived, single-threaded tokio runtime.
@@ -199,15 +201,36 @@ impl PgConn {
     }
 }
 
-/// Check if a pg_duckpipe worker is running for the current database
-fn is_worker_running() -> bool {
-    let result =
-        Spi::get_one::<i64>("SELECT 1 FROM pg_stat_activity WHERE backend_type = 'pg_duckpipe'");
+/// Check if a per-group pg_duckpipe worker is running.
+fn is_group_worker_running(group_name: &str) -> bool {
+    let backend_type = format!("pg_duckpipe:{}", group_name);
+    let args = unsafe {
+        [DatumWithOid::new(
+            backend_type.as_str(),
+            PgBuiltInOids::TEXTOID.value(),
+        )]
+    };
+    let result = Spi::connect(|client| {
+        let r = client.select(
+            "SELECT 1 FROM pg_stat_activity WHERE backend_type = $1",
+            Some(1),
+            &args,
+        );
+        matches!(r, Ok(t) if t.len() > 0)
+    });
+    result
+}
+
+/// Check if any pg_duckpipe worker is running.
+fn is_any_worker_running() -> bool {
+    let result = Spi::get_one::<i64>(
+        "SELECT 1 FROM pg_stat_activity WHERE backend_type LIKE 'pg_duckpipe:%'",
+    );
     matches!(result, Ok(Some(_)))
 }
 
-/// Register and start a dynamic background worker
-fn launch_worker() -> bool {
+/// Register and start a dynamic background worker for a specific group.
+fn launch_worker(group_name: &str) -> bool {
     unsafe {
         let dbname = pg_sys::get_database_name(pg_sys::MyDatabaseId);
         let dbname_str = if dbname.is_null() {
@@ -240,8 +263,8 @@ fn launch_worker() -> bool {
             worker.bgw_function_name[i] = b as std::ffi::c_char;
         }
 
-        // Set worker name
-        let name = format!("pg_duckpipe worker [{}]", dbname_str);
+        // Set worker name (visible in ps output)
+        let name = format!("pg_duckpipe [{}:{}]", dbname_str, group_name);
         let name_c = std::ffi::CString::new(name.as_str()).unwrap();
         let name_bytes = name_c.as_bytes_with_nul();
         let copy_len = name_bytes.len().min(worker.bgw_name.len());
@@ -249,12 +272,21 @@ fn launch_worker() -> bool {
             worker.bgw_name[i] = b as std::ffi::c_char;
         }
 
-        // Set worker type
-        let type_name = std::ffi::CString::new("pg_duckpipe").unwrap();
+        // Set worker type (determines backend_type in pg_stat_activity)
+        let type_str = format!("pg_duckpipe:{}", group_name);
+        let type_name = std::ffi::CString::new(type_str.as_str()).unwrap();
         let type_bytes = type_name.as_bytes_with_nul();
         let copy_len = type_bytes.len().min(worker.bgw_type.len());
         for (i, &b) in type_bytes[..copy_len].iter().enumerate() {
             worker.bgw_type[i] = b as std::ffi::c_char;
+        }
+
+        // Pack group_name into bgw_extra (read by duckpipe_worker_main)
+        let extra_c = std::ffi::CString::new(group_name).unwrap();
+        let extra_bytes = extra_c.as_bytes_with_nul();
+        let copy_len = extra_bytes.len().min(worker.bgw_extra.len());
+        for (i, &b) in extra_bytes[..copy_len].iter().enumerate() {
+            worker.bgw_extra[i] = b as std::ffi::c_char;
         }
 
         worker.bgw_main_arg = pg_sys::ObjectIdGetDatum(pg_sys::MyDatabaseId) as pg_sys::Datum;
@@ -425,6 +457,9 @@ LANGUAGE C STRICT;
 REVOKE ALL ON FUNCTION duckpipe.drop_group(TEXT, BOOLEAN) FROM PUBLIC;
 ")]
 fn drop_group(name: &str, drop_slot: bool) {
+    // Terminate the group's worker before cleanup
+    terminate_group_worker(name);
+
     let mut pub_name = String::new();
     let mut slot = String::new();
     let mut group_conninfo: Option<String> = None;
@@ -527,8 +562,10 @@ fn enable_group(name: &str) {
         );
         match result {
             Ok(status) if status.len() > 0 => {
-                // Wake the worker so it picks up the enabled group immediately.
-                let _ = client.update("NOTIFY duckpipe_wakeup", None, &[]);
+                // Wake the group's worker so it picks up the enabled group immediately.
+                let channel = listen::wakeup_channel(name);
+                let notify_sql = format!("NOTIFY {}", channel);
+                let _ = client.update(&notify_sql, None, &[]);
             }
             _ => {
                 ereport!(
@@ -909,12 +946,16 @@ fn add_table(
         );
     }
 
-    // Auto-start background worker or wake existing one
-    if !is_worker_running() {
-        launch_worker();
+    // Auto-start background worker for this group or wake existing one
+    if !is_group_worker_running(group) {
+        launch_worker(group);
     } else {
+        // Worker is already running — send per-group NOTIFY so it picks up
+        // the new table immediately instead of waiting for poll_interval.
+        let channel = listen::wakeup_channel(group);
+        let notify_sql = format!("NOTIFY {}", channel);
         Spi::connect_mut(|client| {
-            let _ = client.update("NOTIFY duckpipe_wakeup", None, &[]);
+            let _ = client.update(&notify_sql, None, &[]);
         });
     }
 }
@@ -1127,7 +1168,7 @@ fn resync_table(source_table: &str) {
     let (schema, table) = parse_source_table(source_table);
 
     Spi::connect_mut(|client| {
-        // Get target table info
+        // Get target table info and group name
         let args = unsafe {
             [
                 DatumWithOid::new(schema.as_str(), PgBuiltInOids::TEXTOID.value()),
@@ -1136,8 +1177,10 @@ fn resync_table(source_table: &str) {
         };
         let result = client
             .select(
-                "SELECT target_schema, target_table FROM duckpipe.table_mappings \
-                 WHERE source_schema = $1 AND source_table = $2",
+                "SELECT m.target_schema, m.target_table, g.name \
+                 FROM duckpipe.table_mappings m \
+                 JOIN duckpipe.sync_groups g ON m.group_id = g.id \
+                 WHERE m.source_schema = $1 AND m.source_table = $2",
                 Some(1),
                 &args,
             )
@@ -1145,11 +1188,13 @@ fn resync_table(source_table: &str) {
 
         let mut t_schema = String::new();
         let mut t_table = String::new();
+        let mut group_name = String::new();
         let mut found = false;
 
         for r in result {
             t_schema = r.get::<String>(1).unwrap().unwrap();
             t_table = r.get::<String>(2).unwrap().unwrap();
+            group_name = r.get::<String>(3).unwrap().unwrap();
             found = true;
             break;
         }
@@ -1190,8 +1235,10 @@ fn resync_table(source_table: &str) {
             )
             .unwrap();
 
-        // Wake the worker so it picks up the resync immediately.
-        let _ = client.update("NOTIFY duckpipe_wakeup", None, &[]);
+        // Wake the group's worker so it picks up the resync immediately.
+        let channel = listen::wakeup_channel(&group_name);
+        let notify_sql = format!("NOTIFY {}", channel);
+        let _ = client.update(&notify_sql, None, &[]);
     });
 
     let (s, t) = parse_source_table(source_table);
@@ -1425,6 +1472,7 @@ fn status() -> TableIterator<
 
 #[pg_extern(sql = "
 CREATE FUNCTION duckpipe.worker_status() RETURNS TABLE(
+    sync_group TEXT,
     total_queued_changes BIGINT,
     is_backpressured BOOLEAN,
     updated_at TIMESTAMPTZ
@@ -1435,6 +1483,7 @@ LANGUAGE C STRICT;
 fn worker_status() -> TableIterator<
     'static,
     (
+        name!(sync_group, String),
         name!(total_queued_changes, i64),
         name!(is_backpressured, bool),
         name!(updated_at, Option<TimestampWithTimeZone>),
@@ -1444,19 +1493,27 @@ fn worker_status() -> TableIterator<
 
     Spi::connect(|client| {
         let result = client.select(
-            "SELECT total_queued_changes, is_backpressured, updated_at \
-             FROM duckpipe.worker_state WHERE id = 1",
+            "SELECT g.name, w.total_queued_changes, w.is_backpressured, w.updated_at \
+             FROM duckpipe.worker_state w \
+             JOIN duckpipe.sync_groups g ON w.group_id = g.id \
+             ORDER BY g.name",
             None,
             &[],
         );
 
         if let Ok(tuptable) = result {
             for row in tuptable {
-                let total_queued_changes: i64 = row.get::<i64>(1).unwrap().unwrap_or(0);
-                let is_backpressured: bool = row.get::<bool>(2).unwrap().unwrap_or(false);
-                let updated_at: Option<TimestampWithTimeZone> = row.get(3).unwrap();
+                let sync_group: String = row.get::<String>(1).unwrap().unwrap_or_default();
+                let total_queued_changes: i64 = row.get::<i64>(2).unwrap().unwrap_or(0);
+                let is_backpressured: bool = row.get::<bool>(3).unwrap().unwrap_or(false);
+                let updated_at: Option<TimestampWithTimeZone> = row.get(4).unwrap();
 
-                rows.push((total_queued_changes, is_backpressured, updated_at));
+                rows.push((
+                    sync_group,
+                    total_queued_changes,
+                    is_backpressured,
+                    updated_at,
+                ));
             }
         }
     });
@@ -1465,53 +1522,113 @@ fn worker_status() -> TableIterator<
 }
 
 #[pg_extern(sql = "
-CREATE FUNCTION duckpipe.start_worker() RETURNS void
+CREATE FUNCTION duckpipe.start_worker(group_name TEXT DEFAULT NULL) RETURNS void
 AS 'MODULE_PATHNAME', '@FUNCTION_NAME@'
 LANGUAGE C;
-REVOKE ALL ON FUNCTION duckpipe.start_worker() FROM PUBLIC;
+REVOKE ALL ON FUNCTION duckpipe.start_worker(TEXT) FROM PUBLIC;
 ")]
-fn start_worker() {
-    let dbname: String = Spi::get_one("SELECT current_database()::text")
-        .unwrap()
-        .unwrap_or_else(|| "unknown".to_string());
+fn start_worker(group_name: Option<&str>) {
+    match group_name {
+        Some(name) => {
+            // Start a specific group's worker
+            if is_group_worker_running(name) {
+                notice!("Background worker already running for group '{}'", name);
+                return;
+            }
+            if !launch_worker(name) {
+                ereport!(
+                    ERROR,
+                    PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+                    format!("Failed to start background worker for group '{}'", name)
+                );
+            }
+            notice!("Background worker started for group '{}'", name);
+        }
+        None => {
+            // Start workers for all enabled groups
+            let groups: Vec<String> = Spi::connect(|client| {
+                let mut names = Vec::new();
+                let result = client.select(
+                    "SELECT g.name FROM duckpipe.sync_groups g \
+                     WHERE g.enabled = true \
+                     ORDER BY g.name",
+                    None,
+                    &[],
+                );
+                if let Ok(tuptable) = result {
+                    for row in tuptable {
+                        if let Some(name) = row.get::<String>(1).unwrap() {
+                            names.push(name);
+                        }
+                    }
+                }
+                names
+            });
 
-    if is_worker_running() {
-        notice!("Background worker started for database {}", dbname);
-        return;
+            let mut started = 0;
+            for name in &groups {
+                if !is_group_worker_running(name) {
+                    if launch_worker(name) {
+                        started += 1;
+                    }
+                }
+            }
+            notice!("Started {} background worker(s)", started);
+        }
     }
-
-    if !launch_worker() {
-        ereport!(
-            ERROR,
-            PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-            format!("Failed to start background worker for database {}", dbname)
-        );
-    }
-
-    notice!("Background worker started for database {}", dbname);
 }
 
 #[pg_extern(sql = "
-CREATE FUNCTION duckpipe.stop_worker() RETURNS void
+CREATE FUNCTION duckpipe.stop_worker(group_name TEXT DEFAULT NULL) RETURNS void
 AS 'MODULE_PATHNAME', '@FUNCTION_NAME@'
 LANGUAGE C;
-REVOKE ALL ON FUNCTION duckpipe.stop_worker() FROM PUBLIC;
+REVOKE ALL ON FUNCTION duckpipe.stop_worker(TEXT) FROM PUBLIC;
 ")]
-fn stop_worker() {
-    // Wake the worker from any long poll_interval sleep so it can check
-    // ShutdownRequestPending promptly after receiving SIGTERM.  Without
-    // this, pg_terminate_backend sets the flag but the tokio event loop
-    // may not re-check it until the current sleep/select expires.
+fn stop_worker(group_name: Option<&str>) {
+    // Wake the worker(s) from any long poll_interval sleep so they can check
+    // ShutdownRequestPending promptly after receiving SIGTERM.
     Spi::connect_mut(|client| {
-        let _ = client.update("NOTIFY duckpipe_wakeup", None, &[]);
+        match group_name {
+            Some(name) => {
+                let channel = listen::wakeup_channel(name);
+                let _ = client.update(&format!("NOTIFY {}", channel), None, &[]);
+            }
+            None => {
+                // Wake all group workers — query sync_groups for all names
+                let result = client.select("SELECT name FROM duckpipe.sync_groups", None, &[]);
+                if let Ok(rows) = result {
+                    for r in rows {
+                        if let Some(name) = r.get::<String>(1).unwrap() {
+                            let channel = listen::wakeup_channel(&name);
+                            let _ = client.update(&format!("NOTIFY {}", channel), None, &[]);
+                        }
+                    }
+                }
+            }
+        }
     });
 
+    let (sql, check_fn): (String, Box<dyn Fn() -> bool>) = match group_name {
+        Some(name) => {
+            let backend_type = format!("pg_duckpipe:{}", name);
+            let n = name.to_string();
+            (
+                format!(
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE backend_type = {}",
+                    quote_literal(&backend_type)
+                ),
+                Box::new(move || is_group_worker_running(&n)),
+            )
+        }
+        None => (
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE backend_type LIKE 'pg_duckpipe:%'"
+                .to_string(),
+            Box::new(|| is_any_worker_running()),
+        ),
+    };
+
     let terminated: i64 = Spi::connect_mut(|client| {
-        let result = client.update(
-            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE backend_type = 'pg_duckpipe'",
-            None,
-            &[],
-        );
+        let result = client.update(&sql, None, &[]);
         match result {
             Ok(status) => status.len() as i64,
             Err(_) => 0,
@@ -1519,9 +1636,9 @@ fn stop_worker() {
     });
 
     if terminated > 0 {
-        // Wait for the worker to actually exit so subsequent start_worker() calls succeed
+        // Wait for the worker(s) to actually exit
         for _ in 0..50 {
-            if !is_worker_running() {
+            if !check_fn() {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
@@ -1529,5 +1646,26 @@ fn stop_worker() {
         notice!("Terminated {} worker(s)", terminated);
     } else {
         notice!("No workers found to terminate");
+    }
+}
+
+/// Terminate a specific group's worker (helper for drop_group).
+fn terminate_group_worker(group_name: &str) {
+    let backend_type = format!("pg_duckpipe:{}", group_name);
+    let sql = format!(
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE backend_type = {}",
+        quote_literal(&backend_type)
+    );
+    let terminated: i64 = Spi::connect_mut(|client| match client.update(&sql, None, &[]) {
+        Ok(status) => status.len() as i64,
+        Err(_) => 0,
+    });
+    if terminated > 0 {
+        for _ in 0..50 {
+            if !is_group_worker_running(group_name) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
     }
 }

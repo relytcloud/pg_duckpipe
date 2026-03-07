@@ -3,7 +3,7 @@
 -- Two groups with separate publications and slots, each with their own tables.
 -- Verifies groups are truly independent and don't interfere with each other.
 SELECT duckpipe.start_worker();
-NOTICE:  Background worker started for database regression
+NOTICE:  Started 1 background worker(s)
  start_worker 
 --------------
  

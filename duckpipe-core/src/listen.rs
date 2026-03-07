@@ -1,10 +1,10 @@
 //! LISTEN/NOTIFY wakeup helper.
 //!
 //! Establishes a persistent `tokio-postgres` connection, executes
-//! `LISTEN duckpipe_wakeup`, and bridges PG notifications to a
+//! `LISTEN <channel>`, and bridges PG notifications to a
 //! `tokio::sync::Notify` so the worker loop can wake immediately
 //! when `add_table()`, `resync_table()`, or `enable_group()` fires
-//! `NOTIFY duckpipe_wakeup`.
+//! `NOTIFY <channel>`.
 
 use std::sync::Arc;
 
@@ -12,15 +12,19 @@ use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tokio_postgres::AsyncMessage;
 
-pub const WAKEUP_CHANNEL: &str = "duckpipe_wakeup";
+/// Return the per-group NOTIFY channel name: `duckpipe_wakeup_{group_name}`.
+pub fn wakeup_channel(group_name: &str) -> String {
+    format!("duckpipe_wakeup_{}", group_name)
+}
 
-/// Spawn a background task that LISTENs on `duckpipe_wakeup` and
+/// Spawn a background task that LISTENs on `channel` and
 /// notifies `wakeup` whenever a notification arrives.
 ///
 /// The returned `JoinHandle` can be checked with `is_finished()` to
 /// detect connection loss; the caller should respawn when needed.
 pub async fn spawn_listen_task(
     connstr: &str,
+    channel: &str,
     wakeup: Arc<Notify>,
 ) -> Result<JoinHandle<()>, String> {
     let (client, mut connection) = tokio_postgres::connect(connstr, tokio_postgres::NoTls)
@@ -31,7 +35,7 @@ pub async fn spawn_listen_task(
     //   1. Drives the connection (required for Client to work)
     //   2. Issues LISTEN via the client
     //   3. Watches for notification messages
-    let listen_sql = format!("LISTEN {WAKEUP_CHANNEL}");
+    let listen_sql = format!("LISTEN {}", channel);
     let handle = tokio::spawn(async move {
         // Issue LISTEN.  We must drive the connection concurrently so
         // that the execute() response can be received.

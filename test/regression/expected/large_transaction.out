@@ -12,7 +12,7 @@ SELECT pg_reload_conf();
 (1 row)
 
 SELECT duckpipe.start_worker();
-NOTICE:  Background worker started for database regression
+NOTICE:  Started 1 background worker(s)
  start_worker 
 --------------
  

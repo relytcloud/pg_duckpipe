@@ -21,6 +21,49 @@ impl<'a> MetadataClient<'a> {
         self.client
     }
 
+    /// Get a single sync group by name (regardless of enabled state).
+    pub async fn get_sync_group_by_name(
+        &self,
+        name: &str,
+    ) -> Result<Option<SyncGroup>, tokio_postgres::Error> {
+        let rows = self
+            .client
+            .query(
+                "SELECT id, name, publication, slot_name, confirmed_lsn::text, enabled, conninfo \
+                 FROM duckpipe.sync_groups WHERE name = $1",
+                &[&name],
+            )
+            .await?;
+
+        if rows.is_empty() {
+            return Ok(None);
+        }
+
+        let row = &rows[0];
+        let id: i32 = row.get(0);
+        let name: String = row.get(1);
+        let publication: String = row.get(2);
+        let slot_name: String = row.get(3);
+        let confirmed_lsn_str: Option<String> = row.get(4);
+        let confirmed_lsn = confirmed_lsn_str.map(|s| parse_lsn(&s)).unwrap_or(0);
+        let enabled: bool = row.get(5);
+        let conninfo: Option<String> = row.get(6);
+
+        if !enabled {
+            return Ok(None);
+        }
+
+        Ok(Some(SyncGroup {
+            id,
+            name,
+            publication,
+            slot_name,
+            pending_lsn: 0,
+            confirmed_lsn,
+            conninfo,
+        }))
+    }
+
     /// Get all enabled sync groups.
     pub async fn get_enabled_sync_groups(&self) -> Result<Vec<SyncGroup>, tokio_postgres::Error> {
         let rows = self
@@ -570,16 +613,22 @@ impl<'a> MetadataClient<'a> {
     }
 
     /// Update worker runtime state (called once per sync cycle for observability).
+    /// Upserts into worker_state keyed by group_id.
     pub async fn update_worker_state(
         &self,
+        group_id: i32,
         total_queued_changes: i64,
         is_backpressured: bool,
     ) -> Result<(), tokio_postgres::Error> {
         self.client
             .execute(
-                "UPDATE duckpipe.worker_state SET total_queued_changes = $1, \
-                 is_backpressured = $2, updated_at = now() WHERE id = 1",
-                &[&total_queued_changes, &is_backpressured],
+                "INSERT INTO duckpipe.worker_state (group_id, total_queued_changes, is_backpressured, updated_at) \
+                 VALUES ($1, $2, $3, now()) \
+                 ON CONFLICT (group_id) DO UPDATE SET \
+                 total_queued_changes = EXCLUDED.total_queued_changes, \
+                 is_backpressured = EXCLUDED.is_backpressured, \
+                 updated_at = EXCLUDED.updated_at",
+                &[&group_id, &total_queued_changes, &is_backpressured],
             )
             .await?;
         Ok(())

@@ -17,8 +17,8 @@ SELECT sync_group, source_table, target_table, state, enabled,
        snapshot_duration_ms, snapshot_rows
 FROM duckpipe.status();
 
--- Test duckpipe.worker_status() returns runtime state
-SELECT total_queued_changes, is_backpressured FROM duckpipe.worker_status();
+-- Test duckpipe.worker_status() returns runtime state (per group)
+SELECT sync_group, total_queued_changes, is_backpressured FROM duckpipe.worker_status();
 
 -- Cleanup
 SELECT duckpipe.remove_table('public.mon_test', false);

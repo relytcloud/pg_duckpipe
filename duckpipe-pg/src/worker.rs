@@ -1,6 +1,5 @@
 use pgrx::pg_sys::panic::CaughtError;
 use pgrx::prelude::*;
-use std::collections::HashMap;
 use std::ffi::CString;
 use std::sync::Arc;
 
@@ -36,7 +35,9 @@ fn read_config(connstr: &str, duckdb_pg_connstr: &str) -> ServiceConfig {
     }
 }
 
-/// Background worker entry point
+/// Background worker entry point — one instance per sync group.
+///
+/// The group name is passed via `bgw_extra` (set by `launch_worker` in api.rs).
 #[pg_guard]
 #[no_mangle]
 pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
@@ -48,6 +49,31 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
 
     unsafe {
         pg_sys::BackgroundWorkerInitializeConnectionByOid(dboid, pg_sys::InvalidOid, 0);
+    }
+
+    // Read group name from bgw_extra (NUL-terminated C string packed by launch_worker).
+    let group_name: String = {
+        let extra = pgrx::bgworkers::BackgroundWorker::get_extra();
+        let extra_bytes = extra.as_bytes();
+        // Find NUL or use full length
+        let len = extra_bytes
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(extra_bytes.len());
+        String::from_utf8_lossy(&extra_bytes[..len]).to_string()
+    };
+
+    // Set application_name so the worker is identifiable in pg_stat_activity.
+    unsafe {
+        let app_name = format!("pg_duckpipe:{}", group_name);
+        let c_app = CString::new(app_name).unwrap();
+        let c_key = CString::new("application_name").unwrap();
+        pg_sys::SetConfigOption(
+            c_key.as_ptr(),
+            c_app.as_ptr(),
+            pg_sys::GucContext::PGC_USERSET,
+            pg_sys::GucSource::PGC_S_SESSION,
+        );
     }
 
     // Get database name and connection info (need a transaction context for catalog access)
@@ -91,13 +117,16 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
 
         pg_sys::CommitTransactionCommand();
 
-        log!("pg_duckpipe worker started for database '{}'", dbname);
+        log!(
+            "pg_duckpipe worker started for database '{}', group '{}'",
+            dbname,
+            group_name
+        );
 
         (dbname, port, socket_dir)
     };
 
     // Initialize tracing — stderr output is captured by PostgreSQL's log collector.
-    // Level is set from duckpipe.debug_log at startup; use RUST_LOG to override.
     duckpipe_core::log::init_subscriber(DEBUG_LOG.get());
 
     // Build tokio runtime (single-threaded — bgworker safety)
@@ -122,7 +151,6 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
     };
 
     // DuckDB's postgres_scanner speaks TCP, not unix sockets.
-    // Build a loopback TCP connstr for the DuckLake ATTACH inside flush workers.
     let duckdb_pg_connstr = format!(
         "host=127.0.0.1 port={} dbname={} user={}",
         port, db, os_user
@@ -139,29 +167,38 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
     );
     let mut snapshot_manager = SnapshotManager::new();
 
+    // Per-group LISTEN channel
+    let listen_channel = listen::wakeup_channel(&group_name);
+
     // Main worker loop — wraps block_on in catch_unwind for panic recovery.
-    // The inner async loop keeps the tokio runtime active so that pgwire-replication's
-    // spawned background task (which reads WAL from the socket and responds to
-    // keepalives) stays alive between sync cycles.
     loop {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let coord = &mut coordinator;
             let snap_mgr = &mut snapshot_manager;
             rt.block_on(async {
-                let mut consumers: HashMap<String, SlotState> = HashMap::new();
+                let mut consumer: Option<SlotState> = None;
 
                 // Shared wakeup signal — notified by the LISTEN task when
                 // add_table / resync_table / enable_group fires NOTIFY.
                 let wakeup = Arc::new(Notify::new());
 
-                // Spawn the LISTEN helper.  On connection failure we log and
-                // continue (the worker still functions via poll_interval).
+                // Spawn the LISTEN helper on the per-group channel.
                 let listen_connstr =
                     format!("{} user={} connect_timeout=5", connstr, os_user);
                 let mut listen_handle: Option<tokio::task::JoinHandle<()>> =
-                    match listen::spawn_listen_task(&listen_connstr, Arc::clone(&wakeup)).await {
+                    match listen::spawn_listen_task(
+                        &listen_connstr,
+                        &listen_channel,
+                        Arc::clone(&wakeup),
+                    )
+                    .await
+                    {
                         Ok(h) => {
-                            log!("pg_duckpipe LISTEN task started on {}", listen_connstr);
+                            log!(
+                                "pg_duckpipe LISTEN task started on channel '{}' ({})",
+                                listen_channel,
+                                listen_connstr
+                            );
                             Some(h)
                         }
                         Err(e) => {
@@ -182,10 +219,14 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
                     }
 
                     // Auto-respawn the LISTEN task if it was running but exited
-                    // (connection lost).  Don't retry if the initial connect failed
-                    // (handle is None) — avoids blocking on connect_timeout each cycle.
                     if matches!(&listen_handle, Some(h) if h.is_finished()) {
-                        match listen::spawn_listen_task(&listen_connstr, Arc::clone(&wakeup)).await {
+                        match listen::spawn_listen_task(
+                            &listen_connstr,
+                            &listen_channel,
+                            Arc::clone(&wakeup),
+                        )
+                        .await
+                        {
                             Ok(h) => listen_handle = Some(h),
                             Err(e) => {
                                 tracing::warn!("failed to respawn LISTEN task: {e}");
@@ -196,7 +237,7 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
 
                     if !ENABLED.get() {
                         tokio::time::sleep(std::time::Duration::from_millis(
-                            POLL_INTERVAL.get() as u64
+                            POLL_INTERVAL.get() as u64,
                         ))
                         .await;
                         continue;
@@ -204,11 +245,12 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
 
                     let config = read_config(&connstr, &duckdb_pg_connstr);
 
-                    match service::run_sync_cycle(
+                    match service::run_group_sync_cycle(
                         &config,
+                        &group_name,
                         coord,
                         &slot_params,
-                        &mut consumers,
+                        &mut consumer,
                         snap_mgr,
                     )
                     .await
@@ -226,12 +268,21 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
                                     _ = snap_mgr.snapshot_notify().notified(), if snap_mgr.has_in_flight() => "snapshot",
                                     _ = wakeup.notified() => "notify",
                                 };
-                                log!("pg_duckpipe woke: reason={}, poll_interval={}ms", reason, POLL_INTERVAL.get());
+                                log!(
+                                    "pg_duckpipe [{}] woke: reason={}, poll_interval={}ms",
+                                    group_name,
+                                    reason,
+                                    POLL_INTERVAL.get()
+                                );
                             }
                         }
                         Err(msg) => {
-                            tracing::error!("pg_duckpipe worker error: {}", msg);
-                            consumers.clear();
+                            tracing::error!(
+                                "pg_duckpipe [{}] worker error: {}",
+                                group_name,
+                                msg
+                            );
+                            consumer = None;
                             if should_shutdown() {
                                 break;
                             }
@@ -277,12 +328,10 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
                 } else {
                     "unknown error".to_string()
                 };
-                tracing::error!("pg_duckpipe worker caught error: {}", msg);
+                tracing::error!("pg_duckpipe [{}] worker caught error: {}", group_name, msg);
                 if should_shutdown() {
                     break;
                 }
-                // Brief pause before retrying — use wait_latch here since
-                // the tokio runtime just exited (panic recovery path).
                 BackgroundWorker::wait_latch(Some(std::time::Duration::from_millis(
                     POLL_INTERVAL.get() as u64,
                 )));
@@ -291,5 +340,5 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
     }
 
     coordinator.shutdown();
-    log!("pg_duckpipe worker shutting down");
+    log!("pg_duckpipe [{}] worker shutting down", group_name);
 }
