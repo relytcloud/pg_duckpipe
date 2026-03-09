@@ -15,6 +15,7 @@ RESULTS_DIR="$BENCH_DIR/results"
 PG_LOG="$BENCH_DIR/bench_pg.log"
 
 # ���─ Defaults ──────────────────────────────────────────────────────────────────
+# Use >=30s for reportable results; shorter durations produce unstable numbers.
 DURATION=30
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
