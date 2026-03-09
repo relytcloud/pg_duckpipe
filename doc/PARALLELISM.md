@@ -137,43 +137,9 @@ During a snapshot, the table's flush thread is **paused** — it accumulates WAL
 
 ## 4. Inter-Thread Communication
 
-### 4.1 Communication Map
-
 ![Communication Map](img/2-communication.png)
 
-### 4.2 Channel Details
-
-| Channel | Type | Direction | Purpose |
-|---------|------|-----------|---------|
-| Change queue | `Mutex<Vec<Change>>` + `Condvar` | Main → Flush thread | Per-table change delivery. Push: brief lock. Drain: Condvar wait with timeout |
-| Flush results | `std::sync::mpsc` | Flush thread → Main | Report success/error + applied LSN (non-blocking `try_recv`) |
-| Snapshot results | `std::sync::mpsc` | Snapshot task → Manager | Report snapshot completion (non-blocking `try_recv`) |
-| Wakeup notify | `tokio::sync::Notify` | LISTEN task → Main loop | Instant wakeup on `add_table`/`resync`/`enable` |
-
-### 4.3 Push Path (WAL Consumer → Queue)
-
-```rust
-// flush_coordinator.rs — push_change()
-let mut guard = entry.queue_handle.inner.lock().unwrap();  // brief lock
-guard.changes.push(change);
-backpressure.total_queued.fetch_add(1, Ordering::Relaxed);
-entry.queue_handle.condvar.notify_one();                    // wake flush thread
-```
-
-### 4.4 Drain Path (Queue → Flush Thread)
-
-```rust
-// flush_coordinator.rs — flush_thread_main()
-let mut guard = queue_handle.inner.lock().unwrap();
-if guard.changes.is_empty() {
-    let (g, _) = queue_handle.condvar.wait_timeout(guard, wait_timeout).unwrap();
-    guard = g;
-}
-let drain_n = guard.changes.len().min(batch_threshold);     // capped drain
-let changes: Vec<Change> = guard.changes.drain(..drain_n).collect();
-drop(guard);                                                 // release lock early
-accumulated.extend(changes);
-```
+The WAL consumer pushes decoded changes into per-table queues (`Mutex<Vec<Change>>` + `Condvar`) with a brief lock; each flush thread blocks on its condvar until notified, then drains up to `batch_threshold` changes and releases the lock. Flush threads report results (applied LSN or error) back to the main loop via `std::sync::mpsc` channels polled with non-blocking `try_recv`. Snapshot completion follows the same mpsc pattern. A `tokio::sync::Notify` lets the LISTEN/NOTIFY task instantly wake the main loop when `add_table`, `resync`, or `enable` fires.
 
 ---
 
