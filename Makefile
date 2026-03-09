@@ -1,5 +1,8 @@
 PG_CONFIG ?= pg_config
 PG_LIB    := $(shell $(PG_CONFIG) --pkglibdir)
+BUILD_TYPE ?= release
+
+PGRX_PROFILE_FLAG := $(if $(filter release,$(BUILD_TYPE)),--release,--profile $(BUILD_TYPE))
 
 .PHONY: all check-cargo-pgrx build install check-regression clean-regression installcheck format clean
 
@@ -19,7 +22,7 @@ build: check-cargo-pgrx
 	cd duckpipe-pg && \
 	DUCKDB_LIB_DIR="$(PG_LIB)" \
 	DYLD_LIBRARY_PATH="$(PG_LIB):$(DYLD_LIBRARY_PATH)" \
-	cargo pgrx install --pg-config=$(PG_CONFIG)
+	cargo pgrx install $(PGRX_PROFILE_FLAG) --pg-config=$(PG_CONFIG)
 
 install: build
 
