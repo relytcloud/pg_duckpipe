@@ -18,7 +18,7 @@ NOTICE:  Sync group 'default' disabled
 (1 row)
 
 SELECT duckpipe.start_worker();
-NOTICE:  Background worker started for database regression
+NOTICE:  Started 0 background worker(s)
  start_worker 
 --------------
  

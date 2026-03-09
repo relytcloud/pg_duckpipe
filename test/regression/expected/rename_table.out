@@ -5,7 +5,7 @@
 -- The OID-based routing should continue syncing and update metadata with
 -- the new table name.
 SELECT duckpipe.start_worker();
-NOTICE:  Background worker started for database regression
+NOTICE:  Started 1 background worker(s)
  start_worker 
 --------------
  
