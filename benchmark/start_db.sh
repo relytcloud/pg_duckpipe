@@ -28,7 +28,7 @@ cat >> "$DATA_DIR/postgresql.conf" <<EOF
 wal_level = logical
 max_replication_slots = 10
 max_wal_senders = 10
-shared_preload_libraries = 'pg_duckdb,pg_duckpipe'
+shared_preload_libraries = 'pg_duckdb,pg_ducklake,pg_duckpipe'
 port = $PORT
 listen_addresses = 'localhost'
 unix_socket_directories = '/tmp'

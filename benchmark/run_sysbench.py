@@ -216,11 +216,33 @@ def prepare_env(args, db_params):
     print("[-] [Setup] Enabling extensions...")
     # Extensions must be loaded first
     run_sql(db_params, "CREATE EXTENSION IF NOT EXISTS pg_duckdb CASCADE;")
+    run_sql(db_params, "CREATE EXTENSION IF NOT EXISTS pg_ducklake CASCADE;")
     run_sql(db_params, "CREATE EXTENSION IF NOT EXISTS pg_duckpipe CASCADE;")
 
     print("[-] [Sysbench] Preparing environment (creating tables & data)...")
-    # 1. Sysbench Prepare (Creates sbtest1..N and populates them)
-    # We use cleanup first to ensure clean state
+
+    # Clean up ALL stale duckpipe mappings from prior runs — not just tables for
+    # the current scenario.  When the bench_suite transitions from a wider scenario
+    # (e.g. 4 tables) to a narrower one (1 table), orphaned mappings for sbtest2-4
+    # leave flush threads and per_table_lsn entries alive, holding back confirmed_lsn
+    # and causing unbounded lag growth in subsequent scenarios.
+    print("[-] [DuckPipe] Cleaning up stale benchmark mappings...")
+    stale = run_sql(db_params,
+        "SELECT source_table FROM duckpipe.status() "
+        "WHERE source_table LIKE 'public.sbtest%'")
+    if stale:
+        for line in stale.strip().split("\n"):
+            table = line.strip()
+            if table:
+                run_sql(db_params, f"SELECT duckpipe.remove_table('{table}', true);")
+
+    # Sysbench cleanup uses --tables, so it only drops sbtest1..N for the current
+    # scenario.  Prior wider scenarios may have left sbtest(N+1).. behind.  Clean
+    # those up explicitly before running sysbench cleanup + prepare.
+    MAX_BENCH_TABLES = 8  # upper bound on tables used by any bench_suite scenario
+    for i in range(args.tables + 1, MAX_BENCH_TABLES + 1):
+        run_sql(db_params, f"DROP TABLE IF EXISTS public.sbtest{i} CASCADE;")
+
     subprocess.run(get_sysbench_cmd(args, db_params, "cleanup"), capture_output=True, timeout=120)
 
     cmd = get_sysbench_cmd(args, db_params, "prepare")
@@ -241,20 +263,13 @@ def prepare_env(args, db_params):
         print("[!] Sysbench prepare failed.")
         sys.exit(1)
 
-    # Clean up stale mappings/targets from prior runs.
-    # add_table() auto-creates target tables via CREATE TABLE IF NOT EXISTS
-    # ... (LIKE source) USING ducklake, so no manual creation needed.
-    print("[-] [DuckPipe] Cleaning up stale mappings...")
-    for i in range(1, args.tables + 1):
-        table = f"sbtest{i}"
-        run_sql(db_params, f"SELECT duckpipe.remove_table('public.{table}', true);")
-
 def benchmark_snapshot(args, db_params):
     print("\n[=] Starting SNAPSHOT Benchmark...")
     print(f"    Tables: {args.tables}, Rows per table: {args.table_size}")
 
     # Ensure extensions are present (redundant but safe)
     run_sql(db_params, "CREATE EXTENSION IF NOT EXISTS pg_duckdb CASCADE;")
+    run_sql(db_params, "CREATE EXTENSION IF NOT EXISTS pg_ducklake CASCADE;")
     run_sql(db_params, "CREATE EXTENSION IF NOT EXISTS pg_duckpipe CASCADE;")
 
     # Add tables to DuckPipe (auto-creates target tables)

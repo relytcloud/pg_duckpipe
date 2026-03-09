@@ -8,7 +8,7 @@
 //! `drain_and_wait_all()` is retained for shutdown. `drain_and_wait_table()` is
 //! used for TRUNCATE (must flush before DELETE).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
@@ -370,6 +370,67 @@ impl FlushCoordinator {
                 *entry = lsn;
             }
         }
+    }
+
+    /// Remove flush threads, per_table_lsn entries, and target_to_mapping entries
+    /// for tables whose mapping_id is no longer present in PG metadata.
+    ///
+    /// Called each cycle with the set of all mapping IDs still in `table_mappings`
+    /// (any state). Tables removed via `remove_table()` will not be in this set,
+    /// so their stale flush threads are shut down and their frozen per_table_lsn
+    /// entries are removed — preventing confirmed_lsn from being held back.
+    pub fn prune_removed_tables(&mut self, active_mapping_ids: &HashSet<i32>) {
+        // Find target_keys whose mapping_id is no longer in metadata.
+        let stale_keys: Vec<String> = self
+            .target_to_mapping
+            .iter()
+            .filter(|(_, &id)| !active_mapping_ids.contains(&id))
+            .map(|(key, _)| key.clone())
+            .collect();
+
+        for key in &stale_keys {
+            // Shut down the flush thread and reclaim leaked backpressure counters.
+            if let Some(mut entry) = self.threads.remove(key) {
+                // Drain backpressure for any changes still in the shared queue or
+                // local accumulator — push_change() incremented total_queued (and
+                // snapshot_queued if paused) but the thread will never flush them.
+                let shared = {
+                    let guard = entry.queue_handle.inner.lock().unwrap();
+                    guard.changes.len() as i64
+                };
+                let local = entry.pending_local.load(Ordering::Relaxed);
+                let abandoned = shared + local;
+                if abandoned > 0 {
+                    self.backpressure
+                        .total_queued
+                        .fetch_sub(abandoned, Ordering::Relaxed);
+                    if entry.control.paused.load(Ordering::Relaxed) {
+                        self.backpressure
+                            .snapshot_queued
+                            .fetch_sub(abandoned, Ordering::Relaxed);
+                    }
+                }
+
+                entry.control.shutdown.store(true, Ordering::Release);
+                entry.queue_handle.condvar.notify_one();
+                if let Some(h) = entry.join_handle.take() {
+                    let _ = h.join();
+                }
+                tracing::info!(
+                    "pg_duckpipe: pruned stale flush thread for {} (mapping removed)",
+                    key
+                );
+            }
+
+            // Remove target_to_mapping entry.
+            self.target_to_mapping.remove(key);
+        }
+
+        // Final sweep: prune per_table_lsn directly by active IDs.  This catches
+        // stale entries injected by collect_results() from late flush-thread
+        // results that arrived after the thread was pruned above.
+        self.per_table_lsn
+            .retain(|id, _| active_mapping_ids.contains(id));
     }
 
     /// Per-table synchronous drain: signal one flush thread to drain, wait for completion.
