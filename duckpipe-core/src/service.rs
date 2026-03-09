@@ -907,15 +907,15 @@ pub async fn run_group_sync_cycle(
 
     let source_client_ref = remote_source.as_ref().map(|(c, _)| c);
 
-    // Per-group slot params: use remote PG for WAL replication if conninfo set.
-    let per_group_slot_params: Option<SlotConnectParams> = match group.conninfo.as_ref() {
+    // Slot params: use remote PG for WAL replication if conninfo set.
+    let remote_slot_params: Option<SlotConnectParams> = match group.conninfo.as_ref() {
         Some(ci) => Some(
             crate::connstr::to_slot_connect_params(ci)
                 .map_err(|e| format!("parse conninfo for group {}: {}", group.name, e))?,
         ),
         None => None,
     };
-    let effective_slot_params = per_group_slot_params.as_ref().unwrap_or(slot_params);
+    let effective_slot_params = remote_slot_params.as_ref().unwrap_or(slot_params);
 
     // Snapshot connstr: for remote groups, use the remote PG connstr directly.
     let snapshot_connstr = if let Some(ref conninfo) = group.conninfo {
