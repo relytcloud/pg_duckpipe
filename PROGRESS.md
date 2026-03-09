@@ -53,7 +53,8 @@
 ### Performance / Scalability
 - [ ] Snapshot WAL buffering memory — unbounded accumulation in paused flush queues during long snapshots; consider spill-to-disk or snapshot-aware backpressure
 - [ ] Multi-table streaming lag 20x single-table — likely leftover flush threads from prior bench_suite scenarios; standalone runs show normal lag
-- [x] Snapshot detection delay up to `poll_interval` — LISTEN/NOTIFY wakeup: `add_table()`, `resync_table()`, `enable_group()` fire `NOTIFY duckpipe_wakeup`; bgworker LISTENs and wakes immediately
+- [x] Snapshot detection delay up to `poll_interval` — LISTEN/NOTIFY wakeup: `add_table()`, `resync_table()`, `enable_group()` fire `NOTIFY duckpipe_wakeup_{group}`; bgworker LISTENs and wakes immediately
+- [ ] Snapshot producers block WAL consumer — snapshot CSV producers (`run_csv_producer`) do sync file I/O (`fs::File::write_all`) and byte-by-byte quote tracking on the single-threaded tokio runtime, blocking the WAL consumer and all other async tasks during those windows; move producers to `spawn_blocking` or a dedicated thread so snapshots never interfere with WAL streaming
 - [ ] Flush thread pool — 1 OS thread + 1 tokio runtime + 1 DuckDB connection per table; need fixed-size pool for 50+ tables
 - [ ] Batch compaction tuning — reduce Parquet file proliferation under sustained small-batch writes
 - [ ] Inline data flush

@@ -49,6 +49,7 @@ Heap Tables → WAL → Replication Slot (pgoutput) → Decoder → FlushCoordin
 | `doc/REMOTE_SYNC.md` | Remote sync: connection strings, TLS, architecture |
 | `doc/CODE_WALKTHROUGH.md` | Developer-facing: detailed code walkthrough |
 | `doc/DESIGN_V2.md` | Historical: original v2 architecture design |
+| `doc/PARALLELISM.md` | Parallelism model: threads, async tasks, communication, backpressure |
 | `PROGRESS.md` | Implementation progress: done/todo checklist + detailed phase history |
 
 ## Dev Guidelines
@@ -56,3 +57,4 @@ Heap Tables → WAL → Replication Slot (pgoutput) → Decoder → FlushCoordin
 - **TDD**: failing test first → fix → `make installcheck` (all must pass)
 - **Format before commit**: always run `cargo fmt` before committing (CI enforces `cargo fmt --check`)
 - **Docs**: update `CLAUDE.md`, `doc/CODE_WALKTHROUGH.md`, `PROGRESS.md` after major changes
+- **Diagrams**: follow `doc/img/STYLE.md` when creating or updating Excalidraw diagrams; export as PNG to `doc/img/`
