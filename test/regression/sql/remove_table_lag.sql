@@ -1,4 +1,4 @@
--- Test that removing a table does not hold back replication for remaining tables.
+-- Test that removing a table does not hold back confirmed_lsn for remaining tables.
 -- Regression test for: stale per_table_lsn entries from removed tables preventing
 -- confirmed_lsn advancement, causing unbounded lag growth.
 
@@ -21,22 +21,31 @@ SELECT pg_sleep(4);
 SELECT * FROM public.rtl_keep_ducklake ORDER BY id;
 SELECT * FROM public.rtl_drop_ducklake ORDER BY id;
 
+-- Record confirmed_lsn BEFORE removing the table.
+-- Both tables have flushed, so confirmed_lsn reflects min(applied_lsn).
+SELECT confirmed_lsn AS lsn_before
+FROM duckpipe.sync_groups WHERE name = 'default' \gset
+
 -- Remove the second table.  Without the prune fix, its stale per_table_lsn
--- entry would hold back confirmed_lsn for the entire group.
+-- entry would freeze confirmed_lsn at this point forever.
 SELECT duckpipe.remove_table('public.rtl_drop', false);
 
 -- Insert more data into the kept table AFTER removing the other.
+-- These INSERTs generate WAL at higher LSNs than lsn_before.
 INSERT INTO rtl_keep VALUES (2, 'keep_two');
 INSERT INTO rtl_keep VALUES (3, 'keep_three');
 
--- Wait for replication — this should succeed within a normal cycle.
--- Without the fix, confirmed_lsn is frozen and lag grows unbounded.
+-- Wait for replication + flush + confirmed_lsn update.
 SELECT pg_sleep(6);
 
 SELECT * FROM public.rtl_keep_ducklake ORDER BY id;
 
--- Verify the new rows replicated (proves confirmed_lsn was not held back).
-SELECT count(*) = 3 AS all_rows_replicated FROM public.rtl_keep_ducklake;
+-- Core assertion: confirmed_lsn must have advanced past the pre-removal value.
+-- Without the fix, the stale per_table_lsn entry from rtl_drop holds back
+-- get_min_applied_lsn_in_coordinator(), freezing confirmed_lsn and causing
+-- unbounded lag growth.
+SELECT confirmed_lsn > :'lsn_before'::pg_lsn AS confirmed_lsn_advanced
+FROM duckpipe.sync_groups WHERE name = 'default';
 
 -- Cleanup
 SELECT duckpipe.remove_table('public.rtl_keep', false);
