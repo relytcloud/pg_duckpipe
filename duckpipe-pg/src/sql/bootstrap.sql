@@ -39,6 +39,8 @@ CREATE TABLE duckpipe.table_mappings (
     UNIQUE(source_schema, source_table)
 );
 
+CREATE INDEX ON duckpipe.table_mappings (group_id);
+
 -- Worker runtime state (one row per sync group, upserted each sync cycle)
 CREATE TABLE duckpipe.worker_state (
     group_id             INTEGER PRIMARY KEY REFERENCES duckpipe.sync_groups(id) ON DELETE CASCADE,
