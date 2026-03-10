@@ -17,11 +17,9 @@ use std::time::{Duration, Instant};
 
 use crate::duckdb_flush::FlushWorker;
 use crate::flush_worker;
+use crate::metadata::ERRORED_THRESHOLD;
 use crate::queue::TableQueue;
 use crate::types::Change;
-
-/// Maximum consecutive flush failures before transitioning to ERRORED.
-const ERRORED_THRESHOLD: i32 = 3;
 
 /// Cloneable table schema info for constructing TableQueue inside the flush thread.
 #[derive(Clone, Debug)]
