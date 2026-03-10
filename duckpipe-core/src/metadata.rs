@@ -497,6 +497,23 @@ impl<'a> MetadataClient<'a> {
             .collect())
     }
 
+    /// Return all mapping IDs for a group (any state, any enabled flag).
+    /// Used by the coordinator to detect and prune stale flush threads for
+    /// tables that have been removed via `remove_table()`.
+    pub async fn get_all_mapping_ids(
+        &self,
+        group_id: i32,
+    ) -> Result<std::collections::HashSet<i32>, tokio_postgres::Error> {
+        let rows = self
+            .client
+            .query(
+                "SELECT id FROM duckpipe.table_mappings WHERE group_id = $1",
+                &[&group_id],
+            )
+            .await?;
+        Ok(rows.iter().map(|r| r.get::<_, i32>(0)).collect())
+    }
+
     /// Update confirmed_lsn and last_sync_at for a sync group.
     pub async fn update_confirmed_lsn(
         &self,

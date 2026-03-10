@@ -944,7 +944,9 @@ pub async fn run_group_sync_cycle(
         coordinator.seed_table_lsns(&active_lsns);
     }
 
-    // Drain flush results from the previous cycle.
+    // Drain flush results from the previous cycle.  Must happen BEFORE prune
+    // so that late results from about-to-be-pruned threads are collected first
+    // and their stale per_table_lsn entries are removed in the same pass.
     let prev_results = coordinator.collect_results();
     for r in &prev_results {
         if let FlushThreadResult::Error {
@@ -953,6 +955,13 @@ pub async fn run_group_sync_cycle(
         {
             tracing::error!("pg_duckpipe: flush error for {}: {}", target_key, error);
         }
+    }
+
+    // Prune flush threads and per_table_lsn entries for tables removed via
+    // remove_table(). Without this, stale entries hold back confirmed_lsn,
+    // preventing slot advancement and causing unbounded lag growth.
+    if let Ok(all_ids) = meta.get_all_mapping_ids(group.id).await {
+        coordinator.prune_removed_tables(&all_ids);
     }
 
     // Persist the latest flushed position.

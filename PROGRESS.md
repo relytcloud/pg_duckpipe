@@ -41,7 +41,7 @@
 ### Infrastructure
 - [x] PostgreSQL extension (pgrx): SQL API, GUCs, bgworker, bootstrap DDL
 - [x] Standalone daemon (duckpipe-daemon) over TCP
-- [x] 25 regression tests all passing
+- [x] 27 regression tests all passing
 - [x] Dockerfile for self-contained playground env
 
 ### Bug Fixes
@@ -52,7 +52,7 @@
 
 ### Performance / Scalability
 - [ ] Snapshot WAL buffering memory — unbounded accumulation in paused flush queues during long snapshots; consider spill-to-disk or snapshot-aware backpressure
-- [ ] Multi-table streaming lag 20x single-table — likely leftover flush threads from prior bench_suite scenarios; standalone runs show normal lag
+- [x] Multi-table streaming lag 20x single-table — two bugs: (1) benchmark `prepare_env` only cleaned up `sbtest1..args.tables` mappings, leaving orphans from wider prior scenarios; (2) `FlushCoordinator` never pruned stale `per_table_lsn` entries and flush threads for removed tables, freezing `confirmed_lsn`. Fixed via `prune_removed_tables()` in coordinator (called each cycle with `get_all_mapping_ids`) + benchmark cleanup queries all existing mappings
 - [x] Snapshot detection delay up to `poll_interval` — LISTEN/NOTIFY wakeup: `add_table()`, `resync_table()`, `enable_group()` fire `NOTIFY duckpipe_wakeup_{group}`; bgworker LISTENs and wakes immediately
 - [ ] Snapshot producers block WAL consumer — snapshot CSV producers (`run_csv_producer`) do sync file I/O (`fs::File::write_all`) and byte-by-byte quote tracking on the single-threaded tokio runtime, blocking the WAL consumer and all other async tasks during those windows; move producers to `spawn_blocking` or a dedicated thread so snapshots never interfere with WAL streaming
 - [ ] Flush thread pool — 1 OS thread + 1 tokio runtime + 1 DuckDB connection per table; need fixed-size pool for 50+ tables
@@ -68,7 +68,6 @@
 - [ ] Dedicated bgworker per group — one worker per sync group for full isolation (own FlushCoordinator, SnapshotManager, SlotState)
 - [ ] Per-group NOTIFY channels (`duckpipe_wakeup_{group}`) — avoid thundering herd wakeups; depends on per-group bgworker
 - [ ] Per-group GUC overrides — nullable config columns in `sync_groups`; NULL falls back to global GUC
-- [ ] `source_uri` column for pg_mooncake compatibility
 - [x] `conninfo` column in sync_groups for remote PG support — group-level conninfo routes WAL replication, snapshots, and catalog queries to a remote PG while metadata and DuckLake targets stay local. `create_group(conninfo=>...)` creates slot+publication on remote, `add_table()` introspects remote pg_catalog for explicit DDL, `remove_table()`/`drop_group()` clean up remote objects. Shared `connstr` module extracted to `duckpipe-core/src/connstr.rs`.
 - [ ] Schema DDL sync (ALTER TABLE ADD/DROP COLUMN propagation)
 - [ ] Sync tables with no PK (ensure e2e EOS)
@@ -80,9 +79,10 @@
 - [ ] `worker_state` not updated during snapshot processing — stale metrics while snapshots run
 
 ### Bugs
-- [ ] Benchmark suite cleanup incomplete — orphaned mappings for sbtest2-4 remain after multi→single-table scenario transition
+- [x] Benchmark suite cleanup incomplete — orphaned mappings for sbtest2-4 remain after multi→single-table scenario transition; fixed: `prepare_env` now queries `duckpipe.status()` to remove ALL existing mappings + drops leftover sbtest tables beyond current scenario count
 
 ### Robustness
+- [ ] Missing index on `table_mappings.group_id` — FK column has no index; nearly every hot-path query filters by `group_id` (state checks, flush lookups, retry scans); also slows FK constraint checks on `sync_groups` DELETE
 - [ ] Snapshot failures have no retry backoff — risk of thrash on repeated failures
 - [ ] Graceful handling of DuckLake schema drift (target table altered outside duckpipe)
 - [ ] Connection pooling for flush thread PG metadata updates

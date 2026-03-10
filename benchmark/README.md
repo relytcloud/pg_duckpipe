@@ -25,8 +25,8 @@ Run all 4 benchmark scenarios with a single command and get an automated analysi
 # Full suite (30s per scenario, ~5 min total)
 ./benchmark/bench_suite.sh
 
-# Quick smoke test (10s per scenario)
-./benchmark/bench_suite.sh --duration 10
+# Quick smoke test (15s per scenario)
+./benchmark/bench_suite.sh --duration 15
 
 # View the generated report
 cat benchmark/results/report.md
@@ -106,19 +106,12 @@ Control post-run data verification with `--consistency-mode`:
 | `full` | Row-by-row value comparison |
 | `off` | Skip verification |
 
+## Duration
+
+Always use `--duration 30` (the default) or longer for results committed to `benchmark/results/report.md`.
+Shorter durations (e.g. 15s) are fine for smoke tests but produce unstable numbers —
+fewer flush cycles mean higher variance in latency percentiles and throughput measurements.
+
 ## Sample Results
 
-**Environment**: MacBook Pro M1, PostgreSQL 18.1
-
-**Config**: `flush_batch_threshold=10000`, `data_inlining_row_limit=1000`, `poll_interval=10000`
-
-**Workload**: `oltp_insert`, 1 thread, 30 s, 1 table x 100k rows
-
-```
- Snapshot Throughput  : 41929 rows/sec
- OLTP Throughput      : 8827.55 TPS
- Avg Replication Lag  : 2.9 MB
- Peak Replication Lag : 4.2 MB
- Catch-up Time        : 2.2 sec
- Consistency          : PASS
-```
+See `benchmark/results/report.md` for the latest full suite results.
