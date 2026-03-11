@@ -461,6 +461,17 @@ Created once per target table (expensive one-time setup):
 2. `INSTALL ducklake; LOAD ducklake;`
 3. `ATTACH 'ducklake:postgres:{connstr}&schema={ducklake_schema}' AS lake`
 
+> **Note: dual ducklake extension in bgworker mode.** Each FlushWorker opens its own
+> in-memory DuckDB connection via duckdb-rs (linked against `libduckdb.so`). That DuckDB
+> instance does not have ducklake built-in, so it `INSTALL`s the `.duckdb_extension` from
+> the offline cache (`~/.duckdb/extensions/`). In bgworker mode, pg_ducklake is also loaded
+> into the same process with ducklake statically linked — meaning two copies of the ducklake
+> code coexist. This is safe because they operate on separate DuckDB instances with separate
+> state, and DuckDB's extension loader uses `RTLD_LOCAL` symbol scoping. However, version
+> parity between the two copies is important — the `.duckdb_extension` version must match the
+> `libduckdb.so` version shipped by pg_ducklake. In daemon mode this is not a concern since
+> pg_ducklake is not loaded into the daemon process.
+
 Cached `LakeTableInfo` holds the actual schema name inside DuckLake and column types (from `information_schema` with `table_catalog = 'lake'`).
 
 **`flush(queue: TableQueue) -> Result<DuckDbFlushResult>`** — the core algorithm (see [Section 9.1](#91-duckdb-flush) for detailed walkthrough).
