@@ -87,6 +87,9 @@ pg_install_extensions() {
         CREATE EXTENSION IF NOT EXISTS pg_ducklake;
         CREATE EXTENSION IF NOT EXISTS pg_duckpipe;
     "
+    # Switch the default group to daemon mode so add_table() won't auto-start
+    # the PG bgworker (the daemon binary manages replication instead).
+    run_sql "UPDATE duckpipe.sync_groups SET mode = 'daemon' WHERE name = 'default';"
 }
 
 pg_stop_instance() {
@@ -259,11 +262,4 @@ cleanup_table() {
     run_sql "SELECT duckpipe.remove_table('${table}', true);" 2>/dev/null || true
     run_sql "DROP TABLE IF EXISTS ${table} CASCADE;
              DROP TABLE IF EXISTS ${table}_ducklake CASCADE;" 2>/dev/null || true
-}
-
-# stop_bgworker — stop the PG extension bgworker so the daemon can take the replication slot.
-stop_bgworker() {
-    run_sql "SELECT duckpipe.stop_worker();" 2>/dev/null || true
-    # Give it a moment to release the replication slot
-    sleep 1
 }

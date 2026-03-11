@@ -4,6 +4,7 @@ test: auto_start
 # API and monitoring tests (no background worker needed)
 test: api
 test: monitoring
+test: sync_group_mode
 # Streaming CDC tests (require background worker)
 test: streaming
 test: snapshot_updates

@@ -19,7 +19,6 @@ run_sql "CREATE TABLE ${TABLE} (id INT PRIMARY KEY, name TEXT);
          INSERT INTO ${TABLE} VALUES (1, 'one'), (2, 'two'), (3, 'three');"
 
 add_table "$TABLE" true
-stop_bgworker
 daemon_start
 
 # --- Test: snapshot should copy existing 3 rows ---

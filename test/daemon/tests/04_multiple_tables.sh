@@ -22,7 +22,6 @@ run_sql "CREATE TABLE ${TABLE_A} (id INT PRIMARY KEY, val TEXT);
 add_table "$TABLE_A"
 add_table "$TABLE_B"
 add_table "$TABLE_C"
-stop_bgworker
 daemon_start
 
 # --- Phase 1: INSERT into each table ---

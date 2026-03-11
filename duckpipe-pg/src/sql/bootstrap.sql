@@ -9,6 +9,7 @@ CREATE TABLE duckpipe.sync_groups (
     slot_name       TEXT NOT NULL UNIQUE,
     conninfo        TEXT,
     enabled         BOOLEAN DEFAULT true,
+    mode            TEXT NOT NULL DEFAULT 'bgworker' CHECK (mode IN ('bgworker', 'daemon')),
     confirmed_lsn   pg_lsn,
     last_sync_at    TIMESTAMPTZ,
     created_at      TIMESTAMPTZ DEFAULT NOW()

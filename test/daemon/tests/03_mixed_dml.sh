@@ -17,7 +17,6 @@ test_init "$TABLE"
 # --- Setup ---
 run_sql "CREATE TABLE ${TABLE} (id INT PRIMARY KEY, val INT);"
 add_table "$TABLE"
-stop_bgworker
 daemon_start
 
 # --- Phase 1: INSERT 100 rows ---

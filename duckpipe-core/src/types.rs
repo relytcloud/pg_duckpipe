@@ -59,6 +59,37 @@ pub struct RelCacheEntry {
     pub atttypes: Vec<u32>,
 }
 
+/// Sync group mode: bgworker (PG background worker) or daemon (external binary).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupMode {
+    BgWorker,
+    Daemon,
+}
+
+impl GroupMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            GroupMode::BgWorker => "bgworker",
+            GroupMode::Daemon => "daemon",
+        }
+    }
+}
+
+impl std::str::FromStr for GroupMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "bgworker" => Ok(GroupMode::BgWorker),
+            "daemon" => Ok(GroupMode::Daemon),
+            other => Err(format!(
+                "invalid mode '{}': must be 'bgworker' or 'daemon'",
+                other
+            )),
+        }
+    }
+}
+
 /// Sync group metadata
 #[derive(Debug, Clone)]
 pub struct SyncGroup {
@@ -70,6 +101,7 @@ pub struct SyncGroup {
     pub confirmed_lsn: u64,
     /// Remote PG connection string (NULL = local group).
     pub conninfo: Option<String>,
+    pub mode: GroupMode,
 }
 
 /// Table mapping metadata
