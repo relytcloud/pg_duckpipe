@@ -92,7 +92,7 @@ pg_duckpipe/
 │   └── src/
 │       └── main.rs                 # CLI (clap) + tokio::main → calls duckpipe-core
 │
-└── test/regression/                # SQL regression tests (25 tests)
+└── test/regression/                # SQL regression tests
     ├── regression.conf             # PG config: wal_level=logical, etc.
     ├── schedule                    # Test execution order
     ├── sql/                        # Test SQL files

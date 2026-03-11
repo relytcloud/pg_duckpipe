@@ -41,7 +41,7 @@
 ### Infrastructure
 - [x] PostgreSQL extension (pgrx): SQL API, GUCs, bgworker, bootstrap DDL
 - [x] Standalone daemon (duckpipe-daemon) over TCP
-- [x] 27 regression tests all passing
+- [x] Regression tests all passing
 - [x] Dockerfile for self-contained playground env
 
 ### Bug Fixes

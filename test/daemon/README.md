@@ -11,19 +11,18 @@ make check-daemon
 # Run a single test (filename substring match)
 make check-daemon TEST=snapshot
 
-# Run both regression (27) and daemon (5) tests
+# Run both regression and daemon tests
 make installcheck-all
 ```
 
 ## How It Works
 
-The test runner (`run_tests.sh`) spins up a **fresh PostgreSQL instance** on port 5566 (isolated from regression tests on 5555), installs extensions, then iterates over `tests/*.sh` scripts. Each test:
+The test runner (`run_tests.sh`) spins up a **fresh PostgreSQL instance** on port 5566 (isolated from regression tests on 5555), installs extensions, and sets the default sync group to `mode = 'daemon'` so that `add_table()` skips bgworker auto-start. It then iterates over `tests/*.sh` scripts. Each test:
 
 1. Creates source table(s) and registers them via `duckpipe.add_table()`
-2. Stops the bgworker (releases the replication slot)
-3. Starts the daemon binary against the test PG instance
-4. Performs DML and polls `*_ducklake` target tables for expected results
-5. Cleans up via `trap EXIT` (daemon stop + table drop)
+2. Starts the daemon binary against the test PG instance
+3. Performs DML and polls `*_ducklake` target tables for expected results
+4. Cleans up via `trap EXIT` (daemon stop + table drop)
 
 The daemon runs with fast intervals (`--poll-interval 200 --flush-interval 200 --flush-batch-threshold 100`) so tests complete in seconds.
 
@@ -52,7 +51,6 @@ test_init "$TABLE"                    # sets up trap-based cleanup
 run_sql "CREATE TABLE ${TABLE} (id INT PRIMARY KEY, val TEXT);"
 add_table "$TABLE"                    # registers for CDC (copy_data=false)
 # add_table "$TABLE" true             # use this for snapshot mode
-stop_bgworker                         # release replication slot
 daemon_start                          # start daemon in background
 
 run_sql "INSERT INTO ${TABLE} VALUES (1, 'hello');"
@@ -68,7 +66,6 @@ echo "  my test: OK"
 |----------|-------------|
 | `test_init TABLE...` | Set up trap-based cleanup for given tables |
 | `add_table TABLE [COPY_DATA]` | Register table for CDC sync (default: `copy_data=false`) |
-| `stop_bgworker` | Stop PG extension bgworker to release replication slot |
 | `daemon_start [EXTRA_ARGS...]` | Start daemon in background with fast intervals |
 | `daemon_stop` | SIGTERM + wait + SIGKILL if needed |
 | `run_sql "SQL"` | Execute SQL via psql, returns unaligned output |

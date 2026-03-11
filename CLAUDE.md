@@ -7,7 +7,7 @@ pg_duckpipe: PostgreSQL CDC extension — syncs heap tables to pg_ducklake colum
 ## Build & Test
 
 ```bash
-make installcheck               # Build + install + run all 25 regression tests
+make installcheck               # Build + install + run all regression tests
 make check-regression TEST=api  # Run a single test
 ```
 
@@ -19,7 +19,7 @@ Tests use a temporary PG instance on port 5555 (wal_level=logical). See `test/re
 duckpipe-core/     # Shared engine: decoder, DuckDB flush, streaming replication, metadata, connstr
 duckpipe-pg/       # PG extension (pgrx): GUCs, SQL API, bgworker, remote group DDL
 duckpipe-daemon/   # Standalone daemon (TCP, clap CLI)
-test/regression/   # SQL regression tests (25 tests)
+test/regression/   # SQL regression tests
 ```
 
 ## Architecture
