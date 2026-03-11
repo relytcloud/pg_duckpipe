@@ -65,6 +65,7 @@
 - [ ] Mixed DML replication lag 50-100x append — WAL amplification from REPLICA IDENTITY FULL + Parquet-scan DELETE phase
 
 ### Features
+- [ ] Daemon REST API — expose monitoring/control endpoints (status, health, metrics) from the standalone daemon binary so operators can integrate with orchestration and alerting without a PG connection
 - [ ] Dedicated bgworker per group — one worker per sync group for full isolation (own FlushCoordinator, SnapshotManager, SlotState)
 - [ ] Per-group NOTIFY channels (`duckpipe_wakeup_{group}`) — avoid thundering herd wakeups; depends on per-group bgworker
 - [ ] Per-group GUC overrides — nullable config columns in `sync_groups`; NULL falls back to global GUC
