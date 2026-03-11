@@ -29,6 +29,8 @@ test: concurrent_tables
 test: multi_group
 # Error detection and recovery via resync
 test: error_recovery
+# Snapshot error recovery with exponential backoff and auto-retry
+test: snapshot_error_recovery
 # Shutdown recovery: rows dropped from in-memory accumulator are re-delivered on restart
 test: shutdown_recovery
 # Table rename with OID-based routing
