@@ -303,18 +303,33 @@ CREATE FUNCTION duckpipe.create_group(
     name TEXT,
     publication TEXT DEFAULT NULL,
     slot_name TEXT DEFAULT NULL,
-    conninfo TEXT DEFAULT NULL
+    conninfo TEXT DEFAULT NULL,
+    mode TEXT DEFAULT NULL
 ) RETURNS TEXT
 AS 'MODULE_PATHNAME', '@FUNCTION_NAME@'
 LANGUAGE C;
-REVOKE ALL ON FUNCTION duckpipe.create_group(TEXT, TEXT, TEXT, TEXT) FROM PUBLIC;
+REVOKE ALL ON FUNCTION duckpipe.create_group(TEXT, TEXT, TEXT, TEXT, TEXT) FROM PUBLIC;
 ")]
 fn create_group(
     name: &str,
     publication: Option<&str>,
     slot_name: Option<&str>,
     conninfo: Option<&str>,
+    mode: Option<&str>,
 ) -> String {
+    // Validate and default mode
+    let mode_val = mode.unwrap_or("bgworker");
+    if mode_val.parse::<duckpipe_core::types::GroupMode>().is_err() {
+        ereport!(
+            ERROR,
+            PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+            format!(
+                "invalid mode '{}': must be 'bgworker' or 'daemon'",
+                mode_val
+            )
+        );
+    }
+
     let pub_name = publication
         .map(|s| s.to_string())
         .unwrap_or_else(|| format!("duckpipe_pub_{}", name));
@@ -395,12 +410,13 @@ fn create_group(
                     DatumWithOid::new(pub_name.clone(), PgBuiltInOids::TEXTOID.value()),
                     DatumWithOid::new(slot.as_str(), PgBuiltInOids::TEXTOID.value()),
                     DatumWithOid::new(conninfo.unwrap(), PgBuiltInOids::TEXTOID.value()),
+                    DatumWithOid::new(mode_val, PgBuiltInOids::TEXTOID.value()),
                 ]
             };
             client
                 .update(
-                    "INSERT INTO duckpipe.sync_groups (name, publication, slot_name, conninfo) \
-                     VALUES ($1, $2, $3, $4)",
+                    "INSERT INTO duckpipe.sync_groups (name, publication, slot_name, conninfo, mode) \
+                     VALUES ($1, $2, $3, $4, $5)",
                     None,
                     &args,
                 )
@@ -411,12 +427,13 @@ fn create_group(
                     DatumWithOid::new(name, PgBuiltInOids::TEXTOID.value()),
                     DatumWithOid::new(pub_name.clone(), PgBuiltInOids::TEXTOID.value()),
                     DatumWithOid::new(slot.as_str(), PgBuiltInOids::TEXTOID.value()),
+                    DatumWithOid::new(mode_val, PgBuiltInOids::TEXTOID.value()),
                 ]
             };
             client
                 .update(
-                    "INSERT INTO duckpipe.sync_groups (name, publication, slot_name) \
-                     VALUES ($1, $2, $3)",
+                    "INSERT INTO duckpipe.sync_groups (name, publication, slot_name, mode) \
+                     VALUES ($1, $2, $3, $4)",
                     None,
                     &args,
                 )
@@ -634,30 +651,38 @@ fn add_table(
         (schema.clone(), format!("{}_ducklake", table))
     };
 
-    // 1. Look up conninfo + publication + slot from sync_groups (always local SPI).
-    let (group_conninfo, publication, slot_name_val): (Option<String>, String, String) =
-        Spi::connect(|client| {
-            let args = unsafe { [DatumWithOid::new(group, PgBuiltInOids::TEXTOID.value())] };
-            let result = client
-                .select(
-                    "SELECT conninfo, publication, slot_name FROM duckpipe.sync_groups WHERE name = $1",
-                    Some(1),
-                    &args,
-                )
-                .unwrap();
-            for r in result {
-                return (
-                    r.get::<String>(1).unwrap(),
-                    r.get::<String>(2).unwrap().unwrap(),
-                    r.get::<String>(3).unwrap().unwrap(),
-                );
-            }
-            ereport!(
-                ERROR,
-                PgSqlErrorCode::ERRCODE_UNDEFINED_OBJECT,
-                format!("Sync group '{}' not found", group)
+    // 1. Look up conninfo + publication + slot + mode from sync_groups (always local SPI).
+    let (group_conninfo, publication, slot_name_val, group_mode): (
+        Option<String>,
+        String,
+        String,
+        duckpipe_core::types::GroupMode,
+    ) = Spi::connect(|client| {
+        let args = unsafe { [DatumWithOid::new(group, PgBuiltInOids::TEXTOID.value())] };
+        let result = client
+            .select(
+                "SELECT conninfo, publication, slot_name, mode FROM duckpipe.sync_groups WHERE name = $1",
+                Some(1),
+                &args,
+            )
+            .unwrap();
+        for r in result {
+            let mode_str: String = r.get::<String>(4).unwrap().unwrap();
+            return (
+                r.get::<String>(1).unwrap(),
+                r.get::<String>(2).unwrap().unwrap(),
+                r.get::<String>(3).unwrap().unwrap(),
+                mode_str
+                    .parse()
+                    .unwrap_or(duckpipe_core::types::GroupMode::BgWorker),
             );
-        });
+        }
+        ereport!(
+            ERROR,
+            PgSqlErrorCode::ERRCODE_UNDEFINED_OBJECT,
+            format!("Sync group '{}' not found", group)
+        );
+    });
 
     // 2. Build PgConn: Local or Remote
     let source = match group_conninfo {
@@ -947,16 +972,19 @@ fn add_table(
     }
 
     // Auto-start background worker for this group or wake existing one
-    if !is_group_worker_running(group) {
-        launch_worker(group);
-    } else {
-        // Worker is already running — send per-group NOTIFY so it picks up
-        // the new table immediately instead of waiting for poll_interval.
-        let channel = listen::wakeup_channel(group);
-        let notify_sql = format!("NOTIFY {}", channel);
-        Spi::connect_mut(|client| {
-            let _ = client.update(&notify_sql, None, &[]);
-        });
+    // (only for bgworker-mode groups — daemon groups are managed externally)
+    if group_mode == duckpipe_core::types::GroupMode::BgWorker {
+        if !is_group_worker_running(group) {
+            launch_worker(group);
+        } else {
+            // Worker is already running — send per-group NOTIFY so it picks up
+            // the new table immediately instead of waiting for poll_interval.
+            let channel = listen::wakeup_channel(group);
+            let notify_sql = format!("NOTIFY {}", channel);
+            Spi::connect_mut(|client| {
+                let _ = client.update(&notify_sql, None, &[]);
+            });
+        }
     }
 }
 
@@ -1253,6 +1281,7 @@ CREATE FUNCTION duckpipe.groups() RETURNS TABLE(
     publication TEXT,
     slot_name TEXT,
     enabled BOOLEAN,
+    mode TEXT,
     table_count INTEGER,
     last_sync TIMESTAMPTZ,
     conninfo TEXT
@@ -1267,6 +1296,7 @@ fn groups() -> TableIterator<
         name!(publication, String),
         name!(slot_name, String),
         name!(enabled, bool),
+        name!(mode, String),
         name!(table_count, i32),
         name!(last_sync, Option<TimestampWithTimeZone>),
         name!(conninfo, Option<String>),
@@ -1276,7 +1306,7 @@ fn groups() -> TableIterator<
 
     Spi::connect(|client| {
         let result = client.select(
-            "SELECT g.name, g.publication, g.slot_name, g.enabled, \
+            "SELECT g.name, g.publication, g.slot_name, g.enabled, g.mode, \
              (SELECT count(*) FROM duckpipe.table_mappings m WHERE m.group_id = g.id)::int4 as table_count, \
              g.last_sync_at, g.conninfo \
              FROM duckpipe.sync_groups g ORDER BY g.name",
@@ -1290,10 +1320,11 @@ fn groups() -> TableIterator<
                 let publication: String = row.get(2).unwrap().unwrap();
                 let slot_name: String = row.get(3).unwrap().unwrap();
                 let enabled: bool = row.get(4).unwrap().unwrap();
-                let table_count: i32 = row.get(5).unwrap().unwrap();
-                let last_sync: Option<TimestampWithTimeZone> = row.get(6).unwrap();
+                let mode: String = row.get(5).unwrap().unwrap();
+                let table_count: i32 = row.get(6).unwrap().unwrap();
+                let last_sync: Option<TimestampWithTimeZone> = row.get(7).unwrap();
                 let conninfo: Option<String> = row
-                    .get::<String>(7)
+                    .get::<String>(8)
                     .unwrap()
                     .map(|ci| redact_conninfo_password(&ci));
 
@@ -1302,6 +1333,7 @@ fn groups() -> TableIterator<
                     publication,
                     slot_name,
                     enabled,
+                    mode,
                     table_count,
                     last_sync,
                     conninfo,
@@ -1530,6 +1562,43 @@ REVOKE ALL ON FUNCTION duckpipe.start_worker(TEXT) FROM PUBLIC;
 fn start_worker(group_name: Option<&str>) {
     match group_name {
         Some(name) => {
+            // Check group mode — daemon groups should not use bgworker
+            let group_mode: Option<duckpipe_core::types::GroupMode> = Spi::connect(|client| {
+                let args = unsafe { [DatumWithOid::new(name, PgBuiltInOids::TEXTOID.value())] };
+                let result = client
+                    .select(
+                        "SELECT mode FROM duckpipe.sync_groups WHERE name = $1",
+                        Some(1),
+                        &args,
+                    )
+                    .unwrap();
+                for r in result {
+                    let mode_str: String = r.get::<String>(1).unwrap()?;
+                    return Some(
+                        mode_str
+                            .parse()
+                            .unwrap_or(duckpipe_core::types::GroupMode::BgWorker),
+                    );
+                }
+                None
+            });
+
+            if group_mode.is_none() {
+                ereport!(
+                    ERROR,
+                    PgSqlErrorCode::ERRCODE_UNDEFINED_OBJECT,
+                    format!("Sync group '{}' not found", name)
+                );
+            }
+
+            if group_mode == Some(duckpipe_core::types::GroupMode::Daemon) {
+                warning!(
+                    "Group '{}' has mode 'daemon' — use the duckpipe daemon binary instead of start_worker()",
+                    name
+                );
+                return;
+            }
+
             // Start a specific group's worker
             if is_group_worker_running(name) {
                 notice!("Background worker already running for group '{}'", name);
@@ -1545,12 +1614,12 @@ fn start_worker(group_name: Option<&str>) {
             notice!("Background worker started for group '{}'", name);
         }
         None => {
-            // Start workers for all enabled groups
+            // Start workers for all enabled bgworker-mode groups
             let groups: Vec<String> = Spi::connect(|client| {
                 let mut names = Vec::new();
                 let result = client.select(
                     "SELECT g.name FROM duckpipe.sync_groups g \
-                     WHERE g.enabled = true \
+                     WHERE g.enabled = true AND g.mode = 'bgworker' \
                      ORDER BY g.name",
                     None,
                     &[],

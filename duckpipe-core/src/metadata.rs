@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use tokio_postgres::Client;
 
-use crate::types::{format_lsn, parse_lsn, SyncGroup, TableMapping};
+use crate::types::{format_lsn, parse_lsn, GroupMode, SyncGroup, TableMapping};
 
 /// Async metadata client wrapping a tokio-postgres connection.
 pub struct MetadataClient<'a> {
@@ -29,7 +29,7 @@ impl<'a> MetadataClient<'a> {
         let rows = self
             .client
             .query(
-                "SELECT id, name, publication, slot_name, confirmed_lsn::text, enabled, conninfo \
+                "SELECT id, name, publication, slot_name, confirmed_lsn::text, enabled, conninfo, mode \
                  FROM duckpipe.sync_groups WHERE name = $1",
                 &[&name],
             )
@@ -48,6 +48,8 @@ impl<'a> MetadataClient<'a> {
         let confirmed_lsn = confirmed_lsn_str.map(|s| parse_lsn(&s)).unwrap_or(0);
         let enabled: bool = row.get(5);
         let conninfo: Option<String> = row.get(6);
+        let mode_str: String = row.get(7);
+        let mode: GroupMode = mode_str.parse().unwrap_or(GroupMode::BgWorker);
 
         if !enabled {
             return Ok(None);
@@ -61,6 +63,7 @@ impl<'a> MetadataClient<'a> {
             pending_lsn: 0,
             confirmed_lsn,
             conninfo,
+            mode,
         }))
     }
 
@@ -69,7 +72,7 @@ impl<'a> MetadataClient<'a> {
         let rows = self
             .client
             .query(
-                "SELECT id, name, publication, slot_name, confirmed_lsn::text, conninfo \
+                "SELECT id, name, publication, slot_name, confirmed_lsn::text, conninfo, mode \
                  FROM duckpipe.sync_groups WHERE enabled = true",
                 &[],
             )
@@ -85,6 +88,8 @@ impl<'a> MetadataClient<'a> {
                 let confirmed_lsn_str: Option<String> = row.get(4);
                 let confirmed_lsn = confirmed_lsn_str.map(|s| parse_lsn(&s)).unwrap_or(0);
                 let conninfo: Option<String> = row.get(5);
+                let mode_str: String = row.get(6);
+                let mode: GroupMode = mode_str.parse().unwrap_or(GroupMode::BgWorker);
                 SyncGroup {
                     id,
                     name,
@@ -93,6 +98,7 @@ impl<'a> MetadataClient<'a> {
                     pending_lsn: 0,
                     confirmed_lsn,
                     conninfo,
+                    mode,
                 }
             })
             .collect())
