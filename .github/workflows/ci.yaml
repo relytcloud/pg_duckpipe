@@ -103,3 +103,91 @@ jobs:
           tail -200 /tmp/regression-output-${{ matrix.pg_version }}/pg_log/postgresql.log || echo "(not found)"
           echo ""
           exit 1
+
+  test-daemon:
+    name: "Daemon E2E tests (PG${{ matrix.pg_version }})"
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        pg_version: [18]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build pg_duckpipe builder image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: builder
+          build-args: PG_VERSION=${{ matrix.pg_version }}
+          load: true
+          tags: pg_duckpipe:builder-${{ matrix.pg_version }}
+          cache-from: type=gha,scope=ci-builder-pg${{ matrix.pg_version }}
+          cache-to: type=gha,mode=max,scope=ci-builder-pg${{ matrix.pg_version }}
+
+      - name: Run daemon E2E tests
+        id: run-daemon-tests
+        run: |
+          docker run --rm \
+            -v ${{ github.workspace }}/test:/build/test \
+            -v /tmp/daemon-output-${{ matrix.pg_version }}:/results \
+            pg_duckpipe:builder-${{ matrix.pg_version }} bash -c '
+              set -euo pipefail
+
+              PG_VERSION=${{ matrix.pg_version }}
+              PG_CONFIG=/usr/lib/postgresql/${PG_VERSION}/bin/pg_config
+              PG_LIB=$(${PG_CONFIG} --pkglibdir)
+
+              # Pre-fetch the ducklake DuckDB extension
+              /build/docker/fetch-ducklake-ext.sh
+
+              # Build daemon binary
+              cd /build
+              DUCKDB_LIB_DIR="${PG_LIB}" \
+                LD_LIBRARY_PATH="${PG_LIB}" \
+                cargo build --release -p duckpipe-daemon
+
+              chown -R postgres:postgres /var/lib/postgresql/.duckdb /build
+
+              # Run daemon tests as postgres user
+              su postgres -s /bin/bash -c "
+                export LD_LIBRARY_PATH=${PG_LIB}
+                export PG_CONFIG=${PG_CONFIG}
+                export DUCKPIPE_BIN=/build/target/release/duckpipe
+                cd /build/test/daemon
+                bash run_tests.sh
+              " || {
+                mkdir -p /results
+                cp -r /build/test/daemon/log/ /results/log/ 2>/dev/null || true
+                cp -r /tmp/pg_duckpipe_daemon_test_log/ /results/pg_log/ 2>/dev/null || true
+                chmod -R a+rX /results/ 2>/dev/null || true
+                exit 1
+              }
+            '
+
+      - name: Upload daemon test artifacts
+        if: failure() && steps.run-daemon-tests.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: daemon-output-pg${{ matrix.pg_version }}
+          path: /tmp/daemon-output-${{ matrix.pg_version }}/
+
+      - name: Print daemon logs on failure
+        if: failure() && steps.run-daemon-tests.outcome == 'failure'
+        run: |
+          echo "=== Daemon test logs ==="
+          for f in /tmp/daemon-output-${{ matrix.pg_version }}/log/*; do
+            [ -f "$f" ] || continue
+            echo "=== $(basename "$f") (last 100 lines) ==="
+            tail -100 "$f"
+            echo ""
+          done
+          echo "=== postgresql.log (last 200 lines) ==="
+          tail -200 /tmp/daemon-output-${{ matrix.pg_version }}/pg_log/postgresql.log || echo "(not found)"
+          echo ""
+          exit 1

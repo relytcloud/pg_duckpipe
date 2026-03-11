@@ -4,7 +4,8 @@ BUILD_TYPE ?= release
 
 PGRX_PROFILE_FLAG := $(if $(filter release,$(BUILD_TYPE)),--release,--profile $(BUILD_TYPE))
 
-.PHONY: all check-cargo-pgrx build install check-regression clean-regression installcheck format clean
+.PHONY: all check-cargo-pgrx build install check-regression clean-regression installcheck \
+       build-daemon check-daemon clean-daemon installcheck-all format clean
 
 all: build
 
@@ -34,6 +35,20 @@ clean-regression:
 
 installcheck: install
 	$(MAKE) check-regression
+
+build-daemon:
+	DUCKDB_LIB_DIR="$(PG_LIB)" \
+	DYLD_LIBRARY_PATH="$(PG_LIB):$(DYLD_LIBRARY_PATH)" \
+	LD_LIBRARY_PATH="$(PG_LIB):$(LD_LIBRARY_PATH)" \
+	cargo build --release -p duckpipe-daemon
+
+check-daemon:
+	$(MAKE) -C test/daemon check-daemon PG_CONFIG=$(PG_CONFIG)
+
+clean-daemon:
+	$(MAKE) -C test/daemon clean-daemon
+
+installcheck-all: installcheck check-daemon
 
 format:
 	cd duckpipe-pg && cargo fmt

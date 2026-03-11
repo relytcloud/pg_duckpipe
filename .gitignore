@@ -23,6 +23,11 @@ tmp_check_iso/
 log/
 output_iso/
 
+# Daemon test output
+test/daemon/tmp_check/
+test/daemon/log/
+test/daemon/results/
+
 # Editor and IDE files
 *.swp
 *.swo
