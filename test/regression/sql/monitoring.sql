@@ -14,10 +14,11 @@ SELECT source_table, target_table, sync_group, enabled FROM duckpipe.tables();
 -- Test duckpipe.status() returns state info including new observability columns
 SELECT sync_group, source_table, target_table, state, enabled,
        queued_changes, consecutive_failures, retry_at, applied_lsn,
-       snapshot_duration_ms, snapshot_rows, duckdb_memory_bytes
+       snapshot_duration_ms, snapshot_rows, duckdb_memory_bytes,
+       flush_count, flush_duration_ms
 FROM duckpipe.status();
 
--- Test duckpipe.worker_status() returns runtime state (per group)
+-- Test duckpipe.worker_status() returns runtime state (per group, from SHM)
 SELECT sync_group, total_queued_changes, is_backpressured FROM duckpipe.worker_status();
 
 -- Cleanup

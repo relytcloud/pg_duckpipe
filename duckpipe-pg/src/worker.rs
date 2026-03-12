@@ -1,5 +1,7 @@
+use pgrx::datum::DatumWithOid;
 use pgrx::pg_sys::panic::CaughtError;
 use pgrx::prelude::*;
+use std::collections::HashMap;
 use std::ffi::CString;
 use std::sync::Arc;
 
@@ -76,7 +78,7 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
         );
     }
 
-    // Get database name and connection info (need a transaction context for catalog access)
+    // Get database name, connection info, and group_id (need a transaction context for catalog access)
     let (db, port, socket_dir) = unsafe {
         pg_sys::StartTransactionCommand();
         let name = pg_sys::get_database_name(dboid);
@@ -155,6 +157,32 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
         "host=127.0.0.1 port={} dbname={} user={}",
         port, db, os_user
     );
+
+    // Query group_id for SHM metrics (need transaction context with snapshot for SPI)
+    let group_id: i32 = unsafe {
+        pg_sys::StartTransactionCommand();
+        pg_sys::PushActiveSnapshot(pg_sys::GetTransactionSnapshot());
+        let gid = Spi::connect(|client| {
+            let args = [DatumWithOid::new(
+                group_name.as_str(),
+                PgBuiltInOids::TEXTOID.value(),
+            )];
+            let result = client
+                .select(
+                    "SELECT id FROM duckpipe.sync_groups WHERE name = $1",
+                    Some(1),
+                    &args,
+                )
+                .unwrap();
+            for r in result {
+                return r.get::<i32>(1).unwrap().unwrap_or(0);
+            }
+            0
+        });
+        pg_sys::PopActiveSnapshot();
+        pg_sys::CommitTransactionCommand();
+        gid
+    };
 
     // Create persistent flush coordinator (survives across cycles, cleared on panic)
     let config = read_config(&connstr, &duckdb_pg_connstr);
@@ -261,6 +289,23 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
                     .await
                     {
                         Ok(any_work) => {
+                            // Write metrics to shared memory after each sync cycle
+                            crate::update_shmem_group_metrics(
+                                group_id,
+                                coord.total_queued(),
+                                coord.is_backpressured(),
+                            );
+                            let pending_counts = coord.table_pending_counts();
+                            let memory_map: HashMap<i32, i64> =
+                                coord.table_memory_bytes().into_iter().collect();
+                            let flush_map: HashMap<i32, (i64, i64)> =
+                                coord.table_flush_metrics().into_iter().map(|(id, c, d)| (id, (c, d))).collect();
+                            for (mapping_id, queued) in &pending_counts {
+                                let mem = memory_map.get(mapping_id).copied().unwrap_or(0);
+                                let (fc, fd) = flush_map.get(mapping_id).copied().unwrap_or((0, 0));
+                                crate::update_shmem_table_metrics(*mapping_id, *queued, mem, fc, fd);
+                            }
+
                             if should_shutdown() {
                                 break;
                             }

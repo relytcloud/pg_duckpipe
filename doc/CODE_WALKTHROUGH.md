@@ -81,8 +81,8 @@ pg_duckpipe/
 │   ├── Cargo.toml
 │   ├── build.rs                    # Links libpq
 │   └── src/
-│       ├── lib.rs                  # _PG_init, GUC registration
-│       ├── api.rs                  # SQL functions: add_table, create_group, etc.
+│       ├── lib.rs                  # _PG_init, GUC registration, SharedMetrics SHM
+│       ├── api.rs                  # SQL functions: add_table, create_group, metrics(), etc.
 │       ├── worker.rs               # BGWorker entry point → calls duckpipe-core
 │       ├── bin/pgrx_embed.rs       # pgrx build stub
 │       └── sql/bootstrap.sql       # CREATE TABLE duckpipe.sync_groups, etc.
@@ -526,10 +526,10 @@ Each flush thread creates its own `tokio::runtime::Runtime` for async PG metadat
 5. Self-trigger check: accumulated >= `batch_threshold` OR elapsed >= `flush_interval`
 6. If should flush:
    a. Build `TableQueue` from accumulated changes
-   b. `FlushWorker.flush(table_queue)`
+   b. `FlushWorker.flush(table_queue)` → returns `DuckDbFlushResult` with `applied_count`, `last_lsn`, `flush_duration_ms`
    c. `rt.block_on(update_metrics_via_pg(...))` — write applied_lsn to PG
    d. `rt.block_on(clear_error_on_success(...))` — clear error state
-   e. Send `FlushThreadResult` via mpsc
+   e. Send `FlushThreadResult::Success { mapping_id, applied_count, last_lsn, flush_duration_ms }` via mpsc
    f. On error: `rt.block_on(update_error_state(...))` — record error, ERRORED transition
    g. Reset timer
 7. If drain_requested → signal drain_complete (for TRUNCATE compatibility)
@@ -635,7 +635,8 @@ After the message loop:
 **Decoupled flush** — WAL consumer and flush threads are fully independent:
 - Each table's flush thread runs in its own OS thread with its own `FlushWorker` (owns `duckdb::Connection`) and its own tokio runtime (for PG metadata updates)
 - Flush threads self-trigger based on queue size (`flush_batch_threshold`) or time (`flush_interval`)
-- On success: flush threads update metrics and applied_lsn in PG directly
+- On success: flush threads update `rows_synced` and `applied_lsn` in PG directly; send `FlushThreadResult::Success` with `flush_duration_ms` back to main thread via mpsc
+- The main thread (`collect_results()`) tracks `per_table_flush_count` and `per_table_flush_duration` in-memory; the bgworker writes these to PG shared memory (SHM) after each sync cycle
 - On failure: `FlushWorker` is dropped (lazily recreated), flush thread records error in PG, transitions to ERRORED after 3 consecutive failures
 - Per-table error isolation: one table failing doesn't block others
 - Backpressure: WAL consumer pauses when total queued changes exceed `max_queued_changes`
@@ -648,15 +649,19 @@ After the message loop:
 
 ### 6.1 `lib.rs`
 
-Extension entry point. `_PG_init` registers GUC parameters and the background worker.
+Extension entry point. `_PG_init` registers GUC parameters, the background worker, and shared memory.
 
 GUCs registered: `poll_interval`, `batch_size_per_group`, `enabled`, `debug_log`, `data_inlining_row_limit`, `flush_interval`, `flush_batch_threshold`, `max_queued_changes`. See [USAGE.md](./USAGE.md#configuration-gucs) for full parameter reference.
+
+**Shared memory (SHM)**: `_PG_init` also registers `METRICS_SHM` — a `PgLwLock<SharedMetrics>` struct in PG shared memory containing per-table slots (`queued_changes`, `duckdb_memory_bytes`, `flush_count`, `flush_duration_ms`) and per-group slots (`total_queued_changes`, `is_backpressured`). Fixed-size: 128 table slots + 8 group slots (~5KB). The bgworker writes to SHM after each sync cycle; SQL functions (`status()`, `worker_status()`, `metrics()`) read from SHM, avoiding PG round-trips for transient observability data.
 
 ### 6.2 `api.rs`
 
 SQL-callable functions. All are REVOKE'd from PUBLIC by default. See [USAGE.md](./USAGE.md#sql-api) for full API reference with parameters and examples.
 
-Functions implemented: `create_group`, `drop_group`, `enable_group`, `disable_group`, `add_table`, `remove_table`, `move_table`, `resync_table`, `start_worker`, `stop_worker`, and monitoring SRFs (`groups()`, `tables()`, `status()`, `worker_status()`).
+Functions implemented: `create_group`, `drop_group`, `enable_group`, `disable_group`, `add_table`, `remove_table`, `move_table`, `resync_table`, `start_worker`, `stop_worker`, monitoring SRFs (`groups()`, `tables()`, `status()`, `worker_status()`), and `metrics()` (JSON snapshot).
+
+**SHM-backed monitoring**: `status()` and `worker_status()` read transient metrics (`queued_changes`, `duckdb_memory_bytes`, `flush_count`, `flush_duration_ms`, `total_queued_changes`, `is_backpressured`) from PG shared memory instead of PG tables. `metrics()` merges SHM data with persisted PG data (state, rows_synced, applied_lsn, etc.) into a single JSON document.
 
 **`add_table` implementation** — the most complex function:
 1. Parse source table name (default schema: `public`)
@@ -692,6 +697,8 @@ Thin shell around `duckpipe-core`. The BGWorker entry point (`duckpipe_worker_ma
 
 The `catch_unwind` wrapper catches both Rust panics and PostgreSQL errors (`CaughtError`). On panic, `coordinator.clear()` shuts down all flush threads and recreates the mpsc channel to destroy any inconsistent state.
 
+After each successful sync cycle, the bgworker writes transient metrics to PG shared memory (SHM): per-group `total_queued_changes` and `is_backpressured`, and per-table `queued_changes`, `duckdb_memory_bytes`, `flush_count`, and `flush_duration_ms`. This eliminates 3 PG round-trips per cycle that were previously used for observability-only updates.
+
 ### 6.4 `bootstrap.sql`
 
 Executed on `CREATE EXTENSION pg_duckpipe`. Creates:
@@ -703,11 +710,13 @@ Executed on `CREATE EXTENSION pg_duckpipe`. Creates:
 
 ## 7. duckpipe-daemon: The Standalone Daemon
 
-A 175-line `main.rs` that reuses `duckpipe-core` over TCP.
+Standalone daemon that reuses `duckpipe-core` over TCP with a REST API for control.
 
 **CLI** (via `clap`):
 ```
 duckpipe --connstr "host=localhost port=5432 dbname=mydb user=replicator password=secret"
+         [--group <name>]            # Pre-bind to a sync group at startup
+         [--api-port 8080]           # REST API port (0 to disable)
          [--poll-interval 1000]
          [--batch-size-per-group 100000]
          [--ducklake-schema ducklake]
@@ -720,26 +729,28 @@ duckpipe --connstr "host=localhost port=5432 dbname=mydb user=replicator passwor
 **Unique to the daemon:**
 - Uses `duckpipe_core::connstr::{parse_connstr, build_tokio_pg_connstr, to_slot_connect_params}` — shared connection string parsing module
 - Uses `tracing-subscriber` with env-filter for structured logging
+- REST API via `axum` for group binding/unbinding (`POST /groups`, `DELETE /groups`)
+- Advisory lock prevents two daemons from running for the same group
 - Graceful shutdown via `signal::ctrl_c()`
 - Self-healing: on error, calls `coordinator.clear()` and retries next cycle
-- Uses `#[tokio::main(flavor = "current_thread")]` — `FlushCoordinator` contains `mpsc::Receiver` (!Sync), and all async work is sequential (flush parallelism comes from OS threads)
+- Supports late binding: daemon can start unbound and wait for `POST /groups` to assign a sync group
 
-**Main loop:**
+**Main loop (outer/inner):**
 ```rust
-loop {
-    tokio::select! {
-        _ = signal::ctrl_c() => break,
-        result = service::run_sync_cycle(&config, &mut coordinator, &slot_params) => {
-            match result {
-                Ok(any_work) => { if !any_work { sleep(poll_interval) } }
-                Err(e) => { log error; coordinator.clear(); sleep(poll_interval) }
-            }
+loop {  // outer: wait for group binding
+    wait_for_group_binding();
+    loop {  // inner: sync loop for bound group
+        if group_unbound: break  // back to outer
+        tokio::select! {
+            _ = signal::ctrl_c() => return,
+            _ = stop_signal => break,
+            result = service::run_group_sync_cycle(...) => { ... }
         }
     }
 }
 ```
 
-Key difference from bgworker: uses `SlotConnectParams::Tcp` instead of `::Unix`.
+Key difference from bgworker: uses `SlotConnectParams::Tcp` instead of `::Unix`. Transient metrics (flush_count, flush_duration, queued_changes) are tracked in `FlushCoordinator` in-process rather than in PG shared memory; a daemon HTTP `/metrics` endpoint is planned but not yet implemented.
 
 ---
 
@@ -777,7 +788,7 @@ Trace a single `INSERT INTO orders (id, product, qty) VALUES (42, 'widget', 10)`
    - `INSERT INTO lake.public.orders_ducklake SELECT id, product, qty FROM compacted WHERE _op_type IN (0, 1)`
    - Drops buffer tables
 
-**10. Metrics update.** The flush thread calls `update_metrics_via_pg()` via its own tokio runtime to bump `rows_synced` and set `applied_lsn` in PG metadata.
+**10. Metrics update.** The flush thread calls `update_metrics_via_pg()` via its own tokio runtime to bump `rows_synced` and set `applied_lsn` in PG metadata. The flush result (including `flush_duration_ms`) is sent back to the main thread via mpsc, where `FlushCoordinator::collect_results()` tracks cumulative `flush_count` and latest `flush_duration_ms` per table. The bgworker then writes these transient metrics to PG shared memory (SHM) after each sync cycle — no PG round-trips needed for observability data.
 
 **11. Checkpoint.** The WAL consumer periodically reads `get_min_applied_lsn()` from PG (whatever flush threads have written). `update_confirmed_lsn()` persists it. `send_status_update()` tells PostgreSQL to advance the slot.
 
@@ -952,7 +963,8 @@ SELECT duckpipe.remove_table('public.source_table');
 |------|-------------------|
 | `auto_start` | `add_table()` auto-launches bgworker |
 | `api` | All group/table management SQL functions |
-| `monitoring` | `groups()`, `tables()`, `status()` SRFs |
+| `monitoring` | `groups()`, `tables()`, `status()` SRFs (including SHM-backed columns) |
+| `metrics` | `metrics()` JSON output structure, `status()` flush columns |
 | `streaming` | INSERT → UPDATE → DELETE replication |
 | `snapshot_updates` | Initial copy + concurrent writes during snapshot |
 | `multiple_tables` | Multiple tables in one sync group |

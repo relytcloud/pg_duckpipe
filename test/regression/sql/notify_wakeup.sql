@@ -23,23 +23,24 @@ $$;
 -- Wait for the worker to drain any WAL backlog from previous tests.
 -- The worker must complete its sync cycles before we can rely on
 -- poll_interval timing. Poll worker_status until queued_changes = 0
--- and the worker has had at least two idle cycles (updated_at advances).
+-- for two consecutive checks (meaning the worker has cycled idle).
 DO $$
 DECLARE
   i int := 0;
-  prev_ts timestamptz;
-  cur_ts  timestamptz;
-  q       bigint;
+  idle_count int := 0;
+  q bigint;
 BEGIN
   WHILE i < 100 LOOP
-    SELECT total_queued_changes, updated_at INTO q, cur_ts
+    SELECT total_queued_changes INTO q
       FROM duckpipe.worker_status();
-    -- Worker is idle when queued_changes = 0 and updated_at has
-    -- changed at least once (meaning a cycle completed).
-    IF q = 0 AND prev_ts IS NOT NULL AND cur_ts IS DISTINCT FROM prev_ts THEN
-      RETURN;
+    IF q = 0 THEN
+      idle_count := idle_count + 1;
+      IF idle_count >= 2 THEN
+        RETURN;
+      END IF;
+    ELSE
+      idle_count := 0;
     END IF;
-    prev_ts := cur_ts;
     PERFORM pg_sleep(0.2);
     i := i + 1;
   END LOOP;

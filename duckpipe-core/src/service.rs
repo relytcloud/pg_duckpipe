@@ -1127,27 +1127,6 @@ pub async fn run_group_sync_cycle(
         any_work = true;
     }
 
-    // Update worker runtime state for observability
-    let _ = meta
-        .update_worker_state(
-            group.id,
-            coordinator.total_queued(),
-            coordinator.is_backpressured(),
-        )
-        .await;
-
-    // Update per-table queued_changes
-    let pending_counts = coordinator.table_pending_counts();
-    if !pending_counts.is_empty() {
-        let _ = meta.update_table_queued_changes(&pending_counts).await;
-    }
-
-    // Update per-table DuckDB memory usage
-    let memory_counts = coordinator.table_memory_bytes();
-    if !memory_counts.is_empty() {
-        let _ = meta.update_table_memory_bytes(&memory_counts).await;
-    }
-
     // Clean up metadata connection
     drop(client);
     let _ = conn_handle.await;

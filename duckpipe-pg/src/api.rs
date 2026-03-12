@@ -1438,7 +1438,9 @@ CREATE FUNCTION duckpipe.status() RETURNS TABLE(
     applied_lsn TEXT,
     snapshot_duration_ms BIGINT,
     snapshot_rows BIGINT,
-    duckdb_memory_bytes BIGINT
+    duckdb_memory_bytes BIGINT,
+    flush_count BIGINT,
+    flush_duration_ms BIGINT
 )
 AS 'MODULE_PATHNAME', '@FUNCTION_NAME@'
 LANGUAGE C STRICT;
@@ -1461,8 +1463,17 @@ fn status() -> TableIterator<
         name!(snapshot_duration_ms, Option<i64>),
         name!(snapshot_rows, Option<i64>),
         name!(duckdb_memory_bytes, i64),
+        name!(flush_count, i64),
+        name!(flush_duration_ms, i64),
     ),
 > {
+    // Read SHM metrics and build lookup map by mapping_id
+    let shm_metrics = crate::read_shmem_table_metrics();
+    let shm_map: std::collections::HashMap<i32, (i64, i64, i64, i64)> = shm_metrics
+        .into_iter()
+        .map(|(id, queued, mem, fc, fd)| (id, (queued, mem, fc, fd)))
+        .collect();
+
     let mut rows = Vec::new();
 
     Spi::connect(|client| {
@@ -1470,9 +1481,9 @@ fn status() -> TableIterator<
             "SELECT g.name as sync_group, \
              m.source_schema || '.' || m.source_table as source_table, \
              m.target_schema || '.' || m.target_table as target_table, \
-             m.state, m.enabled, m.rows_synced, m.queued_changes, m.last_sync_at, \
+             m.state, m.enabled, m.rows_synced, m.last_sync_at, \
              m.error_message, m.consecutive_failures, m.retry_at, m.applied_lsn::text, \
-             m.snapshot_duration_ms, m.snapshot_rows, m.duckdb_memory_bytes \
+             m.snapshot_duration_ms, m.snapshot_rows, m.id \
              FROM duckpipe.table_mappings m \
              JOIN duckpipe.sync_groups g ON m.group_id = g.id \
              ORDER BY g.name, m.source_schema, m.source_table",
@@ -1488,15 +1499,18 @@ fn status() -> TableIterator<
                 let state: String = row.get(4).unwrap().unwrap();
                 let enabled: bool = row.get(5).unwrap().unwrap();
                 let rows_synced: i64 = row.get(6).unwrap().unwrap();
-                let queued_changes: i64 = row.get::<i64>(7).unwrap().unwrap_or(0);
-                let last_sync: Option<TimestampWithTimeZone> = row.get(8).unwrap();
-                let error_message: Option<String> = row.get(9).unwrap();
-                let consecutive_failures: i32 = row.get::<i32>(10).unwrap().unwrap_or(0);
-                let retry_at: Option<TimestampWithTimeZone> = row.get(11).unwrap();
-                let applied_lsn: Option<String> = row.get(12).unwrap();
-                let snapshot_duration_ms: Option<i64> = row.get(13).unwrap();
-                let snapshot_rows: Option<i64> = row.get(14).unwrap();
-                let duckdb_memory_bytes: i64 = row.get::<i64>(15).unwrap().unwrap_or(0);
+                let last_sync: Option<TimestampWithTimeZone> = row.get(7).unwrap();
+                let error_message: Option<String> = row.get(8).unwrap();
+                let consecutive_failures: i32 = row.get::<i32>(9).unwrap().unwrap_or(0);
+                let retry_at: Option<TimestampWithTimeZone> = row.get(10).unwrap();
+                let applied_lsn: Option<String> = row.get(11).unwrap();
+                let snapshot_duration_ms: Option<i64> = row.get(12).unwrap();
+                let snapshot_rows: Option<i64> = row.get(13).unwrap();
+                let mapping_id: i32 = row.get::<i32>(14).unwrap().unwrap_or(0);
+
+                // Read queued_changes, duckdb_memory_bytes, flush_count, flush_duration from SHM
+                let (queued_changes, duckdb_memory_bytes, flush_count, flush_duration_ms) =
+                    shm_map.get(&mapping_id).copied().unwrap_or((0, 0, 0, 0));
 
                 rows.push((
                     sync_group,
@@ -1514,6 +1528,8 @@ fn status() -> TableIterator<
                     snapshot_duration_ms,
                     snapshot_rows,
                     duckdb_memory_bytes,
+                    flush_count,
+                    flush_duration_ms,
                 ));
             }
         }
@@ -1526,8 +1542,7 @@ fn status() -> TableIterator<
 CREATE FUNCTION duckpipe.worker_status() RETURNS TABLE(
     sync_group TEXT,
     total_queued_changes BIGINT,
-    is_backpressured BOOLEAN,
-    updated_at TIMESTAMPTZ
+    is_backpressured BOOLEAN
 )
 AS 'MODULE_PATHNAME', '@FUNCTION_NAME@'
 LANGUAGE C STRICT;
@@ -1538,39 +1553,178 @@ fn worker_status() -> TableIterator<
         name!(sync_group, String),
         name!(total_queued_changes, i64),
         name!(is_backpressured, bool),
-        name!(updated_at, Option<TimestampWithTimeZone>),
     ),
 > {
+    // Read group metrics from SHM and build lookup by group_id
+    let shm_groups = crate::read_shmem_group_metrics();
+    let shm_map: std::collections::HashMap<i32, (i64, bool)> = shm_groups
+        .into_iter()
+        .map(|(id, queued, bp)| (id, (queued, bp)))
+        .collect();
+
     let mut rows = Vec::new();
 
     Spi::connect(|client| {
         let result = client.select(
-            "SELECT g.name, w.total_queued_changes, w.is_backpressured, w.updated_at \
-             FROM duckpipe.worker_state w \
-             JOIN duckpipe.sync_groups g ON w.group_id = g.id \
-             ORDER BY g.name",
+            "SELECT g.id, g.name FROM duckpipe.sync_groups g ORDER BY g.name",
             None,
             &[],
         );
 
         if let Ok(tuptable) = result {
             for row in tuptable {
-                let sync_group: String = row.get::<String>(1).unwrap().unwrap_or_default();
-                let total_queued_changes: i64 = row.get::<i64>(2).unwrap().unwrap_or(0);
-                let is_backpressured: bool = row.get::<bool>(3).unwrap().unwrap_or(false);
-                let updated_at: Option<TimestampWithTimeZone> = row.get(4).unwrap();
+                let group_id: i32 = row.get::<i32>(1).unwrap().unwrap_or(0);
+                let sync_group: String = row.get::<String>(2).unwrap().unwrap_or_default();
 
-                rows.push((
-                    sync_group,
-                    total_queued_changes,
-                    is_backpressured,
-                    updated_at,
-                ));
+                let (total_queued_changes, is_backpressured) =
+                    shm_map.get(&group_id).copied().unwrap_or((0, false));
+
+                rows.push((sync_group, total_queued_changes, is_backpressured));
             }
         }
     });
 
     TableIterator::new(rows)
+}
+
+#[pg_extern(sql = "
+CREATE FUNCTION duckpipe.metrics() RETURNS TEXT
+AS 'MODULE_PATHNAME', '@FUNCTION_NAME@'
+LANGUAGE C STRICT;
+")]
+fn metrics() -> String {
+    // Read in-memory metrics from SHM
+    let shm_tables = crate::read_shmem_table_metrics();
+    let shm_table_map: std::collections::HashMap<i32, (i64, i64, i64, i64)> = shm_tables
+        .into_iter()
+        .map(|(id, queued, mem, fc, fd)| (id, (queued, mem, fc, fd)))
+        .collect();
+
+    let shm_groups = crate::read_shmem_group_metrics();
+    let shm_group_map: std::collections::HashMap<i32, (i64, bool)> = shm_groups
+        .into_iter()
+        .map(|(id, queued, bp)| (id, (queued, bp)))
+        .collect();
+
+    // Query persisted metrics from PG
+    let mut table_entries = Vec::new();
+    let mut group_entries = Vec::new();
+
+    Spi::connect(|client| {
+        // Tables
+        let result = client.select(
+            "SELECT g.name, m.source_schema || '.' || m.source_table, \
+             m.state, m.rows_synced, m.consecutive_failures, \
+             m.snapshot_duration_ms, m.snapshot_rows, m.applied_lsn::text, m.id \
+             FROM duckpipe.table_mappings m \
+             JOIN duckpipe.sync_groups g ON m.group_id = g.id \
+             ORDER BY g.name, m.source_schema, m.source_table",
+            None,
+            &[],
+        );
+        if let Ok(tuptable) = result {
+            for row in tuptable {
+                let group_name: String = row.get(1).unwrap().unwrap();
+                let source_table: String = row.get(2).unwrap().unwrap();
+                let state: String = row.get(3).unwrap().unwrap();
+                let rows_synced: i64 = row.get(4).unwrap().unwrap();
+                let consecutive_failures: i32 = row.get::<i32>(5).unwrap().unwrap_or(0);
+                let snapshot_duration_ms: Option<i64> = row.get(6).unwrap();
+                let snapshot_rows: Option<i64> = row.get(7).unwrap();
+                let applied_lsn: Option<String> = row.get(8).unwrap();
+                let mapping_id: i32 = row.get::<i32>(9).unwrap().unwrap_or(0);
+
+                let (queued_changes, duckdb_memory_bytes, flush_count, flush_duration_ms) =
+                    shm_table_map
+                        .get(&mapping_id)
+                        .copied()
+                        .unwrap_or((0, 0, 0, 0));
+
+                table_entries.push(format!(
+                    "{{\"group\":{},\"source_table\":{},\"state\":{},\"rows_synced\":{},\
+                     \"queued_changes\":{},\"duckdb_memory_bytes\":{},\
+                     \"consecutive_failures\":{},\"flush_count\":{},\"flush_duration_ms\":{},\
+                     \"snapshot_duration_ms\":{},\"snapshot_rows\":{},\"applied_lsn\":{}}}",
+                    json_str(&group_name),
+                    json_str(&source_table),
+                    json_str(&state),
+                    rows_synced,
+                    queued_changes,
+                    duckdb_memory_bytes,
+                    consecutive_failures,
+                    flush_count,
+                    flush_duration_ms,
+                    json_opt_i64(snapshot_duration_ms),
+                    json_opt_i64(snapshot_rows),
+                    json_opt_str(applied_lsn.as_deref()),
+                ));
+            }
+        }
+
+        // Groups
+        let result = client.select(
+            "SELECT g.id, g.name FROM duckpipe.sync_groups g ORDER BY g.name",
+            None,
+            &[],
+        );
+        if let Ok(tuptable) = result {
+            for row in tuptable {
+                let group_id: i32 = row.get::<i32>(1).unwrap().unwrap_or(0);
+                let name: String = row.get::<String>(2).unwrap().unwrap_or_default();
+
+                let (total_queued_changes, is_backpressured) =
+                    shm_group_map.get(&group_id).copied().unwrap_or((0, false));
+
+                group_entries.push(format!(
+                    "{{\"name\":{},\"total_queued_changes\":{},\"is_backpressured\":{}}}",
+                    json_str(&name),
+                    total_queued_changes,
+                    is_backpressured,
+                ));
+            }
+        }
+    });
+
+    format!(
+        "{{\"tables\":[{}],\"groups\":[{}]}}",
+        table_entries.join(","),
+        group_entries.join(","),
+    )
+}
+
+/// Escape a string for JSON output.
+fn json_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn json_opt_str(s: Option<&str>) -> String {
+    match s {
+        Some(v) => json_str(v),
+        None => "null".to_string(),
+    }
+}
+
+fn json_opt_i64(v: Option<i64>) -> String {
+    match v {
+        Some(n) => n.to_string(),
+        None => "null".to_string(),
+    }
 }
 
 #[pg_extern(sql = "
