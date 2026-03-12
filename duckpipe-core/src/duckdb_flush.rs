@@ -128,6 +128,44 @@ fn discover_lake_table_info(
     })
 }
 
+/// Parse a human-readable size string (e.g. "1.2MB", "512.0KB", "0 bytes") to bytes.
+/// DuckDB formats sizes as "0 bytes", "123 bytes", "1.2KB", "5.0MB", etc.
+/// Returns 0 on parse failure.
+fn parse_memory_usage(s: &str) -> i64 {
+    let s = s.trim();
+    // Find where the numeric part ends and the unit begins
+    let unit_start = s.find(|c: char| c.is_ascii_alphabetic()).unwrap_or(s.len());
+    let (num_str, unit) = s.split_at(unit_start);
+    let num: f64 = match num_str.trim().parse() {
+        Ok(n) if n >= 0.0 => n,
+        _ => return 0,
+    };
+    let multiplier: f64 = match unit.trim().to_uppercase().as_str() {
+        "" | "B" | "BYTES" => 1.0,
+        "KB" | "KIB" => 1024.0,
+        "MB" | "MIB" => 1024.0 * 1024.0,
+        "GB" | "GIB" => 1024.0 * 1024.0 * 1024.0,
+        "TB" | "TIB" => 1024.0 * 1024.0 * 1024.0 * 1024.0,
+        _ => return 0,
+    };
+    (num * multiplier) as i64
+}
+
+/// Query DuckDB's buffer manager memory usage via pragma_database_size().
+/// Returns 0 if the query fails or no rows match.
+/// Sums memory_usage across all attached databases (memory + lake).
+fn query_memory_usage(db: &Connection) -> i64 {
+    let mut stmt = match db.prepare("SELECT memory_usage FROM pragma_database_size()") {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+    let rows: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map(|iter| iter.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default();
+    rows.iter().map(|s| parse_memory_usage(s)).sum()
+}
+
 /// Persistent flush worker for a single target table.
 ///
 /// Holds a long-lived DuckDB connection with INSTALL+LOAD+ATTACH done once at creation.
@@ -194,6 +232,7 @@ impl FlushWorker {
                 target_key,
                 mapping_id,
                 applied_count: 0,
+                memory_bytes: 0,
             });
         }
 
@@ -469,10 +508,13 @@ impl FlushWorker {
             flush_start.elapsed().as_secs_f64() * 1000.0,
         );
 
+        let memory_bytes = query_memory_usage(&self.db);
+
         Ok(DuckDbFlushResult {
             target_key,
             mapping_id,
             applied_count,
+            memory_bytes,
         })
     }
 }
@@ -483,4 +525,6 @@ pub struct DuckDbFlushResult {
     pub target_key: String,
     pub mapping_id: i32,
     pub applied_count: i64,
+    /// DuckDB buffer manager memory usage in bytes (from pragma_database_size).
+    pub memory_bytes: i64,
 }

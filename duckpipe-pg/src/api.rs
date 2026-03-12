@@ -1437,7 +1437,8 @@ CREATE FUNCTION duckpipe.status() RETURNS TABLE(
     retry_at TIMESTAMPTZ,
     applied_lsn TEXT,
     snapshot_duration_ms BIGINT,
-    snapshot_rows BIGINT
+    snapshot_rows BIGINT,
+    duckdb_memory_bytes BIGINT
 )
 AS 'MODULE_PATHNAME', '@FUNCTION_NAME@'
 LANGUAGE C STRICT;
@@ -1459,6 +1460,7 @@ fn status() -> TableIterator<
         name!(applied_lsn, Option<String>),
         name!(snapshot_duration_ms, Option<i64>),
         name!(snapshot_rows, Option<i64>),
+        name!(duckdb_memory_bytes, i64),
     ),
 > {
     let mut rows = Vec::new();
@@ -1470,7 +1472,7 @@ fn status() -> TableIterator<
              m.target_schema || '.' || m.target_table as target_table, \
              m.state, m.enabled, m.rows_synced, m.queued_changes, m.last_sync_at, \
              m.error_message, m.consecutive_failures, m.retry_at, m.applied_lsn::text, \
-             m.snapshot_duration_ms, m.snapshot_rows \
+             m.snapshot_duration_ms, m.snapshot_rows, m.duckdb_memory_bytes \
              FROM duckpipe.table_mappings m \
              JOIN duckpipe.sync_groups g ON m.group_id = g.id \
              ORDER BY g.name, m.source_schema, m.source_table",
@@ -1494,6 +1496,7 @@ fn status() -> TableIterator<
                 let applied_lsn: Option<String> = row.get(12).unwrap();
                 let snapshot_duration_ms: Option<i64> = row.get(13).unwrap();
                 let snapshot_rows: Option<i64> = row.get(14).unwrap();
+                let duckdb_memory_bytes: i64 = row.get::<i64>(15).unwrap().unwrap_or(0);
 
                 rows.push((
                     sync_group,
@@ -1510,6 +1513,7 @@ fn status() -> TableIterator<
                     applied_lsn,
                     snapshot_duration_ms,
                     snapshot_rows,
+                    duckdb_memory_bytes,
                 ));
             }
         }

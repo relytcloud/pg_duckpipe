@@ -76,6 +76,7 @@ pub enum FlushThreadResult {
         mapping_id: i32,
         applied_count: i64,
         last_lsn: u64,
+        memory_bytes: i64,
     },
     Error {
         target_key: String,
@@ -117,6 +118,9 @@ pub struct FlushCoordinator {
     /// the mpsc result, so values here are always >= the corresponding PG applied_lsn).
     per_table_lsn: HashMap<i32, u64>, // mapping_id -> latest applied LSN
 
+    /// In-memory per-table DuckDB memory usage, updated from flush thread results.
+    per_table_memory: HashMap<i32, i64>, // mapping_id -> memory_bytes
+
     /// Cache: target_key → mapping_id.  Populated in `ensure_queue`, used in
     /// `get_min_applied_lsn_in_coordinator` to avoid O(n) mutex locks per call.
     target_to_mapping: HashMap<String, i32>,
@@ -148,6 +152,7 @@ impl FlushCoordinator {
             flush_batch_threshold: flush_batch_threshold as usize,
             flush_interval_ms: flush_interval_ms as u64,
             per_table_lsn: HashMap::new(),
+            per_table_memory: HashMap::new(),
             target_to_mapping: HashMap::new(),
         }
     }
@@ -324,6 +329,14 @@ impl FlushCoordinator {
             .collect()
     }
 
+    /// Return per-table DuckDB memory usage as `(mapping_id, memory_bytes)`.
+    pub fn table_memory_bytes(&self) -> Vec<(i32, i64)> {
+        self.per_table_memory
+            .iter()
+            .map(|(&id, &bytes)| (id, bytes))
+            .collect()
+    }
+
     /// Compute the minimum applied LSN across all tables tracked in `per_table_lsn`.
     ///
     /// Returns 0 if:
@@ -429,10 +442,12 @@ impl FlushCoordinator {
             self.target_to_mapping.remove(key);
         }
 
-        // Final sweep: prune per_table_lsn directly by active IDs.  This catches
-        // stale entries injected by collect_results() from late flush-thread
-        // results that arrived after the thread was pruned above.
+        // Final sweep: prune per_table_lsn and per_table_memory directly by active
+        // IDs.  This catches stale entries injected by collect_results() from late
+        // flush-thread results that arrived after the thread was pruned above.
         self.per_table_lsn
+            .retain(|id, _| active_mapping_ids.contains(id));
+        self.per_table_memory
             .retain(|id, _| active_mapping_ids.contains(id));
     }
 
@@ -506,12 +521,16 @@ impl FlushCoordinator {
             if let FlushThreadResult::Success {
                 mapping_id,
                 last_lsn,
+                memory_bytes,
                 ..
             } = &r
             {
                 let entry = self.per_table_lsn.entry(*mapping_id).or_insert(0);
                 if *last_lsn > *entry {
                     *entry = *last_lsn;
+                }
+                if *memory_bytes > 0 {
+                    self.per_table_memory.insert(*mapping_id, *memory_bytes);
                 }
             }
             results.push(r);
@@ -543,6 +562,7 @@ impl FlushCoordinator {
         self.result_tx = tx;
         self.result_rx = rx;
         self.per_table_lsn.clear();
+        self.per_table_memory.clear();
         self.target_to_mapping.clear();
     }
 
@@ -850,6 +870,7 @@ fn do_flush(
                 mapping_id: result.mapping_id,
                 applied_count: result.applied_count,
                 last_lsn,
+                memory_bytes: result.memory_bytes,
             });
         }
         Err(e) => {

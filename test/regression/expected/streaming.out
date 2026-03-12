@@ -58,12 +58,13 @@ SELECT * FROM public.stream_test_ducklake ORDER BY id;
 
 -- Verify status metrics are updated
 SELECT rows_synced > 0 AS rows_synced_positive,
-       last_sync IS NOT NULL AS has_last_sync
+       last_sync IS NOT NULL AS has_last_sync,
+       duckdb_memory_bytes > 0 AS has_memory_usage
 FROM duckpipe.status()
 WHERE source_table = 'public.stream_test';
- rows_synced_positive | has_last_sync 
-----------------------+---------------
- t                    | t
+ rows_synced_positive | has_last_sync | has_memory_usage 
+----------------------+---------------+------------------
+ t                    | t             | t
 (1 row)
 
 SELECT duckpipe.remove_table('public.stream_test', false);
