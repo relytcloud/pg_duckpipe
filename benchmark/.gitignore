@@ -1,5 +1,7 @@
-bench_data/
-bench_pg.log
-results/*.log
+suite/bench_data/
+suite/bench_pg.log
+suite/results/*.log
+soak/soak_results/
 
 *.pyc
+__pycache__/

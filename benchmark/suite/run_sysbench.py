@@ -7,197 +7,28 @@ import time
 import sys
 import re
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib import (
+    WORKLOAD_EXPECTED_EVENTS_PER_TX,
+    CONSISTENCY_MODES,
+    run_sql,
+    parse_db_url,
+    get_sysbench_cmd,
+    parse_int,
+    get_total_lag_bytes,
+    get_total_queued_changes,
+    get_snapshot_metrics,
+    get_benchmark_rows_synced,
+    wait_for_db_ready,
+    verify_table_consistency_full,
+)
+
 # ==============================================================================
 # Configuration & Helpers
 # ==============================================================================
 
-WORKLOAD_EXPECTED_EVENTS_PER_TX = {
-    # One INSERT statement per transaction/event.
-    "oltp_insert": 1,
-    # sysbench defaults: 1 DELETE/INSERT pair + 2 UPDATEs, and UPDATE is
-    # applied by DuckPipe as DELETE+INSERT.
-    "oltp_read_write": 6,
-}
-
-CONSISTENCY_MODES = ("auto", "safe", "full", "off")
-
-def run_sql(db_params, sql, timeout=60):
-    """Run SQL via psql with a timeout (default 60s)."""
-    # db_params is a dict: {host, port, user, dbname}
-    conn_str = f"host={db_params['host']} port={db_params['port']} user={db_params['user']} dbname={db_params['dbname']}"
-    cmd = ["psql", conn_str, "-t", "-A", "-c", sql]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        print(f"[SQL TIMEOUT] {sql} (exceeded {timeout}s)")
-        return None
-    if result.returncode != 0:
-        print(f"[SQL ERROR] {sql}\n{result.stderr}")
-        return None
-    return result.stdout.strip()
-
-def parse_db_url(url):
-    """Simple parser for key=value connection string."""
-    params = {}
-    for part in url.split():
-        if '=' in part:
-            k, v = part.split('=', 1)
-            params[k] = v
-    # Defaults
-    if 'host' not in params: params['host'] = 'localhost'
-    if 'port' not in params: params['port'] = '5432'
-    if 'user' not in params: params['user'] = 'postgres'
-    if 'dbname' not in params: params['dbname'] = 'postgres'
-    return params
-
-def get_sysbench_cmd(args, db_params, action):
-    """Construct sysbench command."""
-    cmd = [
-        "sysbench",
-        args.workload,
-        f"--db-driver=pgsql",
-        f"--pgsql-host={db_params['host']}",
-        f"--pgsql-port={db_params['port']}",
-        f"--pgsql-user={db_params['user']}",
-        f"--pgsql-db={db_params['dbname']}",
-        f"--tables={args.tables}",
-        f"--table-size={args.table_size}",
-        f"--threads={args.threads}",
-        f"--time={args.duration}",
-        f"--report-interval=1"
-    ]
-    # Disable auto-vacuum for stable results if needed, but standard is fine
-    cmd.append(action)
-    return cmd
-
-
 def get_expected_events_per_tx(args):
     return WORKLOAD_EXPECTED_EVENTS_PER_TX.get(args.workload)
-
-
-def parse_int(value, default=0):
-    if value is None:
-        return default
-    value = value.strip()
-    if value.isdigit() or (value.startswith("-") and value[1:].isdigit()):
-        return int(value)
-    return default
-
-
-def get_total_lag_bytes(db_params):
-    """Approximate WAL lag: pg_current_wal_lsn() - confirmed_lsn.
-    Includes non-DML WAL so it never reaches 0, but useful as a directional
-    indicator for benchmark progress monitoring and stall detection."""
-    res = run_sql(
-        db_params,
-        "SELECT COALESCE(SUM((pg_current_wal_lsn() - confirmed_lsn)::int8), 0) "
-        "FROM duckpipe.sync_groups WHERE enabled",
-    )
-    return parse_int(res, 0)
-
-def get_total_queued_changes(db_params):
-    """Return total changes still buffered in flush coordinator queues.
-    A non-zero value means flush threads are still draining — not a true stall."""
-    res = run_sql(
-        db_params,
-        "SELECT COALESCE(total_queued_changes, 0) FROM duckpipe.worker_status()",
-    )
-    return parse_int(res, 0)
-
-def get_snapshot_metrics(db_params, num_tables):
-    """Query duckpipe.status() for per-table snapshot timing from SQL-exposed metrics."""
-    table_filter = ", ".join([f"'public.sbtest{i}'" for i in range(1, num_tables + 1)])
-    res = run_sql(
-        db_params,
-        f"SELECT source_table, snapshot_duration_ms, snapshot_rows "
-        f"FROM duckpipe.status() "
-        f"WHERE source_table IN ({table_filter}) "
-        f"AND snapshot_duration_ms IS NOT NULL",
-    )
-    metrics = []
-    if res:
-        for line in res.strip().split("\n"):
-            parts = line.split("|")
-            if len(parts) == 3:
-                table = parts[0].strip()
-                duration_ms = float(parts[1].strip())
-                rows = int(parts[2].strip())
-                metrics.append((table, rows, duration_ms))
-    return metrics
-
-
-def get_benchmark_rows_synced(args, db_params):
-    table_filter = ", ".join([f"'public.sbtest{i}'" for i in range(1, args.tables + 1)])
-    res = run_sql(
-        db_params,
-        f"SELECT COALESCE(sum(rows_synced), 0) "
-        f"FROM duckpipe.status() "
-        f"WHERE source_table IN ({table_filter})",
-    )
-    return parse_int(res, 0)
-
-
-def wait_for_db_ready(db_params, timeout=60):
-    """Wait for the database to accept connections (e.g. after a crash/restart)."""
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        res = run_sql(db_params, "SELECT 1", timeout=10)
-        if res == "1":
-            return True
-        time.sleep(2.0)
-    return False
-
-
-def verify_table_consistency_full(args, db_params):
-    """Verify consistency using separate count queries to avoid cross-engine
-    JOIN crashes in pg_duckdb. Falls back gracefully if the server crashes."""
-    mismatches = []
-    for i in range(1, args.tables + 1):
-        table = f"sbtest{i}"
-        target = f"{table}_ducklake"
-
-        # Use separate count queries - cross-engine JOINs between heap and
-        # ducklake tables can crash pg_duckdb when many parquet files exist.
-        src_s = run_sql(db_params, f"SELECT count(*) FROM public.{table}")
-        if src_s is None:
-            # Server may have crashed; wait for recovery
-            print(f"    [!] Connection lost querying {table}, waiting for recovery...")
-            if not wait_for_db_ready(db_params):
-                mismatches.append({
-                    "table": table, "source_count": None, "target_count": None,
-                    "value_mismatch": None, "missing": None, "extra": None,
-                    "mode": "full", "error": "connection lost",
-                })
-                continue
-            src_s = run_sql(db_params, f"SELECT count(*) FROM public.{table}")
-
-        dst_s = run_sql(db_params, f"SELECT count(*) FROM public.{target}")
-        if dst_s is None:
-            print(f"    [!] Connection lost querying {target}, waiting for recovery...")
-            if not wait_for_db_ready(db_params):
-                mismatches.append({
-                    "table": table, "source_count": parse_int(src_s, -1),
-                    "target_count": None, "value_mismatch": None,
-                    "missing": None, "extra": None,
-                    "mode": "full", "error": "connection lost on target count",
-                })
-                continue
-            dst_s = run_sql(db_params, f"SELECT count(*) FROM public.{target}")
-
-        src = parse_int(src_s, -1)
-        dst = parse_int(dst_s, -1)
-
-        if src != dst:
-            mismatches.append({
-                "table": table,
-                "source_count": src,
-                "target_count": dst,
-                "value_mismatch": None,
-                "missing": None,
-                "extra": None,
-                "mode": "full",
-            })
-    return mismatches
 
 
 def resolve_consistency_mode(args):
@@ -284,10 +115,10 @@ def benchmark_snapshot(args, db_params):
 
     total_rows = args.tables * args.table_size
     print("[-] Monitoring snapshot sync...")
-    # Tracks whether we already emitted the WAL nudge to trigger CATCHUP→STREAMING.
+    # Tracks whether we already emitted the WAL nudge to trigger CATCHUP->STREAMING.
     # After a snapshot, the replication slot may see no new WAL messages because the
     # snapshot copy happens outside the publication's WAL stream.  Without a commit
-    # with LSN > snapshot_lsn the state machine never fires the CATCHUP→STREAMING
+    # with LSN > snapshot_lsn the state machine never fires the CATCHUP->STREAMING
     # transition.  We emit one transactional logical message (pg_logical_emit_message)
     # to give the slot a COMMIT at a higher LSN.
     catchup_trigger_sent = False
@@ -342,7 +173,7 @@ def benchmark_snapshot(args, db_params):
         # If all rows are physically copied but tables are stuck in CATCHUP (no SNAPSHOT
         # remaining), nudge the WAL consumer by emitting a transactional logical message.
         # The resulting COMMIT updates pending_lsn past snapshot_lsn, triggering the
-        # CATCHUP→STREAMING transition on the next worker cycle.
+        # CATCHUP->STREAMING transition on the next worker cycle.
         if target_count >= total_rows and not_streaming > 0 and not catchup_trigger_sent:
             snap_res = run_sql(db_params, "SELECT count(*) FROM duckpipe.status() WHERE state = 'SNAPSHOT'")
             still_in_snapshot = int(snap_res) if snap_res and snap_res.isdigit() else 1
@@ -364,7 +195,7 @@ def benchmark_streaming(args, db_params):
     # Start Sysbench in background
     cmd = get_sysbench_cmd(args, db_params, "run")
     print(f"    Command: {' '.join(cmd)}")
-    rows_before = get_benchmark_rows_synced(args, db_params)
+    rows_before = get_benchmark_rows_synced(db_params, args.tables)
 
     # Use Popen and read stdout in real-time with non-blocking I/O
     sysbench_proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
@@ -449,7 +280,7 @@ def benchmark_streaming(args, db_params):
     prev_count = catchup_start_count
     prev_interval_time = catchup_start_time
 
-    # Stall limit: 30 × 2s = 60s with no progress.
+    # Stall limit: 30 x 2s = 60s with no progress.
     # Must be > poll_interval (default 10s) so we don't give up between flush cycles.
     stall_limit = 30
     stall_count = 0
@@ -479,12 +310,12 @@ def benchmark_streaming(args, db_params):
             actual_final_count = current_count
             break
 
-        # Progress display — windowed rate (rows added since last interval) so the
+        # Progress display -- windowed rate (rows added since last interval) so the
         # rate drops to 0 during stalls rather than showing a misleading falling average.
         interval_secs = now - prev_interval_time
         interval_rate = (current_count - prev_count) / interval_secs if interval_secs > 0 else 0
         lag_mb = final_lag / 1024 / 1024
-        lag_trend = '▼' if lag_decreasing else ('▲' if final_lag > prev_final_lag else '–')
+        lag_trend = '\u25bc' if lag_decreasing else ('\u25b2' if final_lag > prev_final_lag else '\u2013')
         if expected_final_count:
             pct = f"{100 * current_count / expected_final_count:.0f}%"
             count_str = f"{current_count:,}/{expected_final_count:,} ({pct})"
@@ -496,7 +327,7 @@ def benchmark_streaming(args, db_params):
         )
         sys.stdout.flush()
 
-        # Secondary: stall detection — no rows delivered, lag not decreasing, AND
+        # Secondary: stall detection -- no rows delivered, lag not decreasing, AND
         # flush coordinator has nothing queued (i.e., flush threads are idle).
         # Checking queued_changes prevents declaring a stall while the flush thread
         # is still draining a large batch that hasn't committed to DuckLake yet.
@@ -520,7 +351,7 @@ def benchmark_streaming(args, db_params):
         print()  # newline after the progress line
 
     # Consistency: target count matches expected.
-    # Note: lag_bytes after OLTP is NOT a consistency indicator — pg_current_wal_lsn()
+    # Note: lag_bytes after OLTP is NOT a consistency indicator -- pg_current_wal_lsn()
     # keeps advancing from non-DML WAL (checkpoints, autovacuum), so lag_bytes stays
     # large even when all DML has been applied.
     catchup_complete = (
@@ -545,7 +376,7 @@ def benchmark_streaming(args, db_params):
                     "mode": "full",
                 })
         elif consistency_mode == "full":
-            mismatches = verify_table_consistency_full(args, db_params)
+            mismatches = verify_table_consistency_full(db_params, args.tables)
     elif consistency_mode != "off":
         checks_skipped_reason = "catch-up incomplete (stall or timeout)"
 
@@ -554,7 +385,7 @@ def benchmark_streaming(args, db_params):
         if "transactions:" in line or "latency" in line:
             print(f"    {line.strip()}")
     # Note: final lag includes non-DML WAL (checkpoints, autovacuum) that accumulated
-    # after OLTP ended — it is NOT a data-consistency indicator.
+    # after OLTP ended -- it is NOT a data-consistency indicator.
     print(f"    lag(avg/peak): {avg_lag/1024/1024:.1f}MB / {max_lag/1024/1024:.1f}MB  [during OLTP]")
     print(f"    catch-up: {actual_final_count:,} rows in {catchup_elapsed:.1f}s ({catchup_throughput:.0f} rows/s)")
     if expected_final_count is not None:
@@ -576,7 +407,7 @@ def benchmark_streaming(args, db_params):
             else:
                 print(f"        {m['table']}: source={m['source_count']}, target={m['target_count']}")
     else:
-        print("    [OK] Consistency check passed — target count matches expected.")
+        print("    [OK] Consistency check passed -- target count matches expected.")
 
     return tps, avg_lag, max_lag, final_lag, catchup_elapsed, catchup_throughput, actual_final_count, expected_final_count, mismatches, checks_ran
 

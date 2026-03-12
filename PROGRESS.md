@@ -66,8 +66,8 @@
 
 ### Features
 - [ ] Daemon REST API — expose monitoring/control endpoints (status, health, metrics) from the standalone daemon binary so operators can integrate with orchestration and alerting without a PG connection
-- [ ] Dedicated bgworker per group — one worker per sync group for full isolation (own FlushCoordinator, SnapshotManager, SlotState)
-- [ ] Per-group NOTIFY channels (`duckpipe_wakeup_{group}`) — avoid thundering herd wakeups; depends on per-group bgworker
+- [x] Dedicated bgworker per group — one worker per sync group for full isolation (own FlushCoordinator, SnapshotManager, SlotState)
+- [x] Per-group NOTIFY channels (`duckpipe_wakeup_{group}`) — avoid thundering herd wakeups; per-group bgworker spawns its own LISTEN channel
 - [ ] Per-group GUC overrides — nullable config columns in `sync_groups`; NULL falls back to global GUC
 - [x] `conninfo` column in sync_groups for remote PG support — group-level conninfo routes WAL replication, snapshots, and catalog queries to a remote PG while metadata and DuckLake targets stay local. `create_group(conninfo=>...)` creates slot+publication on remote, `add_table()` introspects remote pg_catalog for explicit DDL, `remove_table()`/`drop_group()` clean up remote objects. Shared `connstr` module extracted to `duckpipe-core/src/connstr.rs`.
 - [ ] Schema DDL sync (ALTER TABLE ADD/DROP COLUMN propagation)

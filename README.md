@@ -77,11 +77,11 @@ Sysbench on Apple M1 Pro, 100k rows/table, 30s OLTP phase:
 | 1 table, `oltp_read_write` | 132,450 rows/s | 627 | 170.8 MB | PASS |
 | 4 tables, `oltp_read_write` | 150,830 rows/s | 450 | 369.3 MB | PASS |
 
-Full breakdown (flush latency, phase timing, snapshot per-table, WAL cycles): [benchmark/results/report.md](benchmark/results/report.md)
+Full breakdown (flush latency, phase timing, snapshot per-table, WAL cycles): [benchmark/suite/results/report.md](benchmark/suite/results/report.md)
 
 ```bash
-./benchmark/bench_suite.sh              # Run all 4 scenarios (30s each)
-./benchmark/bench_suite.sh --duration 10  # Quick smoke test
+./benchmark/suite/bench_suite.sh              # Run all 4 scenarios (30s each)
+./benchmark/suite/bench_suite.sh --duration 10  # Quick smoke test
 ```
 
 ## Build & Test
