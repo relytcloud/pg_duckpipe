@@ -20,7 +20,8 @@ RUN apt-get update -qq && \
         ninja-build \
         curl \
         ca-certificates \
-        libssl-dev && \
+        libssl-dev \
+        jq && \
     rm -rf /var/lib/apt/lists/*
 
 # Install Rust system-wide so it's on PATH for the build
