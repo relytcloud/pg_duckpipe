@@ -20,6 +20,7 @@ fn block_on<F: std::future::Future>(f: F) -> F::Output {
 /// kept alive as long as the client is in use.
 async fn remote_connect(
     conninfo: &str,
+    app_name: &str,
 ) -> Result<
     (
         tokio_postgres::Client,
@@ -27,7 +28,7 @@ async fn remote_connect(
     ),
     String,
 > {
-    duckpipe_core::connstr::pg_connect(conninfo)
+    duckpipe_core::connstr::pg_connect_with_app_name(conninfo, app_name)
         .await
         .map_err(|e| format!("remote connect: {}", e))
 }
@@ -101,12 +102,12 @@ impl PgConn {
         Self::Local
     }
 
-    fn remote(conninfo: &str) -> Result<Self, String> {
+    fn remote(conninfo: &str, app_name: &str) -> Result<Self, String> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|e| format!("tokio runtime: {}", e))?;
-        let (client, conn) = rt.block_on(remote_connect(conninfo))?;
+        let (client, conn) = rt.block_on(remote_connect(conninfo, app_name))?;
         Ok(Self::Remote {
             rt,
             client,
@@ -343,7 +344,8 @@ fn create_group(
         let slot_owned = slot.clone();
         let pub_owned = pub_name.clone();
         let result: Result<(), String> = block_on(async {
-            let (client, _conn) = remote_connect(&ci_owned).await?;
+            let ddl_app = duckpipe_core::connstr::app_name(name, "ddl");
+            let (client, _conn) = remote_connect(&ci_owned, &ddl_app).await?;
 
             // Create replication slot on remote
             client
@@ -449,7 +451,8 @@ fn create_group(
             let slot_c = slot.clone();
             let pub_c = pub_name.clone();
             let _ = block_on(async {
-                if let Ok((client, _conn)) = remote_connect(&ci).await {
+                let cleanup_app = duckpipe_core::connstr::app_name(name, "ddl");
+                if let Ok((client, _conn)) = remote_connect(&ci, &cleanup_app).await {
                     let _ = client
                         .execute("SELECT pg_drop_replication_slot($1)", &[&slot_c])
                         .await;
@@ -545,8 +548,9 @@ fn drop_group(name: &str, drop_slot: bool) {
         let ci = ci.clone();
         let slot = slot.clone();
         let pub_name = pub_name.clone();
+        let ddl_app = duckpipe_core::connstr::app_name(name, "ddl");
         let result: Result<(), String> = block_on(async {
-            let (client, _conn) = remote_connect(&ci).await?;
+            let (client, _conn) = remote_connect(&ci, &ddl_app).await?;
             if drop_slot {
                 let _ = client
                     .execute("SELECT pg_drop_replication_slot($1)", &[&slot])
@@ -685,8 +689,9 @@ fn add_table(
     });
 
     // 2. Build PgConn: Local or Remote
+    let ddl_app = duckpipe_core::connstr::app_name(group, "ddl");
     let source = match group_conninfo {
-        Some(ref ci) => match PgConn::remote(ci) {
+        Some(ref ci) => match PgConn::remote(ci, &ddl_app) {
             Ok(c) => c,
             Err(e) => {
                 ereport!(
@@ -1005,9 +1010,10 @@ fn remove_table(source_table: &str, drop_target: Option<bool>) {
     let mut t_schema = None;
     let mut t_table = None;
     let mut group_conninfo: Option<String> = None;
+    let mut group_name_for_app = String::new();
 
     Spi::connect_mut(|client| {
-        // Get publication, target info, and conninfo
+        // Get publication, target info, conninfo, and group name
         let args = unsafe {
             [
                 DatumWithOid::new(schema.as_str(), PgBuiltInOids::TEXTOID.value()),
@@ -1016,7 +1022,7 @@ fn remove_table(source_table: &str, drop_target: Option<bool>) {
         };
         let result = client
             .select(
-                "SELECT g.publication, m.target_schema, m.target_table, g.conninfo \
+                "SELECT g.publication, m.target_schema, m.target_table, g.conninfo, g.name \
                  FROM duckpipe.table_mappings m \
                  JOIN duckpipe.sync_groups g ON m.group_id = g.id \
                  WHERE m.source_schema = $1 AND m.source_table = $2",
@@ -1030,6 +1036,7 @@ fn remove_table(source_table: &str, drop_target: Option<bool>) {
             t_schema = Some(r.get::<String>(2).unwrap().unwrap());
             t_table = Some(r.get::<String>(3).unwrap().unwrap());
             group_conninfo = r.get::<String>(4).unwrap();
+            group_name_for_app = r.get::<String>(5).unwrap().unwrap_or_default();
             break;
         }
 
@@ -1063,8 +1070,9 @@ fn remove_table(source_table: &str, drop_target: Option<bool>) {
 
     // Drop from publication (unified local/remote via PgConn)
     if let Some(ref pub_name) = publication {
+        let rm_ddl_app = duckpipe_core::connstr::app_name(&group_name_for_app, "ddl");
         let source = match &group_conninfo {
-            Some(ci) => match PgConn::remote(ci) {
+            Some(ci) => match PgConn::remote(ci, &rm_ddl_app) {
                 Ok(c) => c,
                 Err(e) => {
                     warning!(
@@ -1097,46 +1105,53 @@ REVOKE ALL ON FUNCTION duckpipe.move_table(TEXT, TEXT) FROM PUBLIC;
 fn move_table(source_table: &str, new_group: &str) {
     let (schema, table) = parse_source_table(source_table);
 
-    // Fetch old and new group publication names and conninfo for publication updates.
-    let (old_pub, old_ci, new_pub, new_ci): (String, Option<String>, String, Option<String>) =
-        Spi::connect(|client| {
-            let args = unsafe {
-                [
-                    DatumWithOid::new(schema.as_str(), PgBuiltInOids::TEXTOID.value()),
-                    DatumWithOid::new(table.as_str(), PgBuiltInOids::TEXTOID.value()),
-                    DatumWithOid::new(new_group, PgBuiltInOids::TEXTOID.value()),
-                ]
-            };
-            let result = client
-                .select(
-                    "SELECT og.publication, og.conninfo, ng.publication, ng.conninfo \
-                     FROM duckpipe.table_mappings m \
-                     JOIN duckpipe.sync_groups og ON m.group_id = og.id \
-                     CROSS JOIN duckpipe.sync_groups ng \
-                     WHERE m.source_schema = $1 AND m.source_table = $2 AND ng.name = $3",
-                    Some(1),
-                    &args,
-                )
-                .unwrap();
-            for r in result {
-                return (
-                    r.get::<String>(1).unwrap().unwrap(),
-                    r.get::<String>(2).unwrap(),
-                    r.get::<String>(3).unwrap().unwrap(),
-                    r.get::<String>(4).unwrap(),
-                );
-            }
-            ereport!(
-                ERROR,
-                PgSqlErrorCode::ERRCODE_UNDEFINED_OBJECT,
-                format!("Table mapping or target group '{}' not found", new_group)
+    // Fetch old and new group publication names, conninfo, and old group name.
+    let (old_pub, old_ci, new_pub, new_ci, old_group_name): (
+        String,
+        Option<String>,
+        String,
+        Option<String>,
+        String,
+    ) = Spi::connect(|client| {
+        let args = unsafe {
+            [
+                DatumWithOid::new(schema.as_str(), PgBuiltInOids::TEXTOID.value()),
+                DatumWithOid::new(table.as_str(), PgBuiltInOids::TEXTOID.value()),
+                DatumWithOid::new(new_group, PgBuiltInOids::TEXTOID.value()),
+            ]
+        };
+        let result = client
+            .select(
+                "SELECT og.publication, og.conninfo, ng.publication, ng.conninfo, og.name \
+                 FROM duckpipe.table_mappings m \
+                 JOIN duckpipe.sync_groups og ON m.group_id = og.id \
+                 CROSS JOIN duckpipe.sync_groups ng \
+                 WHERE m.source_schema = $1 AND m.source_table = $2 AND ng.name = $3",
+                Some(1),
+                &args,
+            )
+            .unwrap();
+        for r in result {
+            return (
+                r.get::<String>(1).unwrap().unwrap(),
+                r.get::<String>(2).unwrap(),
+                r.get::<String>(3).unwrap().unwrap(),
+                r.get::<String>(4).unwrap(),
+                r.get::<String>(5).unwrap().unwrap(),
             );
-        });
+        }
+        ereport!(
+            ERROR,
+            PgSqlErrorCode::ERRCODE_UNDEFINED_OBJECT,
+            format!("Table mapping or target group '{}' not found", new_group)
+        );
+    });
 
     // Drop from old group's publication (unified via PgConn)
     {
+        let old_ddl_app = duckpipe_core::connstr::app_name(&old_group_name, "ddl");
         let old_source = match &old_ci {
-            Some(ci) => PgConn::remote(ci).ok(),
+            Some(ci) => PgConn::remote(ci, &old_ddl_app).ok(),
             None => Some(PgConn::local()),
         };
         if let Some(src) = old_source {
@@ -1151,8 +1166,9 @@ fn move_table(source_table: &str, new_group: &str) {
 
     // Add to new group's publication (unified via PgConn)
     {
+        let ddl_app = duckpipe_core::connstr::app_name(new_group, "ddl");
         let new_source = match &new_ci {
-            Some(ci) => PgConn::remote(ci).ok(),
+            Some(ci) => PgConn::remote(ci, &ddl_app).ok(),
             None => Some(PgConn::local()),
         };
         if let Some(src) = new_source {

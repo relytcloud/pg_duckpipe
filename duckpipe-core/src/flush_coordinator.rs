@@ -103,6 +103,7 @@ struct BackpressureState {
 pub struct FlushCoordinator {
     pg_connstr: String,
     ducklake_schema: String,
+    group_name: String,
     threads: HashMap<String, FlushThreadEntry>,
     result_tx: mpsc::Sender<FlushThreadResult>,
     result_rx: mpsc::Receiver<FlushThreadResult>,
@@ -126,6 +127,7 @@ impl FlushCoordinator {
     pub fn new(
         pg_connstr: String,
         ducklake_schema: String,
+        group_name: String,
         flush_batch_threshold: i32,
         flush_interval_ms: i32,
         max_queued_changes: i32,
@@ -134,6 +136,7 @@ impl FlushCoordinator {
         FlushCoordinator {
             pg_connstr,
             ducklake_schema,
+            group_name,
             threads: HashMap::new(),
             result_tx: tx,
             result_rx: rx,
@@ -233,6 +236,7 @@ impl FlushCoordinator {
         let tx = self.result_tx.clone();
         let pg_connstr = self.pg_connstr.clone();
         let ducklake_schema = self.ducklake_schema.clone();
+        let group_name = self.group_name.clone();
         let bp = Arc::clone(&self.backpressure);
         let batch_threshold = self.flush_batch_threshold;
         let interval_ms = self.flush_interval_ms;
@@ -248,6 +252,7 @@ impl FlushCoordinator {
                     tx,
                     &pg_connstr,
                     &ducklake_schema,
+                    &group_name,
                     bp,
                     batch_threshold,
                     interval_ms,
@@ -574,6 +579,11 @@ impl FlushCoordinator {
     pub fn ducklake_schema(&self) -> &str {
         &self.ducklake_schema
     }
+
+    /// Get the sync group name.
+    pub fn group_name(&self) -> &str {
+        &self.group_name
+    }
 }
 
 impl Drop for FlushCoordinator {
@@ -598,6 +608,7 @@ fn flush_thread_main(
     result_tx: mpsc::Sender<FlushThreadResult>,
     pg_connstr: &str,
     ducklake_schema: &str,
+    group_name: &str,
     backpressure: Arc<BackpressureState>,
     batch_threshold: usize,
     flush_interval_ms: u64,
@@ -737,6 +748,7 @@ fn flush_thread_main(
                     meta,
                     pg_connstr,
                     ducklake_schema,
+                    group_name,
                     &result_tx,
                     &rt,
                 );
@@ -769,6 +781,7 @@ fn do_flush(
     meta: &QueueMeta,
     pg_connstr: &str,
     ducklake_schema: &str,
+    group_name: &str,
     result_tx: &mpsc::Sender<FlushThreadResult>,
     rt: &tokio::runtime::Runtime,
 ) {
@@ -801,6 +814,7 @@ fn do_flush(
                     meta.mapping_id,
                     &error_msg,
                     ERRORED_THRESHOLD,
+                    group_name,
                 ));
                 return;
             }
@@ -816,6 +830,7 @@ fn do_flush(
                 result.mapping_id,
                 result.applied_count,
                 last_lsn,
+                group_name,
             )) {
                 tracing::error!(
                     "pg_duckpipe: metrics update failed for {}: {}",
@@ -827,6 +842,7 @@ fn do_flush(
             let _ = rt.block_on(flush_worker::clear_error_on_success(
                 pg_connstr,
                 result.mapping_id,
+                group_name,
             ));
 
             let _ = result_tx.send(FlushThreadResult::Success {
@@ -850,6 +866,7 @@ fn do_flush(
                 meta.mapping_id,
                 &e,
                 ERRORED_THRESHOLD,
+                group_name,
             ));
         }
     }
