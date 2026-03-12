@@ -69,6 +69,7 @@
 - [x] Dedicated bgworker per group — one worker per sync group for full isolation (own FlushCoordinator, SnapshotManager, SlotState)
 - [x] Per-group NOTIFY channels (`duckpipe_wakeup_{group}`) — avoid thundering herd wakeups; per-group bgworker spawns its own LISTEN channel
 - [ ] Per-group GUC overrides — nullable config columns in `sync_groups`; NULL falls back to global GUC
+- [ ] Staged storage between WAL and DuckLake — persist changes into a durable intermediate delta/staging layer, then merge/rewrite into DuckLake in larger maintenance-friendly jobs so CDC durability is decoupled from DuckLake file proliferation
 - [x] `conninfo` column in sync_groups for remote PG support — group-level conninfo routes WAL replication, snapshots, and catalog queries to a remote PG while metadata and DuckLake targets stay local. `create_group(conninfo=>...)` creates slot+publication on remote, `add_table()` introspects remote pg_catalog for explicit DDL, `remove_table()`/`drop_group()` clean up remote objects. Shared `connstr` module extracted to `duckpipe-core/src/connstr.rs`.
 - [ ] Schema DDL sync (ALTER TABLE ADD/DROP COLUMN propagation)
 - [ ] Sync tables with no PK (ensure e2e EOS)
@@ -78,13 +79,14 @@
 ### Monitoring / Observability
 - [ ] `applied_lsn` stays NULL during SNAPSHOT/CATCHUP — should be set to `snapshot_lsn` after snapshot completes
 - [ ] `worker_state` not updated during snapshot processing — stale metrics while snapshots run
+- [ ] Flush runtime stats for fixed-interval scraping — expose per-table/group counters such as flush count, rows per flush, avg rows/flush, and recent flush timings so Prometheus-style systems can sample every 30s without reconstructing rates from logs
 
 ### Bugs
 - [x] Benchmark suite cleanup incomplete — orphaned mappings for sbtest2-4 remain after multi→single-table scenario transition; fixed: `prepare_env` now queries `duckpipe.status()` to remove ALL existing mappings + drops leftover sbtest tables beyond current scenario count
 
 ### Robustness
-- [ ] Missing index on `table_mappings.group_id` — FK column has no index; nearly every hot-path query filters by `group_id` (state checks, flush lookups, retry scans); also slows FK constraint checks on `sync_groups` DELETE
-- [ ] Snapshot failures have no retry backoff — risk of thrash on repeated failures
+- [x] Missing index on `table_mappings.group_id` — FK column has no index; nearly every hot-path query filters by `group_id` (state checks, flush lookups, retry scans); also slows FK constraint checks on `sync_groups` DELETE
+- [x] Snapshot failures have no retry backoff — risk of thrash on repeated failures; fixed via exponential backoff
 - [ ] Graceful handling of DuckLake schema drift (target table altered outside duckpipe)
 - [ ] Connection pooling for flush thread PG metadata updates
 - [ ] Regression tests for crash / error cases
