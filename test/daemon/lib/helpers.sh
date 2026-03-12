@@ -100,7 +100,8 @@ pg_stop_instance() {
 
 # ---------- Daemon Lifecycle ----------
 
-daemon_start() {
+# _daemon_launch [EXTRA_ARGS...] — internal: launch daemon with shared defaults.
+_daemon_launch() {
     local test_name="${CURRENT_TEST_NAME:-daemon}"
     DAEMON_LOG="${LOG_DIR}/${test_name}_daemon.log"
 
@@ -108,7 +109,6 @@ daemon_start() {
 
     "$DUCKPIPE_BIN" \
         --connstr "$connstr" \
-        --group default \
         --poll-interval 200 \
         --flush-interval 200 \
         --flush-batch-threshold 100 \
@@ -116,6 +116,10 @@ daemon_start() {
         >"$DAEMON_LOG" 2>&1 &
     DAEMON_PID=$!
     echo "$DAEMON_PID" > "${LOG_DIR}/daemon.pid"
+}
+
+daemon_start() {
+    _daemon_launch --group default "$@"
 
     # Give it a moment to start, then verify it's alive
     sleep 1
@@ -251,6 +255,109 @@ add_table() {
     local table="$1"
     local copy_data="${2:-false}"
     run_sql "SELECT duckpipe.add_table('public.${table}', NULL, 'default', ${copy_data});"
+}
+
+# ---------- REST API Helpers ----------
+
+API_PORT=${API_TEST_PORT:-9099}
+HTTP_CODE=""
+HTTP_BODY=""
+
+# daemon_start_api [EXTRA_ARGS...] — start daemon with REST API enabled.
+# Uses --api-port and no --group by default (unbound mode).
+daemon_start_api() {
+    _daemon_launch --api-port "$API_PORT" "$@"
+
+    # Wait for API to be ready
+    poll_api_ready 15
+    echo "  daemon started with API (PID $DAEMON_PID, port $API_PORT)"
+}
+
+# poll_api_ready [TIMEOUT] — wait for the API server to accept connections.
+poll_api_ready() {
+    local timeout=${1:-15}
+    local deadline=$((SECONDS + timeout))
+    while [ $SECONDS -lt $deadline ]; do
+        if curl -sf "http://localhost:${API_PORT}/health" > /dev/null 2>&1; then
+            return 0
+        fi
+        # Check if daemon is still alive
+        if ! kill -0 "$DAEMON_PID" 2>/dev/null; then
+            echo "FATAL: daemon exited before API was ready (PID $DAEMON_PID)"
+            cat "$DAEMON_LOG" || true
+            DAEMON_PID=""
+            rm -f "${LOG_DIR}/daemon.pid"
+            return 1
+        fi
+        sleep 0.5
+    done
+    echo "FATAL: API not ready after ${timeout}s"
+    cat "$DAEMON_LOG" || true
+    return 1
+}
+
+# _http_request METHOD URL [EXTRA_CURL_ARGS...] — internal: sets HTTP_CODE and HTTP_BODY.
+_http_request() {
+    local method="$1"; shift
+    local url="$1"; shift
+    local tmp
+    tmp=$(mktemp)
+    HTTP_CODE=$(curl -s -o "$tmp" -w '%{http_code}' -X "$method" "$@" "$url" 2>/dev/null || echo "000")
+    HTTP_BODY=$(cat "$tmp")
+    rm -f "$tmp"
+}
+
+# http_get URL — GET request, sets HTTP_BODY and HTTP_CODE.
+http_get() { _http_request GET "$1"; }
+
+# http_post URL [JSON_BODY] — POST request with optional JSON body.
+http_post() {
+    local url="$1"
+    local body="${2:-}"
+    if [ -n "$body" ]; then
+        _http_request POST "$url" -H 'Content-Type: application/json' -d "$body"
+    else
+        _http_request POST "$url"
+    fi
+}
+
+# http_delete URL — DELETE request.
+http_delete() { _http_request DELETE "$1"; }
+
+# assert_http_code EXPECTED [MSG] — assert HTTP_CODE matches expected.
+assert_http_code() {
+    local expected="$1"
+    local msg="${2:-HTTP status}"
+    assert_eq "$HTTP_CODE" "$expected" "$msg: expected $expected, got $HTTP_CODE"
+}
+
+# jq_field FIELD — extract a field from HTTP_BODY via jq.
+jq_field() {
+    echo "$HTTP_BODY" | jq -r "$1"
+}
+
+# poll_api ENDPOINT JQ_EXPR EXPECTED [TIMEOUT]
+# Poll a REST endpoint until jq expression matches expected value.
+poll_api() {
+    local endpoint="$1"
+    local jq_expr="$2"
+    local expected="$3"
+    local timeout="${4:-30}"
+
+    local url="http://localhost:${API_PORT}${endpoint}"
+    local deadline=$((SECONDS + timeout))
+    while [ $SECONDS -lt $deadline ]; do
+        local actual
+        actual=$(curl -sf "$url" 2>/dev/null | jq -r "$jq_expr" 2>/dev/null || echo "")
+        actual="$(echo "$actual" | tr -d '[:space:]')"
+        if [ "$actual" = "$expected" ]; then
+            return 0
+        fi
+        sleep 0.5
+    done
+
+    echo "  poll_api timeout on $endpoint: jq '$jq_expr' got '$(curl -sf "$url" 2>/dev/null | jq -r "$jq_expr" 2>/dev/null || echo '?')', expected '$expected'"
+    return 1
 }
 
 # ---------- Cleanup ----------
