@@ -13,3 +13,7 @@ duckpipe-core = { path = "../duckpipe-core" }
 clap.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros", "signal"] }
 tracing.workspace = true
+tokio-postgres.workspace = true
+axum.workspace = true
+serde.workspace = true
+serde_json.workspace = true
