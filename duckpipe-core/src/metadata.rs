@@ -249,14 +249,14 @@ impl<'a> MetadataClient<'a> {
         error_message: &str,
         backoff_secs: i64,
     ) -> Result<(), tokio_postgres::Error> {
-        let interval = format!("{} seconds", backoff_secs);
+        let backoff_f64 = backoff_secs as f64;
         self.client
             .execute(
                 "UPDATE duckpipe.table_mappings SET state = 'ERRORED', \
                  error_message = $1, \
-                 retry_at = now() + $3::interval \
+                 retry_at = now() + ($3 * interval '1 second') \
                  WHERE id = $2",
-                &[&error_message, &mapping_id, &interval],
+                &[&error_message, &mapping_id, &backoff_f64],
             )
             .await?;
         Ok(())

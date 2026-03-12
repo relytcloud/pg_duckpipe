@@ -1,8 +1,13 @@
 -- Test snapshot error recovery with exponential backoff
 --
 -- Scenario: force a snapshot that fails (target table missing), verify
--- consecutive_failures counting and error_message recording, then fix
--- the target and verify the snapshot self-heals.
+-- transition to ERRORED state with consecutive_failures and retry_at,
+-- then fix the target and trigger auto-retry back through SNAPSHOT to
+-- STREAMING.
+--
+-- This differs from the error_recovery test which covers flush (streaming)
+-- failures. This test specifically exercises the snapshot failure path:
+-- SNAPSHOT → (fail × 3) → ERRORED → auto-retry → SNAPSHOT → CATCHUP → STREAMING.
 -- Fast polling for quick feedback
 ALTER SYSTEM SET duckpipe.poll_interval = 100;
 SELECT pg_reload_conf();
@@ -52,26 +57,36 @@ SET state = 'SNAPSHOT',
     consecutive_failures = 0, retry_at = NULL,
     snapshot_duration_ms = NULL, snapshot_rows = NULL
 WHERE source_table = 'snap_err_src';
--- Step 4: Wait for 3+ consecutive snapshot failures
+-- Step 4: Wait for 3+ consecutive snapshot failures → ERRORED
 SELECT pg_sleep(5);
  pg_sleep 
 ----------
  
 (1 row)
 
--- Assert: failures counted, error message recorded
-SELECT consecutive_failures >= 3 AS enough_failures,
-       error_message LIKE '%not found%' AS error_mentions_not_found
+-- Assert: ERRORED state, failures >= 3, retry_at set.
+-- The error message must contain "not found in DuckLake catalog" — this string
+-- is specific to the snapshot code path (snapshot.rs), proving the ERRORED
+-- transition came from snapshot failures, not streaming/flush failures.
+SELECT state,
+       consecutive_failures >= 3 AS enough_failures,
+       error_message LIKE '%not found in DuckLake catalog%' AS is_snapshot_error,
+       retry_at IS NOT NULL AS has_retry_at
 FROM duckpipe.table_mappings
 WHERE source_table = 'snap_err_src';
- enough_failures | error_mentions_not_found 
------------------+--------------------------
- t               | t
+  state  | enough_failures | is_snapshot_error | has_retry_at 
+---------+-----------------+-------------------+--------------
+ ERRORED | t               | t                 | t
 (1 row)
 
 -- Step 5: Fix the problem — recreate the ducklake target
 CREATE TABLE public.snap_err_src_ducklake (LIKE snap_err_src) USING ducklake;
--- Step 6: Wait for snapshot to succeed now that target exists
+-- Step 6: Force immediate auto-retry by setting retry_at to now
+-- (avoids waiting for the 30s backoff timer)
+UPDATE duckpipe.table_mappings
+SET retry_at = now()
+WHERE source_table = 'snap_err_src';
+-- Step 7: Wait for auto-retry → SNAPSHOT → CATCHUP → STREAMING
 SELECT pg_sleep(4);
  pg_sleep 
 ----------
@@ -89,7 +104,7 @@ WHERE source_table = 'snap_err_src';
  t         | t                | t
 (1 row)
 
--- Step 7: Verify new data syncs after recovery
+-- Step 8: Verify new data syncs after recovery
 INSERT INTO snap_err_src VALUES (3, 'three');
 SELECT pg_sleep(2);
  pg_sleep 
