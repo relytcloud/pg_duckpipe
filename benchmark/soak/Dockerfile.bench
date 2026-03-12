@@ -1,0 +1,12 @@
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    sysbench postgresql-client python3 python3-pip bc && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /bench
+COPY lib.py /bench/
+COPY oltp_insert_heavy.lua /bench/
+COPY soak/ /bench/
+
+ENTRYPOINT ["python3", "/bench/soak_test.py"]

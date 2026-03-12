@@ -2,7 +2,7 @@
 # bench.sh — start a fresh DB and run the pg_duckpipe sysbench benchmark end-to-end.
 #
 # Usage:
-#   ./benchmark/bench.sh [options]
+#   ./benchmark/suite/bench.sh [options]
 #
 # Options (all optional, defaults shown):
 #   --threads N           sysbench writer threads  (default: 1)
@@ -19,7 +19,7 @@
 set -euo pipefail
 
 BENCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$(cd "$BENCH_DIR/.." && pwd)"
+REPO_DIR="$(cd "$BENCH_DIR/../.." && pwd)"
 
 # ── Defaults ────────────────────────────────────────────────────────────────
 THREADS=1

@@ -2,7 +2,7 @@
 # bench_suite.sh — run all 4 benchmark scenarios and produce an analysis report.
 #
 # Usage:
-#   ./benchmark/bench_suite.sh [options]
+#   ./benchmark/suite/bench_suite.sh [options]
 #
 # Options:
 #   --duration N   OLTP phase seconds per scenario (default: 30)

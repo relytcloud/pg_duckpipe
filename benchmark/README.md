@@ -9,10 +9,10 @@ Measures pg_duckpipe CDC throughput using [sysbench](https://github.com/akopytov
 brew install sysbench   # or: apt install sysbench
 
 # Run the default benchmark (1 thread, 30 s, 1 table x 100k rows, append-only)
-./benchmark/bench.sh
+./benchmark/suite/bench.sh
 
 # Customize
-./benchmark/bench.sh --threads 4 --duration 60 --table-size 100000 --workload oltp_read_write
+./benchmark/suite/bench.sh --threads 4 --duration 60 --table-size 100000 --workload oltp_read_write
 ```
 
 `bench.sh` starts a temporary PostgreSQL instance (port 5556), runs the benchmark, and prints results. No cleanup needed.
@@ -23,13 +23,13 @@ Run all 4 benchmark scenarios with a single command and get an automated analysi
 
 ```bash
 # Full suite (30s per scenario, ~5 min total)
-./benchmark/bench_suite.sh
+./benchmark/suite/bench_suite.sh
 
 # Quick smoke test (15s per scenario)
-./benchmark/bench_suite.sh --duration 15
+./benchmark/suite/bench_suite.sh --duration 15
 
 # View the generated report
-cat benchmark/results/report.md
+cat benchmark/suite/results/report.md
 ```
 
 ### Scenarios
@@ -43,7 +43,7 @@ cat benchmark/results/report.md
 
 ### Analysis Report
 
-The suite automatically generates `benchmark/results/report.md` containing:
+The suite automatically generates `benchmark/suite/results/report.md` containing:
 
 1. **Summary Table** — all scenarios side-by-side (snapshot rate, TPS, lag, catch-up, consistency)
 2. **Flush Performance** — per-scenario flush stats (count, avg/p50/p99 latency, rows/flush, phase breakdown)
@@ -54,7 +54,7 @@ The suite automatically generates `benchmark/results/report.md` containing:
 You can also run the analysis standalone on existing logs:
 
 ```bash
-python3 benchmark/analyze_results.py --results-dir benchmark/results
+python3 benchmark/suite/analyze_results.py --results-dir benchmark/suite/results
 ```
 
 ## Workloads
@@ -78,21 +78,21 @@ If you prefer to control each step:
 
 ```bash
 # Start a temporary PostgreSQL instance on port 5556
-./benchmark/start_db.sh
+./benchmark/suite/start_db.sh
 
 # Run benchmark (default: oltp_insert)
-python3 benchmark/run_sysbench.py \
+python3 benchmark/suite/run_sysbench.py \
   --db-url "host=localhost port=5556 user=postgres dbname=postgres"
 
 # Mixed workload with custom parameters
-python3 benchmark/run_sysbench.py \
+python3 benchmark/suite/run_sysbench.py \
   --workload oltp_read_write \
   --tables 4 --table-size 50000 \
   --threads 8 --duration 60 \
   --db-url "host=localhost port=5556 user=postgres dbname=postgres"
 
 # Stop
-./benchmark/stop_db.sh
+./benchmark/suite/stop_db.sh
 ```
 
 ### Consistency modes
@@ -108,10 +108,52 @@ Control post-run data verification with `--consistency-mode`:
 
 ## Duration
 
-Always use `--duration 30` (the default) or longer for results committed to `benchmark/results/report.md`.
+Always use `--duration 30` (the default) or longer for results committed to `benchmark/suite/results/report.md`.
 Shorter durations (e.g. 15s) are fine for smoke tests but produce unstable numbers —
 fewer flush cycles mean higher variance in latency percentiles and throughput measurements.
 
 ## Sample Results
 
-See `benchmark/results/report.md` for the latest full suite results.
+See `benchmark/suite/results/report.md` for the latest full suite results.
+
+## Soak Tests
+
+Long-running tests (hours) that catch problems invisible in short benchmarks: memory leaks, WAL slot growth, throughput degradation, and crash recovery bugs.
+
+```bash
+# 1-hour sustained insert (default)
+docker compose -f benchmark/soak/docker-compose.soak.yml up --build
+
+# 2-minute smoke test
+DURATION=120 docker compose -f benchmark/soak/docker-compose.soak.yml up --build
+
+# Pick a scenario
+SCENARIO=sustained-mixed DURATION=3600 docker compose -f benchmark/soak/docker-compose.soak.yml up --build
+
+# Teardown (removes DB volume)
+docker compose -f benchmark/soak/docker-compose.soak.yml down -v
+```
+
+### Scenarios
+
+| Scenario | Workload | Tables | Chaos | Tests for |
+|----------|----------|--------|-------|-----------|
+| `sustained-insert` | INSERT only | 4 | None | Baseline stability |
+| `sustained-mixed` | 90% INSERT + 10% UPDATE | 4 | None | Mixed DML correctness |
+| `multi-table-insert` | INSERT only | 8 | None | Flush scaling, commit contention |
+| `multi-table-mixed` | Mixed DML | 8 | None | Combined stress |
+| `table-lifecycle` | INSERT only | 4 | Remove/re-add tables every 2 min | Dynamic table add/remove |
+| `error-recovery` | INSERT only | 4 | Stop/start worker every 2 min | Crash recovery, WAL resumption |
+
+### Pass/Fail Criteria
+
+| Criterion | Threshold |
+|-----------|-----------|
+| Throughput CV | < 30% |
+| Permanent errors | None |
+| Final consistency | PASS (source = target row counts) |
+| Slot growth | < 1 MB/hr (tests > 1hr) |
+
+Results land in `benchmark/soak/soak_results/<scenario>_<timestamp>/` with `metrics.csv`, `events.log`, and `report.md`.
+
+For AI-assisted test execution, see [`benchmark/soak/RUNBOOK.md`](soak/RUNBOOK.md).

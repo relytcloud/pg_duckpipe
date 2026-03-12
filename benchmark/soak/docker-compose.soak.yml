@@ -1,0 +1,36 @@
+services:
+  db:
+    image: ${DB_IMAGE:-pgducklake/pgduckpipe:18-main}
+    platform: linux/amd64
+    ports:
+      - "${PORT:-5432}:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${PASSWORD:-duckdb}
+    volumes:
+      - soak_pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  bench:
+    build:
+      context: ..
+      dockerfile: soak/Dockerfile.bench
+    platform: linux/amd64
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DB_URL: "host=db port=5432 user=postgres password=${PASSWORD:-duckdb} dbname=postgres"
+      SOAK_SCENARIO: "${SCENARIO:-sustained-insert}"
+      SOAK_DURATION: "${DURATION:-3600}"
+    volumes:
+      - ./soak_results:/bench/soak_results
+    # Override to run monitor instead:
+    #   docker compose -f benchmark/soak/docker-compose.soak.yml run bench ./soak_monitor.sh
+
+volumes:
+  soak_pgdata:
