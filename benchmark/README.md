@@ -115,3 +115,45 @@ fewer flush cycles mean higher variance in latency percentiles and throughput me
 ## Sample Results
 
 See `benchmark/suite/results/report.md` for the latest full suite results.
+
+## Soak Tests
+
+Long-running tests (hours) that catch problems invisible in short benchmarks: memory leaks, WAL slot growth, throughput degradation, and crash recovery bugs.
+
+```bash
+# 1-hour sustained insert (default)
+docker compose -f benchmark/soak/docker-compose.soak.yml up --build
+
+# 2-minute smoke test
+DURATION=120 docker compose -f benchmark/soak/docker-compose.soak.yml up --build
+
+# Pick a scenario
+SCENARIO=sustained-mixed DURATION=3600 docker compose -f benchmark/soak/docker-compose.soak.yml up --build
+
+# Teardown (removes DB volume)
+docker compose -f benchmark/soak/docker-compose.soak.yml down -v
+```
+
+### Scenarios
+
+| Scenario | Workload | Tables | Chaos | Tests for |
+|----------|----------|--------|-------|-----------|
+| `sustained-insert` | INSERT only | 4 | None | Baseline stability |
+| `sustained-mixed` | 90% INSERT + 10% UPDATE | 4 | None | Mixed DML correctness |
+| `multi-table-insert` | INSERT only | 8 | None | Flush scaling, commit contention |
+| `multi-table-mixed` | Mixed DML | 8 | None | Combined stress |
+| `table-lifecycle` | INSERT only | 4 | Remove/re-add tables every 2 min | Dynamic table add/remove |
+| `error-recovery` | INSERT only | 4 | Stop/start worker every 2 min | Crash recovery, WAL resumption |
+
+### Pass/Fail Criteria
+
+| Criterion | Threshold |
+|-----------|-----------|
+| Throughput CV | < 30% |
+| Permanent errors | None |
+| Final consistency | PASS (source = target row counts) |
+| Slot growth | < 1 MB/hr (tests > 1hr) |
+
+Results land in `benchmark/soak/soak_results/<scenario>_<timestamp>/` with `metrics.csv`, `events.log`, and `report.md`.
+
+For AI-assisted test execution, see [`benchmark/soak/RUNBOOK.md`](soak/RUNBOOK.md).
