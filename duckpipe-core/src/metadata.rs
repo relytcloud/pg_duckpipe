@@ -671,6 +671,22 @@ impl<'a> MetadataClient<'a> {
         Ok(())
     }
 
+    /// Update per-table DuckDB memory usage (called once per sync cycle for observability).
+    pub async fn update_table_memory_bytes(
+        &self,
+        counts: &[(i32, i64)],
+    ) -> Result<(), tokio_postgres::Error> {
+        for &(mapping_id, bytes) in counts {
+            self.client
+                .execute(
+                    "UPDATE duckpipe.table_mappings SET duckdb_memory_bytes = $1 WHERE id = $2",
+                    &[&bytes, &mapping_id],
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
     /// Update worker runtime state (called once per sync cycle for observability).
     /// Upserts into worker_state keyed by group_id.
     pub async fn update_worker_state(

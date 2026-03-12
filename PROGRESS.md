@@ -32,7 +32,7 @@
 - [x] Mixed DML correctness — flush DELETE used all-column WHERE instead of PK-only; fixed by caching `pk_key_attrs` per relation
 
 ### Observability
-- [x] `status()` SRF: `consecutive_failures`, `retry_at`, `applied_lsn`, `queued_changes`, `snapshot_duration_ms`, `snapshot_rows`
+- [x] `status()` SRF: `consecutive_failures`, `retry_at`, `applied_lsn`, `queued_changes`, `snapshot_duration_ms`, `snapshot_rows`, `duckdb_memory_bytes`
 - [x] `worker_status()` SRF: `total_queued_changes`, `is_backpressured`
 - [x] Standardized logging: shared `init_subscriber`, all output via `tracing` macros
 - [x] `rows_synced` credited during snapshot
@@ -68,7 +68,7 @@
 - [ ] Daemon REST API — expose monitoring/control endpoints (status, health, metrics) from the standalone daemon binary so operators can integrate with orchestration and alerting without a PG connection
 - [x] Dedicated bgworker per group — one worker per sync group for full isolation (own FlushCoordinator, SnapshotManager, SlotState)
 - [x] Per-group NOTIFY channels (`duckpipe_wakeup_{group}`) — avoid thundering herd wakeups; per-group bgworker spawns its own LISTEN channel
-- [ ] Per-group GUC overrides — nullable config columns in `sync_groups`; NULL falls back to global GUC
+- [ ] Per-group config (`sync_groups.config JSONB`) — persistent per-group settings accessible from both bgworker and daemon modes; SQL API `set_group_config(group, key, value)` / `get_group_config(group)`; initial keys: `duckdb_memory_limit` (default '256MB'), `duckdb_threads` (default 1); future: migrate `flush_interval_ms`, `flush_batch_threshold`, `max_queued_changes` from GUCs; NULL/absent keys fall back to global defaults
 - [ ] Staged storage between WAL and DuckLake — persist changes into a durable intermediate delta/staging layer, then merge/rewrite into DuckLake in larger maintenance-friendly jobs so CDC durability is decoupled from DuckLake file proliferation
 - [x] `conninfo` column in sync_groups for remote PG support — group-level conninfo routes WAL replication, snapshots, and catalog queries to a remote PG while metadata and DuckLake targets stay local. `create_group(conninfo=>...)` creates slot+publication on remote, `add_table()` introspects remote pg_catalog for explicit DDL, `remove_table()`/`drop_group()` clean up remote objects. Shared `connstr` module extracted to `duckpipe-core/src/connstr.rs`.
 - [ ] Schema DDL sync (ALTER TABLE ADD/DROP COLUMN propagation)
@@ -77,6 +77,7 @@
 - [ ] CI: run `cargo test` for unit tests (e.g. `connstr` module) — currently only `make installcheck` regression tests are in CI
 
 ### Monitoring / Observability
+- [ ] Prometheus-compatible metrics endpoint — expose runtime metrics (`duckdb_memory_bytes`, `rows_synced`, `queued_changes`, flush latencies, etc.) as time-series counters/gauges for scraping; `status()` is a point-in-time snapshot view, not suited for time-series observability. Daemon: HTTP `/metrics` endpoint; bgworker: `pg_stat` integration or metrics table with timestamps
 - [ ] `applied_lsn` stays NULL during SNAPSHOT/CATCHUP — should be set to `snapshot_lsn` after snapshot completes
 - [ ] `worker_state` not updated during snapshot processing — stale metrics while snapshots run
 - [ ] Flush runtime stats for fixed-interval scraping — expose per-table/group counters such as flush count, rows per flush, avg rows/flush, and recent flush timings so Prometheus-style systems can sample every 30s without reconstructing rates from logs
@@ -88,5 +89,6 @@
 - [x] Missing index on `table_mappings.group_id` — FK column has no index; nearly every hot-path query filters by `group_id` (state checks, flush lookups, retry scans); also slows FK constraint checks on `sync_groups` DELETE
 - [x] Snapshot failures have no retry backoff — risk of thrash on repeated failures; fixed via exponential backoff
 - [ ] Graceful handling of DuckLake schema drift (target table altered outside duckpipe)
+- [ ] Unbounded DuckDB memory — no `memory_limit` set per FlushWorker; N tables × default limit (~80% RAM each) is theoretically unbounded; depends on per-group config (`duckdb_memory_limit`)
 - [ ] Connection pooling for flush thread PG metadata updates
 - [ ] Regression tests for crash / error cases

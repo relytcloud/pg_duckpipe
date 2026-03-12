@@ -1142,6 +1142,12 @@ pub async fn run_group_sync_cycle(
         let _ = meta.update_table_queued_changes(&pending_counts).await;
     }
 
+    // Update per-table DuckDB memory usage
+    let memory_counts = coordinator.table_memory_bytes();
+    if !memory_counts.is_empty() {
+        let _ = meta.update_table_memory_bytes(&memory_counts).await;
+    }
+
     // Clean up metadata connection
     drop(client);
     let _ = conn_handle.await;
