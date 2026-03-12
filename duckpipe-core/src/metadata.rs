@@ -6,6 +6,14 @@ use tokio_postgres::Client;
 
 use crate::types::{format_lsn, parse_lsn, GroupMode, SyncGroup, TableMapping};
 
+/// Maximum consecutive failures before transitioning to ERRORED with backoff.
+pub const ERRORED_THRESHOLD: i32 = 3;
+
+/// Compute exponential backoff: 30s * 2^(failures - threshold), capped at ~32 min.
+pub fn compute_backoff_secs(failure_count: i32, threshold: i32) -> i64 {
+    30i64 * (1i64 << (failure_count - threshold).min(6) as u32)
+}
+
 /// Async metadata client wrapping a tokio-postgres connection.
 pub struct MetadataClient<'a> {
     client: &'a Client,
@@ -241,17 +249,36 @@ impl<'a> MetadataClient<'a> {
         error_message: &str,
         backoff_secs: i64,
     ) -> Result<(), tokio_postgres::Error> {
-        let interval = format!("{} seconds", backoff_secs);
+        let backoff_f64 = backoff_secs as f64;
         self.client
             .execute(
                 "UPDATE duckpipe.table_mappings SET state = 'ERRORED', \
                  error_message = $1, \
-                 retry_at = now() + $3::interval \
+                 retry_at = now() + ($3 * interval '1 second') \
                  WHERE id = $2",
-                &[&error_message, &mapping_id, &interval],
+                &[&error_message, &mapping_id, &backoff_f64],
             )
             .await?;
         Ok(())
+    }
+
+    /// Record error, increment consecutive failures, and conditionally transition to
+    /// ERRORED with exponential backoff. Returns the new failure count.
+    pub async fn record_failure_with_backoff(
+        &self,
+        mapping_id: i32,
+        error_message: &str,
+        errored_threshold: i32,
+    ) -> Result<i32, tokio_postgres::Error> {
+        let _ = self.record_error_message(mapping_id, error_message).await;
+        let count = self.increment_consecutive_failures(mapping_id).await?;
+        if count >= errored_threshold {
+            let backoff = compute_backoff_secs(count, errored_threshold);
+            let _ = self
+                .set_errored_with_retry(mapping_id, error_message, backoff)
+                .await;
+        }
+        Ok(count)
     }
 
     /// Get tables in ERRORED state whose retry_at has passed.
@@ -296,17 +323,25 @@ impl<'a> MetadataClient<'a> {
             .collect())
     }
 
-    /// Auto-retry: transition ERRORED table back to STREAMING, clear error and failures.
-    pub async fn retry_errored_table(&self, mapping_id: i32) -> Result<(), tokio_postgres::Error> {
-        self.client
-            .execute(
-                "UPDATE duckpipe.table_mappings SET state = 'STREAMING', \
+    /// Auto-retry: transition ERRORED table back to SNAPSHOT (if never snapshotted) or
+    /// STREAMING, clear error and failures. Returns the new state, or `None` if the
+    /// row was not in ERRORED state (race / already resolved).
+    pub async fn retry_errored_table(
+        &self,
+        mapping_id: i32,
+    ) -> Result<Option<String>, tokio_postgres::Error> {
+        let rows = self
+            .client
+            .query(
+                "UPDATE duckpipe.table_mappings SET \
+                 state = CASE WHEN snapshot_lsn IS NULL THEN 'SNAPSHOT' ELSE 'STREAMING' END, \
                  error_message = NULL, consecutive_failures = 0, retry_at = NULL \
-                 WHERE id = $1",
+                 WHERE id = $1 AND state = 'ERRORED' \
+                 RETURNING state",
                 &[&mapping_id],
             )
             .await?;
-        Ok(())
+        Ok(rows.first().map(|r| r.get::<_, String>(0)))
     }
 
     /// Update source schema and table name (e.g., after a table rename detected via OID match).
@@ -607,7 +642,8 @@ impl<'a> MetadataClient<'a> {
             .execute(
                 "UPDATE duckpipe.table_mappings SET state = 'CATCHUP', \
                  snapshot_lsn = $1::text::pg_lsn, \
-                 snapshot_duration_ms = $2, snapshot_rows = $3 \
+                 snapshot_duration_ms = $2, snapshot_rows = $3, \
+                 consecutive_failures = 0, error_message = NULL \
                  WHERE id = $4",
                 &[&lsn_str, &duration_ms_i64, &snapshot_rows_i64, &mapping_id],
             )

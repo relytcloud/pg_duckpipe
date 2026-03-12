@@ -47,15 +47,12 @@ pub async fn update_error_state(
         .map_err(|e| format!("error_state connect: {}", e))?;
 
     let meta = MetadataClient::new(&client);
-    let _ = meta.record_error_message(mapping_id, error).await;
-
-    if let Ok(count) = meta.increment_consecutive_failures(mapping_id).await {
+    if let Ok(count) = meta
+        .record_failure_with_backoff(mapping_id, error, errored_threshold)
+        .await
+    {
         if count >= errored_threshold {
-            // Exponential backoff: 30s * 2^(count - threshold)
-            let backoff = 30i64 * (1i64 << (count - errored_threshold).min(6) as u32);
-            let _ = meta
-                .set_errored_with_retry(mapping_id, error, backoff)
-                .await;
+            let backoff = crate::metadata::compute_backoff_secs(count, errored_threshold);
             tracing::warn!(
                 "pg_duckpipe: mapping {} transitioned to ERRORED after {} failures, retry in {}s",
                 mapping_id,

@@ -16,7 +16,7 @@ use crate::decoder::{
     extract_key_values, parse_relation_message, parse_tuple_data, read_byte, read_i32, read_i64,
 };
 use crate::flush_coordinator::{FlushCoordinator, FlushThreadResult};
-use crate::metadata::MetadataClient;
+use crate::metadata::{compute_backoff_secs, MetadataClient, ERRORED_THRESHOLD};
 use crate::slot_consumer::SlotConsumer;
 use crate::snapshot_manager::SnapshotManager;
 use crate::types::{Change, ChangeType, RelCacheEntry, SyncGroup, TableMapping, Value};
@@ -504,28 +504,43 @@ async fn run_heartbeat(
     // 2. Auto-retry ERRORED tables whose retry_at has passed.
     if let Ok(retryable) = meta.get_retryable_errored_tables(group.id).await {
         for table in &retryable {
-            if let Err(e) = meta.retry_errored_table(table.id).await {
-                tracing::error!(
-                    "pg_duckpipe: failed to retry errored table {}.{}: {}",
-                    table.source_schema,
-                    table.source_table,
-                    e
-                );
-            } else {
-                tracing::info!(
-                    "pg_duckpipe: auto-retrying errored table {}.{}",
-                    table.source_schema,
-                    table.source_table
-                );
-                // Mirror ERRORED → STREAMING in the rel_cache so routing resumes
-                // immediately without waiting for the next periodic refresh.
-                for cached in rel_cache.values_mut() {
-                    if let Some(ref mut mapping) = cached.mapping {
-                        if mapping.id == table.id {
-                            mapping.state = "STREAMING".to_string();
-                            break;
+            match meta.retry_errored_table(table.id).await {
+                Err(e) => {
+                    tracing::error!(
+                        "pg_duckpipe: failed to retry errored table {}.{}: {}",
+                        table.source_schema,
+                        table.source_table,
+                        e
+                    );
+                }
+                Ok(None) => {
+                    // Row no longer in ERRORED state (race or manually resolved)
+                    tracing::debug!(
+                        "pg_duckpipe: skipping retry for {}.{} (no longer ERRORED)",
+                        table.source_schema,
+                        table.source_table
+                    );
+                }
+                Ok(Some(new_state)) => {
+                    tracing::info!(
+                        "pg_duckpipe: auto-retrying errored table {}.{} → {}",
+                        table.source_schema,
+                        table.source_table,
+                        new_state
+                    );
+                    if new_state == "STREAMING" {
+                        // Mirror ERRORED → STREAMING in the rel_cache so routing resumes
+                        // immediately without waiting for the next periodic refresh.
+                        for cached in rel_cache.values_mut() {
+                            if let Some(ref mut mapping) = cached.mapping {
+                                if mapping.id == table.id {
+                                    mapping.state = "STREAMING".to_string();
+                                    break;
+                                }
+                            }
                         }
                     }
+                    // SNAPSHOT retries need no rel_cache update — snapshot_manager picks them up
                 }
             }
         }
@@ -861,13 +876,37 @@ pub async fn run_group_sync_cycle(
                 coordinator.unpause_table(&target_key);
             }
             Err(e) => {
-                let _ = meta.record_error_message(snap.task_id, e).await;
-                tracing::warn!(
-                    "DuckPipe: snapshot failed for {}.{}: {}",
-                    snap.source_schema,
-                    snap.source_table,
-                    e
-                );
+                match meta
+                    .record_failure_with_backoff(snap.task_id, e, ERRORED_THRESHOLD)
+                    .await
+                {
+                    Ok(count) if count >= ERRORED_THRESHOLD => {
+                        let backoff = compute_backoff_secs(count, ERRORED_THRESHOLD);
+                        tracing::warn!(
+                            "DuckPipe: snapshot for {}.{} → ERRORED after {} failures, retry in {}s",
+                            snap.source_schema, snap.source_table, count, backoff
+                        );
+                    }
+                    Ok(count) => {
+                        tracing::warn!(
+                            "DuckPipe: snapshot failed for {}.{} ({}/{}): {}",
+                            snap.source_schema,
+                            snap.source_table,
+                            count,
+                            ERRORED_THRESHOLD,
+                            e
+                        );
+                    }
+                    Err(db_err) => {
+                        tracing::warn!(
+                            "DuckPipe: snapshot failed for {}.{}: {} (failure tracking error: {})",
+                            snap.source_schema,
+                            snap.source_table,
+                            e,
+                            db_err
+                        );
+                    }
+                }
             }
         }
     }
