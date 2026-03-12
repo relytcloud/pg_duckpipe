@@ -750,7 +750,7 @@ loop {  // outer: wait for group binding
 }
 ```
 
-Key difference from bgworker: uses `SlotConnectParams::Tcp` instead of `::Unix`. Transient metrics (flush_count, flush_duration, queued_changes) are tracked in `FlushCoordinator` in-process rather than in PG shared memory; a daemon HTTP `/metrics` endpoint is planned but not yet implemented.
+Key difference from bgworker: uses `SlotConnectParams::Tcp` instead of `::Unix`. Transient metrics (flush_count, flush_duration, queued_changes) are tracked in `FlushCoordinator` in-process and cached in `AppState::metrics_cache` after each sync cycle. The `GET /metrics` endpoint reads this cache and merges with PG persisted data, matching the same JSON shape as the PG `duckpipe.metrics()` function.
 
 ---
 

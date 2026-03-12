@@ -651,64 +651,6 @@ impl<'a> MetadataClient<'a> {
         Ok(())
     }
 
-    /// Update per-table queued_changes (called once per sync cycle for observability).
-    ///
-    /// Sets `queued_changes` on each row to the current in-flight change count
-    /// (shared queue + local accumulator).  Best-effort — errors are logged but
-    /// not propagated, as this is purely diagnostic.
-    pub async fn update_table_queued_changes(
-        &self,
-        counts: &[(i32, i64)],
-    ) -> Result<(), tokio_postgres::Error> {
-        for &(mapping_id, count) in counts {
-            self.client
-                .execute(
-                    "UPDATE duckpipe.table_mappings SET queued_changes = $1 WHERE id = $2",
-                    &[&count, &mapping_id],
-                )
-                .await?;
-        }
-        Ok(())
-    }
-
-    /// Update per-table DuckDB memory usage (called once per sync cycle for observability).
-    pub async fn update_table_memory_bytes(
-        &self,
-        counts: &[(i32, i64)],
-    ) -> Result<(), tokio_postgres::Error> {
-        for &(mapping_id, bytes) in counts {
-            self.client
-                .execute(
-                    "UPDATE duckpipe.table_mappings SET duckdb_memory_bytes = $1 WHERE id = $2",
-                    &[&bytes, &mapping_id],
-                )
-                .await?;
-        }
-        Ok(())
-    }
-
-    /// Update worker runtime state (called once per sync cycle for observability).
-    /// Upserts into worker_state keyed by group_id.
-    pub async fn update_worker_state(
-        &self,
-        group_id: i32,
-        total_queued_changes: i64,
-        is_backpressured: bool,
-    ) -> Result<(), tokio_postgres::Error> {
-        self.client
-            .execute(
-                "INSERT INTO duckpipe.worker_state (group_id, total_queued_changes, is_backpressured, updated_at) \
-                 VALUES ($1, $2, $3, now()) \
-                 ON CONFLICT (group_id) DO UPDATE SET \
-                 total_queued_changes = EXCLUDED.total_queued_changes, \
-                 is_backpressured = EXCLUDED.is_backpressured, \
-                 updated_at = EXCLUDED.updated_at",
-                &[&group_id, &total_queued_changes, &is_backpressured],
-            )
-            .await?;
-        Ok(())
-    }
-
     /// Batch-fetch `(enabled, state)` for a set of mapping IDs.
     ///
     /// Used for the periodic refresh of externally-mutable fields without

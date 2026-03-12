@@ -483,13 +483,14 @@ fn drop_group(name: &str, drop_slot: bool) {
     let mut pub_name = String::new();
     let mut slot = String::new();
     let mut group_conninfo: Option<String> = None;
+    let mut group_id: Option<i32> = None;
 
     Spi::connect_mut(|client| {
-        // Get publication, slot_name, conninfo
+        // Get publication, slot_name, conninfo, id
         let args = unsafe { [DatumWithOid::new(name, PgBuiltInOids::TEXTOID.value())] };
         let row = client
             .select(
-                "SELECT publication, slot_name, conninfo FROM duckpipe.sync_groups WHERE name = $1",
+                "SELECT publication, slot_name, conninfo, id FROM duckpipe.sync_groups WHERE name = $1",
                 None,
                 &args,
             )
@@ -507,6 +508,7 @@ fn drop_group(name: &str, drop_slot: bool) {
             pub_name = r.get::<String>(1).unwrap().unwrap();
             slot = r.get::<String>(2).unwrap().unwrap();
             group_conninfo = r.get::<String>(3).unwrap();
+            group_id = r.get::<i32>(4).unwrap();
             found = true;
             break;
         }
@@ -564,6 +566,11 @@ fn drop_group(name: &str, drop_slot: bool) {
             // Best-effort cleanup — warn but don't fail
             warning!("Failed to clean up remote objects: {}", e);
         }
+    }
+
+    // Clear SHM slot for dropped group
+    if let Some(gid) = group_id {
+        crate::clear_shmem_group_slot(gid);
     }
 }
 
@@ -1011,9 +1018,10 @@ fn remove_table(source_table: &str, drop_target: Option<bool>) {
     let mut t_table = None;
     let mut group_conninfo: Option<String> = None;
     let mut group_name_for_app = String::new();
+    let mut mapping_id: Option<i32> = None;
 
     Spi::connect_mut(|client| {
-        // Get publication, target info, conninfo, and group name
+        // Get publication, target info, conninfo, group name, and mapping id
         let args = unsafe {
             [
                 DatumWithOid::new(schema.as_str(), PgBuiltInOids::TEXTOID.value()),
@@ -1022,7 +1030,7 @@ fn remove_table(source_table: &str, drop_target: Option<bool>) {
         };
         let result = client
             .select(
-                "SELECT g.publication, m.target_schema, m.target_table, g.conninfo, g.name \
+                "SELECT g.publication, m.target_schema, m.target_table, g.conninfo, g.name, m.id \
                  FROM duckpipe.table_mappings m \
                  JOIN duckpipe.sync_groups g ON m.group_id = g.id \
                  WHERE m.source_schema = $1 AND m.source_table = $2",
@@ -1037,6 +1045,7 @@ fn remove_table(source_table: &str, drop_target: Option<bool>) {
             t_table = Some(r.get::<String>(3).unwrap().unwrap());
             group_conninfo = r.get::<String>(4).unwrap();
             group_name_for_app = r.get::<String>(5).unwrap().unwrap_or_default();
+            mapping_id = r.get::<i32>(6).unwrap();
             break;
         }
 
@@ -1090,6 +1099,11 @@ fn remove_table(source_table: &str, drop_target: Option<bool>) {
             quote_ident(&schema),
             quote_ident(&table)
         ));
+    }
+
+    // Clear SHM slot for removed table
+    if let Some(mid) = mapping_id {
+        crate::clear_shmem_table_slot(mid);
     }
 }
 
@@ -1467,12 +1481,8 @@ fn status() -> TableIterator<
         name!(flush_duration_ms, i64),
     ),
 > {
-    // Read SHM metrics and build lookup map by mapping_id
-    let shm_metrics = crate::read_shmem_table_metrics();
-    let shm_map: std::collections::HashMap<i32, (i64, i64, i64, i64)> = shm_metrics
-        .into_iter()
-        .map(|(id, queued, mem, fc, fd)| (id, (queued, mem, fc, fd)))
-        .collect();
+    // Read SHM metrics keyed by mapping_id
+    let shm_map = crate::read_shmem_table_metrics();
 
     let mut rows = Vec::new();
 
@@ -1555,12 +1565,8 @@ fn worker_status() -> TableIterator<
         name!(is_backpressured, bool),
     ),
 > {
-    // Read group metrics from SHM and build lookup by group_id
-    let shm_groups = crate::read_shmem_group_metrics();
-    let shm_map: std::collections::HashMap<i32, (i64, bool)> = shm_groups
-        .into_iter()
-        .map(|(id, queued, bp)| (id, (queued, bp)))
-        .collect();
+    // Read group metrics from SHM keyed by group_id
+    let shm_map = crate::read_shmem_group_metrics();
 
     let mut rows = Vec::new();
 
@@ -1593,18 +1599,9 @@ AS 'MODULE_PATHNAME', '@FUNCTION_NAME@'
 LANGUAGE C STRICT;
 ")]
 fn metrics() -> String {
-    // Read in-memory metrics from SHM
-    let shm_tables = crate::read_shmem_table_metrics();
-    let shm_table_map: std::collections::HashMap<i32, (i64, i64, i64, i64)> = shm_tables
-        .into_iter()
-        .map(|(id, queued, mem, fc, fd)| (id, (queued, mem, fc, fd)))
-        .collect();
-
-    let shm_groups = crate::read_shmem_group_metrics();
-    let shm_group_map: std::collections::HashMap<i32, (i64, bool)> = shm_groups
-        .into_iter()
-        .map(|(id, queued, bp)| (id, (queued, bp)))
-        .collect();
+    // Read in-memory metrics from SHM (already keyed by id)
+    let shm_table_map = crate::read_shmem_table_metrics();
+    let shm_group_map = crate::read_shmem_group_metrics();
 
     // Query persisted metrics from PG
     let mut table_entries = Vec::new();

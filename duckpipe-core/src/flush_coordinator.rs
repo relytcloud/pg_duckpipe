@@ -356,6 +356,30 @@ impl FlushCoordinator {
         result
     }
 
+    /// Return all per-table metrics combined in a single pass.
+    ///
+    /// Returns `(mapping_id, queued_changes, memory_bytes, flush_count, flush_duration_ms)`.
+    /// Eliminates the need for callers to call `table_pending_counts()`,
+    /// `table_memory_bytes()`, and `table_flush_metrics()` separately and join by mapping_id.
+    pub fn table_combined_metrics(&self) -> Vec<(i32, i64, i64, i64, i64)> {
+        self.threads
+            .values()
+            .map(|entry| {
+                let shared = entry.queue_handle.inner.lock().unwrap().changes.len() as i64;
+                let local = entry.pending_local.load(Ordering::Relaxed);
+                let mid = entry.mapping_id;
+                let mem = self.per_table_memory.get(&mid).copied().unwrap_or(0);
+                let fc = self.per_table_flush_count.get(&mid).copied().unwrap_or(0);
+                let fd = self
+                    .per_table_flush_duration
+                    .get(&mid)
+                    .copied()
+                    .unwrap_or(0);
+                (mid, shared + local, mem, fc, fd)
+            })
+            .collect()
+    }
+
     /// Compute the minimum applied LSN across all tables tracked in `per_table_lsn`.
     ///
     /// Returns 0 if:

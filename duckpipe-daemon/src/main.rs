@@ -272,6 +272,13 @@ async fn run_sync_loop(
                 result = service::run_group_sync_cycle(config, &group_name, &mut coordinator, slot_params, &mut consumer, &mut snapshot_manager) => {
                     match result {
                         Ok(any_work) => {
+                            // Update cached metrics for HTTP /metrics endpoint
+                            {
+                                let mut cache = state.metrics_cache.lock().await;
+                                cache.tables = coordinator.table_combined_metrics();
+                                cache.group = (coordinator.total_queued(), coordinator.is_backpressured());
+                            }
+
                             if !any_work {
                                 snapshot_manager.sleep_unless_snapshot_ready(poll_interval).await;
                             }

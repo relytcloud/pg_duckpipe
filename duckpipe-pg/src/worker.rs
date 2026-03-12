@@ -1,7 +1,6 @@
 use pgrx::datum::DatumWithOid;
 use pgrx::pg_sys::panic::CaughtError;
 use pgrx::prelude::*;
-use std::collections::HashMap;
 use std::ffi::CString;
 use std::sync::Arc;
 
@@ -289,22 +288,11 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
                     .await
                     {
                         Ok(any_work) => {
-                            // Write metrics to shared memory after each sync cycle
-                            crate::update_shmem_group_metrics(
-                                group_id,
-                                coord.total_queued(),
-                                coord.is_backpressured(),
+                            // Write all metrics to SHM in a single lock acquisition
+                            crate::write_shmem_metrics(
+                                (group_id, coord.total_queued(), coord.is_backpressured()),
+                                &coord.table_combined_metrics(),
                             );
-                            let pending_counts = coord.table_pending_counts();
-                            let memory_map: HashMap<i32, i64> =
-                                coord.table_memory_bytes().into_iter().collect();
-                            let flush_map: HashMap<i32, (i64, i64)> =
-                                coord.table_flush_metrics().into_iter().map(|(id, c, d)| (id, (c, d))).collect();
-                            for (mapping_id, queued) in &pending_counts {
-                                let mem = memory_map.get(mapping_id).copied().unwrap_or(0);
-                                let (fc, fd) = flush_map.get(mapping_id).copied().unwrap_or((0, 0));
-                                crate::update_shmem_table_metrics(*mapping_id, *queued, mem, fc, fd);
-                            }
 
                             if should_shutdown() {
                                 break;

@@ -172,7 +172,9 @@ Output structure:
     "is_backpressured": false
   }]
 }
-| `updated_at` | Timestamp of last worker state update |
+```
+
+The same JSON structure is available from the daemon via `GET /metrics` (see [Daemon REST API](#daemon-rest-api) below).
 
 ### Table Listing
 
@@ -238,3 +240,27 @@ By default, `add_table('public.orders')` creates target `public.orders_ducklake`
 ```sql
 SELECT duckpipe.add_table('public.orders', 'analytics.orders_columnar');
 ```
+
+## Daemon REST API
+
+The standalone daemon (`duckpipe`) exposes an HTTP REST API on `--api-port` (default 8080). Key endpoints:
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/health` | GET | Health check (uptime, group binding, lock status) |
+| `/status` | GET | Per-table status + worker state + group info |
+| `/metrics` | GET | Full metrics snapshot (same JSON shape as `duckpipe.metrics()`) |
+| `/groups` | POST | Bind daemon to a sync group |
+| `/groups` | DELETE | Unbind daemon from current group |
+| `/tables` | GET | List table mappings for bound group |
+| `/tables` | POST | Add table to bound group |
+| `/tables/{source_table}` | DELETE | Remove table from bound group |
+| `/tables/{source_table}/resync` | POST | Re-snapshot a table |
+
+### Daemon Metrics
+
+```bash
+curl http://localhost:8080/metrics
+```
+
+Returns the same JSON structure as the PG `duckpipe.metrics()` function, merging in-process FlushCoordinator metrics with PG persisted data.
