@@ -1,28 +1,14 @@
 # Soak Test Runbook (for AI agents)
 
-Instructions for running pg_duckpipe soak tests on a remote Linux server.
+Step-by-step instructions for running pg_duckpipe soak tests locally or on a remote server.
 
 ## Prerequisites
 
-- Remote Linux server with Docker and Docker Compose installed
-- SSH access: `ssh user@<host>`
-- Server must be able to pull from Docker Hub (`pgducklake/pgduckpipe:18-main`)
+- Docker and Docker Compose installed
+- For remote: SSH access (`ssh user@<host>`)
+- Network access to Docker Hub (`pgducklake/pgduckpipe:18-main`)
 
-## Step 1: Copy files to server
-
-```bash
-scp -r benchmark/ user@host:/tmp/pg_duckpipe_bench/
-```
-
-Only the `benchmark/` directory is needed. The Docker image contains pg_duckpipe.
-
-## Step 2: Run the soak test
-
-```bash
-ssh user@host "cd /tmp/pg_duckpipe_bench && \
-  SCENARIO=sustained-insert DURATION=3600 \
-  docker compose -f benchmark/soak/docker-compose.soak.yml up --build 2>&1"
-```
+## Configuration
 
 ### Environment variables
 
@@ -51,9 +37,62 @@ ssh user@host "cd /tmp/pg_duckpipe_bench && \
 | Standard | `DURATION=3600` (1 hr) |
 | Full soak | `DURATION=14400` (4 hr) |
 
-## Step 3: Monitor progress
+---
 
-The test prints a live dashboard to stdout. To check from another terminal:
+## Option A: Local Run
+
+Run directly from the repo root. Results write to `benchmark/soak/soak_results/`.
+
+### 1. Run
+
+```bash
+SCENARIO=sustained-insert DURATION=3600 \
+  docker compose -f benchmark/soak/docker-compose.soak.yml up --build
+```
+
+### 2. Monitor (from another terminal)
+
+```bash
+# Container logs
+docker compose -f benchmark/soak/docker-compose.soak.yml logs -f bench
+
+# System resource usage
+docker stats --no-stream
+```
+
+### 3. Collect results
+
+Results are already at `benchmark/soak/soak_results/<scenario>_<timestamp>/`.
+
+### 4. Teardown
+
+```bash
+docker compose -f benchmark/soak/docker-compose.soak.yml down -v
+```
+
+---
+
+## Option B: Remote Server Run
+
+Use when you need a dedicated Linux machine (e.g., for long runs or amd64 platform).
+
+### 1. Copy files to server
+
+```bash
+scp -r benchmark/ user@host:/tmp/pg_duckpipe_bench/
+```
+
+Only the `benchmark/` directory is needed. The Docker image contains pg_duckpipe.
+
+### 2. Run
+
+```bash
+ssh user@host "cd /tmp/pg_duckpipe_bench && \
+  SCENARIO=sustained-insert DURATION=3600 \
+  docker compose -f benchmark/soak/docker-compose.soak.yml up --build 2>&1"
+```
+
+### 3. Monitor (from another terminal)
 
 ```bash
 # Container logs
@@ -63,13 +102,24 @@ ssh user@host "docker compose -f /tmp/pg_duckpipe_bench/benchmark/soak/docker-co
 ssh user@host "docker stats --no-stream"
 ```
 
-## Step 4: Collect results
+### 4. Collect results
 
 ```bash
 scp -r user@host:/tmp/pg_duckpipe_bench/benchmark/soak/soak_results/ ./soak_results/
 ```
 
-Each run produces a directory `soak_results/<scenario>_<timestamp>/` containing:
+### 5. Teardown
+
+```bash
+ssh user@host "cd /tmp/pg_duckpipe_bench && \
+  docker compose -f benchmark/soak/docker-compose.soak.yml down -v"
+```
+
+---
+
+## Output Files
+
+Each run produces `soak_results/<scenario>_<timestamp>/` containing:
 
 | File | Contents |
 |------|----------|
@@ -78,7 +128,7 @@ Each run produces a directory `soak_results/<scenario>_<timestamp>/` containing:
 | `events.log` | Timestamped log of starts, stops, chaos events, consistency checks |
 | `config.txt` | Scenario parameters |
 
-## Step 5: Interpret results
+## Interpreting Results
 
 Read `report.md`. The verdict is PASS if all criteria are met:
 
@@ -96,11 +146,7 @@ Read `report.md`. The verdict is PASS if all criteria are met:
 - **slot_retained_wal_bytes**: Should stabilize. Growth means retained WAL is leaking.
 - **tables_errored**: Should be 0 except briefly during chaos events.
 
-## Step 6: Teardown
+## Notes
 
-```bash
-ssh user@host "cd /tmp/pg_duckpipe_bench && \
-  docker compose -f benchmark/soak/docker-compose.soak.yml down -v"
-```
-
-The `-v` flag removes the database volume. Always include it between runs.
+- Always use `-v` in teardown to remove the database volume between runs.
+- The Docker image is `linux/amd64` only. On Apple Silicon, local runs use Rosetta emulation (slower but functional).
