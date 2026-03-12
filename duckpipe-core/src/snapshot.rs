@@ -59,17 +59,21 @@ pub async fn process_snapshot_task(
     ducklake_schema: &str,
     timing: bool,
     task_id: i32,
+    group_name: &str,
 ) -> Result<(u64, u64, u64), String> {
     let table_start = Instant::now();
 
     // Step 1: Open control connection — creates temp slot and runs COPY.
+    let app_name = crate::connstr::app_name(group_name, "snap");
     let (ctrl_client, ctrl_conn_handle) =
-        crate::connstr::pg_connect(connstr).await.map_err(|e| {
-            format!(
-                "snapshot control connect for {}.{}: {}",
-                source_schema, source_table, e
-            )
-        })?;
+        crate::connstr::pg_connect_with_app_name(connstr, &app_name)
+            .await
+            .map_err(|e| {
+                format!(
+                    "snapshot control connect for {}.{}: {}",
+                    source_schema, source_table, e
+                )
+            })?;
 
     // Use task_id in the slot name to avoid collisions under concurrent snapshots.
     let slot_name = format!("duckpipe_snap_{}", task_id);

@@ -61,6 +61,7 @@ impl SnapshotManager {
         duckdb_pg_connstr: &str,
         ducklake_schema: &str,
         timing: bool,
+        group_name: &str,
     ) {
         for task in tasks {
             if self.in_flight.contains_key(&task.id) {
@@ -77,6 +78,7 @@ impl SnapshotManager {
             let cs = connstr.to_string();
             let ddb_cs = duckdb_pg_connstr.to_string();
             let dl_schema = ducklake_schema.to_string();
+            let group_name = group_name.to_string();
             let tx = self.result_tx.clone();
             let notify = Arc::clone(&self.notify);
 
@@ -91,6 +93,7 @@ impl SnapshotManager {
                     &dl_schema,
                     timing,
                     task_id,
+                    &group_name,
                 )
                 .await;
                 let _ = tx.send(snapshot::SnapshotResult {

@@ -8,8 +8,10 @@ pub async fn update_metrics_via_pg(
     mapping_id: i32,
     applied_count: i64,
     last_lsn: u64,
+    group_name: &str,
 ) -> Result<(), String> {
-    let (client, conn_handle) = crate::connstr::pg_connect(connstr)
+    let app_name = crate::connstr::app_name(group_name, "flush");
+    let (client, conn_handle) = crate::connstr::pg_connect_with_app_name(connstr, &app_name)
         .await
         .map_err(|e| format!("metrics connect: {}", e))?;
 
@@ -37,12 +39,14 @@ pub async fn update_error_state(
     mapping_id: i32,
     error: &str,
     errored_threshold: i32,
+    group_name: &str,
 ) -> Result<(), String> {
     if mapping_id < 0 {
         return Ok(());
     }
 
-    let (client, conn_handle) = crate::connstr::pg_connect(connstr)
+    let app_name = crate::connstr::app_name(group_name, "flush");
+    let (client, conn_handle) = crate::connstr::pg_connect_with_app_name(connstr, &app_name)
         .await
         .map_err(|e| format!("error_state connect: {}", e))?;
 
@@ -69,8 +73,13 @@ pub async fn update_error_state(
 }
 
 /// Clear error state on successful flush: reset consecutive_failures and error_message.
-pub async fn clear_error_on_success(connstr: &str, mapping_id: i32) -> Result<(), String> {
-    let (client, conn_handle) = crate::connstr::pg_connect(connstr)
+pub async fn clear_error_on_success(
+    connstr: &str,
+    mapping_id: i32,
+    group_name: &str,
+) -> Result<(), String> {
+    let app_name = crate::connstr::app_name(group_name, "flush");
+    let (client, conn_handle) = crate::connstr::pg_connect_with_app_name(connstr, &app_name)
         .await
         .map_err(|e| format!("clear_error connect: {}", e))?;
 

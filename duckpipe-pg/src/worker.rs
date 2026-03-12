@@ -161,6 +161,7 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
     let mut coordinator = FlushCoordinator::new(
         connstr.clone(),
         "ducklake".to_string(),
+        group_name.clone(),
         config.flush_batch_threshold,
         config.flush_interval_ms,
         config.max_queued_changes,
@@ -185,11 +186,14 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
                 // Spawn the LISTEN helper on the per-group channel.
                 let listen_connstr =
                     format!("{} user={} connect_timeout=5", connstr, os_user);
+                let listen_app_name =
+                    duckpipe_core::connstr::app_name(&group_name, "listen");
                 let mut listen_handle: Option<tokio::task::JoinHandle<()>> =
                     match listen::spawn_listen_task(
                         &listen_connstr,
                         &listen_channel,
                         Arc::clone(&wakeup),
+                        &listen_app_name,
                     )
                     .await
                     {
@@ -224,6 +228,7 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
                             &listen_connstr,
                             &listen_channel,
                             Arc::clone(&wakeup),
+                            &listen_app_name,
                         )
                         .await
                         {

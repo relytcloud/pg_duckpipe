@@ -8,6 +8,14 @@ use tokio_postgres::config::{Config, Host, SslMode};
 
 use crate::service::SlotConnectParams;
 
+/// Build a standardized `application_name` for `pg_stat_activity`:
+/// `pg_duckpipe:{group}:{role}`.
+///
+/// Roles: `meta`, `flush`, `snap`, `listen`, `remote`, `ddl`.
+pub fn app_name(group: &str, role: &str) -> String {
+    format!("pg_duckpipe:{}:{}", group, role)
+}
+
 /// Extract the first host from a `Config` as a string, defaulting to `"localhost"`.
 fn host_string(config: &Config) -> String {
     match config.get_hosts().first() {
@@ -121,9 +129,42 @@ pub async fn pg_connect(
     ),
     String,
 > {
-    let config: Config = connstr
+    pg_connect_internal(connstr, None).await
+}
+
+/// Like [`pg_connect`], but sets `application_name` on the connection.
+///
+/// The `app_name` is injected into the parsed `tokio_postgres::Config` so it
+/// appears in the startup message — visible in `pg_stat_activity.application_name`.
+pub async fn pg_connect_with_app_name(
+    connstr: &str,
+    app_name: &str,
+) -> Result<
+    (
+        tokio_postgres::Client,
+        tokio::task::JoinHandle<Result<(), tokio_postgres::Error>>,
+    ),
+    String,
+> {
+    pg_connect_internal(connstr, Some(app_name)).await
+}
+
+async fn pg_connect_internal(
+    connstr: &str,
+    app_name: Option<&str>,
+) -> Result<
+    (
+        tokio_postgres::Client,
+        tokio::task::JoinHandle<Result<(), tokio_postgres::Error>>,
+    ),
+    String,
+> {
+    let mut config: Config = connstr
         .parse()
         .map_err(|e| format!("parse connstr: {}", e))?;
+    if let Some(name) = app_name {
+        config.application_name(name);
+    }
     let use_tls = has_explicit_sslmode(connstr) && sslmode_needs_tls(config.get_ssl_mode());
     if use_tls {
         let tls = tokio_postgres_rustls::MakeRustlsConnect::new(make_rustls_config());

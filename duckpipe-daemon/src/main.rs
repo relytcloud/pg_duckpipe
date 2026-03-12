@@ -82,16 +82,17 @@ async fn main() {
         std::process::exit(1);
     });
 
+    let group_name = args.group;
+
     let mut coordinator = FlushCoordinator::new(
         args.connstr.clone(),
         args.ducklake_schema,
+        group_name.clone(),
         args.flush_batch_threshold,
         args.flush_interval,
         args.max_queued_changes,
     );
     let mut snapshot_manager = SnapshotManager::new();
-
-    let group_name = args.group;
 
     info!(
         "DuckPipe daemon starting (connstr={}, group={}, poll={}ms)",

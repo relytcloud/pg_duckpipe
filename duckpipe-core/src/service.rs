@@ -837,9 +837,11 @@ pub async fn run_group_sync_cycle(
     snapshot_manager: &mut SnapshotManager,
 ) -> Result<bool, String> {
     // Establish metadata connection (short-lived per cycle)
-    let (client, conn_handle) = crate::connstr::pg_connect(&config.connstr)
-        .await
-        .map_err(|e| format!("connect: {}", e))?;
+    let meta_app_name = crate::connstr::app_name(group_name, "meta");
+    let (client, conn_handle) =
+        crate::connstr::pg_connect_with_app_name(&config.connstr, &meta_app_name)
+            .await
+            .map_err(|e| format!("connect: {}", e))?;
 
     let meta = MetadataClient::new(&client);
 
@@ -936,7 +938,8 @@ pub async fn run_group_sync_cycle(
         tokio_postgres::Client,
         tokio::task::JoinHandle<Result<(), tokio_postgres::Error>>,
     )> = if let Some(ref conninfo) = group.conninfo {
-        let (rc, rh) = crate::connstr::pg_connect(conninfo)
+        let remote_app_name = crate::connstr::app_name(group_name, "remote");
+        let (rc, rh) = crate::connstr::pg_connect_with_app_name(conninfo, &remote_app_name)
             .await
             .map_err(|e| format!("remote source connect for group {}: {}", group.name, e))?;
         Some((rc, rh))
@@ -975,6 +978,7 @@ pub async fn run_group_sync_cycle(
             coordinator.pg_connstr(),
             coordinator.ducklake_schema(),
             config.debug_log,
+            group_name,
         );
     }
 
