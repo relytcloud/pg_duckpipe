@@ -1,3 +1,7 @@
+# _BUILDER_PG is internal — not a CI matrix dimension.
+# The daemon is PG-version-agnostic; we only borrow libduckdb.so at build time.
+ARG _BUILDER_PG=18
+
 ###############################################################################
 ### EXT-FETCHER — download ducklake DuckDB extension (parallel with build)
 ###############################################################################
@@ -19,10 +23,6 @@ RUN /tmp/fetch-ducklake-ext.sh
 ###############################################################################
 ### BUILDER — compile duckpipe-daemon against libduckdb from pg_ducklake
 ###############################################################################
-# The daemon is PG-version-agnostic (pure TCP via tokio-postgres).
-# We only use the pg_ducklake image to borrow libduckdb.so at build time.
-# _BUILDER_PG is internal — not a CI matrix dimension.
-ARG _BUILDER_PG=18
 FROM pgducklake/pgducklake:${_BUILDER_PG}-main AS builder
 ARG _BUILDER_PG
 
