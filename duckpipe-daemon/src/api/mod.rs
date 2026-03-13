@@ -1,6 +1,7 @@
 pub mod error;
 pub mod groups;
 pub mod health;
+pub mod metrics;
 pub mod status;
 pub mod tables;
 
@@ -17,6 +18,15 @@ pub(crate) fn default_true() -> bool {
     true
 }
 
+/// Cached in-memory metrics from FlushCoordinator, updated after each sync cycle.
+#[derive(Clone, Default)]
+pub struct MetricsCache {
+    /// Per-table: (mapping_id, queued_changes, memory_bytes, flush_count, flush_duration_ms)
+    pub tables: Vec<(i32, i64, i64, i64, i64)>,
+    /// Group: (total_queued_changes, is_backpressured)
+    pub group: (i64, bool),
+}
+
 /// Shared state for the HTTP API server.
 pub struct AppState {
     /// PostgreSQL connection string (the local PG with duckpipe extension).
@@ -31,6 +41,8 @@ pub struct AppState {
     pub sync_stop: Notify,
     /// Persistent PG connection holding the advisory lock (keeps lock alive).
     pub lock_conn: Mutex<Option<LockConn>>,
+    /// Cached in-memory metrics from FlushCoordinator, updated each sync cycle.
+    pub metrics_cache: Mutex<MetricsCache>,
 }
 
 /// A persistent PG connection that holds an advisory lock.
@@ -50,6 +62,7 @@ impl AppState {
             sync_start: Notify::new(),
             sync_stop: Notify::new(),
             lock_conn: Mutex::new(None),
+            metrics_cache: Mutex::new(MetricsCache::default()),
         }
     }
 
@@ -73,6 +86,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", axum::routing::get(health::get_health))
         .route("/status", axum::routing::get(status::get_status))
+        .route("/metrics", axum::routing::get(metrics::get_metrics))
         .route("/groups", axum::routing::post(groups::create_group))
         .route("/groups", axum::routing::delete(groups::drop_group))
         .route("/groups/enable", axum::routing::post(groups::enable_group))

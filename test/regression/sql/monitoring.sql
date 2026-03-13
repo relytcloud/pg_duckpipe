@@ -11,13 +11,13 @@ SELECT duckpipe.add_table('public.mon_test', NULL, 'default', false);
 -- Test duckpipe.tables() returns the mapping
 SELECT source_table, target_table, sync_group, enabled FROM duckpipe.tables();
 
--- Test duckpipe.status() returns state info including new observability columns
+-- Test duckpipe.status() returns state info including SHM-backed columns
 SELECT sync_group, source_table, target_table, state, enabled,
        queued_changes, consecutive_failures, retry_at, applied_lsn,
-       snapshot_duration_ms, snapshot_rows, duckdb_memory_bytes
+       snapshot_duration_ms, snapshot_rows
 FROM duckpipe.status();
 
--- Test duckpipe.worker_status() returns runtime state (per group)
+-- Test duckpipe.worker_status() returns runtime state (per group, from SHM)
 SELECT sync_group, total_queued_changes, is_backpressured FROM duckpipe.worker_status();
 
 -- Cleanup

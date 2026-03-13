@@ -33,7 +33,9 @@
 
 ### Observability
 - [x] `status()` SRF: `consecutive_failures`, `retry_at`, `applied_lsn`, `queued_changes`, `snapshot_duration_ms`, `snapshot_rows`, `duckdb_memory_bytes`
-- [x] `worker_status()` SRF: `total_queued_changes`, `is_backpressured`
+- [x] `worker_status()` SRF: `total_queued_changes`, `is_backpressured` (now reads from SHM)
+- [x] `metrics()` SQL function — returns full JSON snapshot (SHM + PG persisted metrics)
+- [x] In-memory metrics via PG shared memory — `queued_changes`, `duckdb_memory_bytes`, `flush_count`, `flush_duration_ms` (per-table), `total_queued_changes`, `is_backpressured` (per-group) stored in SHM; eliminates 3 PG round-trips per sync cycle
 - [x] Standardized logging: shared `init_subscriber`, all output via `tracing` macros
 - [x] `rows_synced` credited during snapshot
 - [x] Benchmark suite (`bench_suite.sh`) — 4 scenarios with automated analysis
@@ -65,7 +67,7 @@
 - [ ] Mixed DML replication lag 50-100x append — WAL amplification from REPLICA IDENTITY FULL + Parquet-scan DELETE phase
 
 ### Features
-- [ ] Daemon REST API — expose monitoring/control endpoints (status, health, metrics) from the standalone daemon binary so operators can integrate with orchestration and alerting without a PG connection
+- [x] Daemon REST API — expose monitoring/control endpoints (status, health, metrics) from the standalone daemon binary so operators can integrate with orchestration and alerting without a PG connection
 - [x] Dedicated bgworker per group — one worker per sync group for full isolation (own FlushCoordinator, SnapshotManager, SlotState)
 - [x] Per-group NOTIFY channels (`duckpipe_wakeup_{group}`) — avoid thundering herd wakeups; per-group bgworker spawns its own LISTEN channel
 - [ ] Per-group config (`sync_groups.config JSONB`) — persistent per-group settings accessible from both bgworker and daemon modes; SQL API `set_group_config(group, key, value)` / `get_group_config(group)`; initial keys: `duckdb_memory_limit` (default '256MB'), `duckdb_threads` (default 1); future: migrate `flush_interval_ms`, `flush_batch_threshold`, `max_queued_changes` from GUCs; NULL/absent keys fall back to global defaults
@@ -77,10 +79,12 @@
 - [ ] CI: run `cargo test` for unit tests (e.g. `connstr` module) — currently only `make installcheck` regression tests are in CI
 
 ### Monitoring / Observability
-- [ ] Prometheus-compatible metrics endpoint — expose runtime metrics (`duckdb_memory_bytes`, `rows_synced`, `queued_changes`, flush latencies, etc.) as time-series counters/gauges for scraping; `status()` is a point-in-time snapshot view, not suited for time-series observability. Daemon: HTTP `/metrics` endpoint; bgworker: `pg_stat` integration or metrics table with timestamps
+- [x] Daemon HTTP `GET /metrics` endpoint — returns JSON merging FlushCoordinator in-memory metrics with PG persisted data; same shape as PG `duckpipe.metrics()` function
+- [ ] Replication lag in `status()` — compute `pg_current_wal_lsn() - applied_lsn` as `lag_bytes`; needs special handling for remote groups (lag is relative to remote WAL tip, not local)
+- [ ] Prometheus text rendering — expose metrics as Prometheus-compatible text format via external tools (postgres_exporter, JSON exporter) or native endpoint
 - [ ] `applied_lsn` stays NULL during SNAPSHOT/CATCHUP — should be set to `snapshot_lsn` after snapshot completes
-- [ ] `worker_state` not updated during snapshot processing — stale metrics while snapshots run
-- [ ] Flush runtime stats for fixed-interval scraping — expose per-table/group counters such as flush count, rows per flush, avg rows/flush, and recent flush timings so Prometheus-style systems can sample every 30s without reconstructing rates from logs
+- [x] `worker_state` not updated during snapshot processing — resolved: observability metrics moved to SHM, updated every cycle regardless of snapshot state
+- [x] Flush runtime stats for fixed-interval scraping — `flush_count` and `flush_duration_ms` now tracked in SHM and exposed via `status()` and `metrics()`
 
 ### Bugs
 - [x] Benchmark suite cleanup incomplete — orphaned mappings for sbtest2-4 remain after multi→single-table scenario transition; fixed: `prepare_env` now queries `duckpipe.status()` to remove ALL existing mappings + drops leftover sbtest tables beyond current scenario count

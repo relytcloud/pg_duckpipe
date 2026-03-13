@@ -77,6 +77,7 @@ pub enum FlushThreadResult {
         applied_count: i64,
         last_lsn: u64,
         memory_bytes: i64,
+        flush_duration_ms: i64,
     },
     Error {
         target_key: String,
@@ -121,6 +122,12 @@ pub struct FlushCoordinator {
     /// In-memory per-table DuckDB memory usage, updated from flush thread results.
     per_table_memory: HashMap<i32, i64>, // mapping_id -> memory_bytes
 
+    /// In-memory per-table cumulative flush count, updated from flush thread results.
+    per_table_flush_count: HashMap<i32, i64>, // mapping_id -> flush_count
+
+    /// In-memory per-table last flush duration in ms, updated from flush thread results.
+    per_table_flush_duration: HashMap<i32, i64>, // mapping_id -> flush_duration_ms
+
     /// Cache: target_key → mapping_id.  Populated in `ensure_queue`, used in
     /// `get_min_applied_lsn_in_coordinator` to avoid O(n) mutex locks per call.
     target_to_mapping: HashMap<String, i32>,
@@ -153,6 +160,8 @@ impl FlushCoordinator {
             flush_interval_ms: flush_interval_ms as u64,
             per_table_lsn: HashMap::new(),
             per_table_memory: HashMap::new(),
+            per_table_flush_count: HashMap::new(),
+            per_table_flush_duration: HashMap::new(),
             target_to_mapping: HashMap::new(),
         }
     }
@@ -337,6 +346,40 @@ impl FlushCoordinator {
             .collect()
     }
 
+    /// Return per-table flush metrics as `(mapping_id, flush_count, flush_duration_ms)`.
+    pub fn table_flush_metrics(&self) -> Vec<(i32, i64, i64)> {
+        let mut result = Vec::new();
+        for (&id, &count) in &self.per_table_flush_count {
+            let dur = self.per_table_flush_duration.get(&id).copied().unwrap_or(0);
+            result.push((id, count, dur));
+        }
+        result
+    }
+
+    /// Return all per-table metrics combined in a single pass.
+    ///
+    /// Returns `(mapping_id, queued_changes, memory_bytes, flush_count, flush_duration_ms)`.
+    /// Eliminates the need for callers to call `table_pending_counts()`,
+    /// `table_memory_bytes()`, and `table_flush_metrics()` separately and join by mapping_id.
+    pub fn table_combined_metrics(&self) -> Vec<(i32, i64, i64, i64, i64)> {
+        self.threads
+            .values()
+            .map(|entry| {
+                let shared = entry.queue_handle.inner.lock().unwrap().changes.len() as i64;
+                let local = entry.pending_local.load(Ordering::Relaxed);
+                let mid = entry.mapping_id;
+                let mem = self.per_table_memory.get(&mid).copied().unwrap_or(0);
+                let fc = self.per_table_flush_count.get(&mid).copied().unwrap_or(0);
+                let fd = self
+                    .per_table_flush_duration
+                    .get(&mid)
+                    .copied()
+                    .unwrap_or(0);
+                (mid, shared + local, mem, fc, fd)
+            })
+            .collect()
+    }
+
     /// Compute the minimum applied LSN across all tables tracked in `per_table_lsn`.
     ///
     /// Returns 0 if:
@@ -442,12 +485,17 @@ impl FlushCoordinator {
             self.target_to_mapping.remove(key);
         }
 
-        // Final sweep: prune per_table_lsn and per_table_memory directly by active
-        // IDs.  This catches stale entries injected by collect_results() from late
-        // flush-thread results that arrived after the thread was pruned above.
+        // Final sweep: prune per_table_lsn, per_table_memory, and flush tracking
+        // maps directly by active IDs.  This catches stale entries injected by
+        // collect_results() from late flush-thread results that arrived after the
+        // thread was pruned above.
         self.per_table_lsn
             .retain(|id, _| active_mapping_ids.contains(id));
         self.per_table_memory
+            .retain(|id, _| active_mapping_ids.contains(id));
+        self.per_table_flush_count
+            .retain(|id, _| active_mapping_ids.contains(id));
+        self.per_table_flush_duration
             .retain(|id, _| active_mapping_ids.contains(id));
     }
 
@@ -522,6 +570,7 @@ impl FlushCoordinator {
                 mapping_id,
                 last_lsn,
                 memory_bytes,
+                flush_duration_ms,
                 ..
             } = &r
             {
@@ -532,6 +581,9 @@ impl FlushCoordinator {
                 if *memory_bytes > 0 {
                     self.per_table_memory.insert(*mapping_id, *memory_bytes);
                 }
+                *self.per_table_flush_count.entry(*mapping_id).or_insert(0) += 1;
+                self.per_table_flush_duration
+                    .insert(*mapping_id, *flush_duration_ms);
             }
             results.push(r);
         }
@@ -563,6 +615,8 @@ impl FlushCoordinator {
         self.result_rx = rx;
         self.per_table_lsn.clear();
         self.per_table_memory.clear();
+        self.per_table_flush_count.clear();
+        self.per_table_flush_duration.clear();
         self.target_to_mapping.clear();
     }
 
@@ -871,6 +925,7 @@ fn do_flush(
                 applied_count: result.applied_count,
                 last_lsn,
                 memory_bytes: result.memory_bytes,
+                flush_duration_ms: result.flush_duration_ms,
             });
         }
         Err(e) => {

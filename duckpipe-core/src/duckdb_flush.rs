@@ -233,6 +233,7 @@ impl FlushWorker {
                 mapping_id,
                 applied_count: 0,
                 memory_bytes: 0,
+                flush_duration_ms: 0,
             });
         }
 
@@ -509,12 +510,14 @@ impl FlushWorker {
         );
 
         let memory_bytes = query_memory_usage(&self.db);
+        let flush_duration_ms = flush_start.elapsed().as_millis() as i64;
 
         Ok(DuckDbFlushResult {
             target_key,
             mapping_id,
             applied_count,
             memory_bytes,
+            flush_duration_ms,
         })
     }
 }
@@ -527,4 +530,6 @@ pub struct DuckDbFlushResult {
     pub applied_count: i64,
     /// DuckDB buffer manager memory usage in bytes (from pragma_database_size).
     pub memory_bytes: i64,
+    /// Wall-clock duration of the flush in milliseconds.
+    pub flush_duration_ms: i64,
 }

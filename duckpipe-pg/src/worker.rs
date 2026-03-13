@@ -1,3 +1,4 @@
+use pgrx::datum::DatumWithOid;
 use pgrx::pg_sys::panic::CaughtError;
 use pgrx::prelude::*;
 use std::ffi::CString;
@@ -76,7 +77,7 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
         );
     }
 
-    // Get database name and connection info (need a transaction context for catalog access)
+    // Get database name, connection info, and group_id (need a transaction context for catalog access)
     let (db, port, socket_dir) = unsafe {
         pg_sys::StartTransactionCommand();
         let name = pg_sys::get_database_name(dboid);
@@ -155,6 +156,32 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
         "host=127.0.0.1 port={} dbname={} user={}",
         port, db, os_user
     );
+
+    // Query group_id for SHM metrics (need transaction context with snapshot for SPI)
+    let group_id: i32 = unsafe {
+        pg_sys::StartTransactionCommand();
+        pg_sys::PushActiveSnapshot(pg_sys::GetTransactionSnapshot());
+        let gid = Spi::connect(|client| {
+            let args = [DatumWithOid::new(
+                group_name.as_str(),
+                PgBuiltInOids::TEXTOID.value(),
+            )];
+            let result = client
+                .select(
+                    "SELECT id FROM duckpipe.sync_groups WHERE name = $1",
+                    Some(1),
+                    &args,
+                )
+                .unwrap();
+            for r in result {
+                return r.get::<i32>(1).unwrap().unwrap_or(0);
+            }
+            0
+        });
+        pg_sys::PopActiveSnapshot();
+        pg_sys::CommitTransactionCommand();
+        gid
+    };
 
     // Create persistent flush coordinator (survives across cycles, cleared on panic)
     let config = read_config(&connstr, &duckdb_pg_connstr);
@@ -261,6 +288,12 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
                     .await
                     {
                         Ok(any_work) => {
+                            // Write all metrics to SHM in a single lock acquisition
+                            crate::write_shmem_metrics(
+                                (group_id, coord.total_queued(), coord.is_backpressured()),
+                                &coord.table_combined_metrics(),
+                            );
+
                             if should_shutdown() {
                                 break;
                             }

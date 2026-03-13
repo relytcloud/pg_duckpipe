@@ -96,7 +96,8 @@ SELECT duckpipe.stop_worker();
 
 ```sql
 SELECT source_table, state, rows_synced, last_sync,
-       applied_lsn, consecutive_failures, retry_at, error_message
+       applied_lsn, consecutive_failures, retry_at, error_message,
+       queued_changes
 FROM duckpipe.status();
 ```
 
@@ -111,6 +112,7 @@ FROM duckpipe.status();
 | `error_message` | Last error message (empty when healthy) |
 | `snapshot_duration_ms` | Time taken by the initial snapshot (NULL before snapshot completes) |
 | `snapshot_rows` | Number of rows copied during the initial snapshot |
+| `queued_changes` | In-flight changes in this table's flush queue (from shared memory) |
 
 ### Group Overview
 
@@ -127,15 +129,49 @@ FROM duckpipe.groups();
 ### Worker Pipeline Status
 
 ```sql
-SELECT total_queued_changes, is_backpressured, updated_at
+SELECT total_queued_changes, is_backpressured
 FROM duckpipe.worker_status();
 ```
 
 | Column | Description |
 |--------|-------------|
-| `total_queued_changes` | In-flight changes across all per-table flush queues |
-| `is_backpressured` | `true` when WAL consumption is paused because queues are full |
-| `updated_at` | Timestamp of last worker state update |
+| `total_queued_changes` | In-flight changes across all per-table flush queues (from shared memory) |
+| `is_backpressured` | `true` when WAL consumption is paused because queues are full (from shared memory) |
+
+### JSON Metrics
+
+Returns a complete metrics snapshot as JSON, merging shared memory metrics with persisted PG state:
+
+```sql
+SELECT duckpipe.metrics();
+```
+
+Output structure:
+```json
+{
+  "tables": [{
+    "group": "default",
+    "source_table": "public.orders",
+    "state": "STREAMING",
+    "rows_synced": 15000,
+    "queued_changes": 42,
+    "duckdb_memory_bytes": 1048576,
+    "consecutive_failures": 0,
+    "flush_count": 150,
+    "flush_duration_ms": 23,
+    "snapshot_duration_ms": 1234,
+    "snapshot_rows": 1000,
+    "applied_lsn": "0/1A3B4C0"
+  }],
+  "groups": [{
+    "name": "default",
+    "total_queued_changes": 42,
+    "is_backpressured": false
+  }]
+}
+```
+
+The same JSON structure is available from the daemon via `GET /metrics` (see [Daemon REST API](#daemon-rest-api) below).
 
 ### Table Listing
 
@@ -201,3 +237,27 @@ By default, `add_table('public.orders')` creates target `public.orders_ducklake`
 ```sql
 SELECT duckpipe.add_table('public.orders', 'analytics.orders_columnar');
 ```
+
+## Daemon REST API
+
+The standalone daemon (`duckpipe`) exposes an HTTP REST API on `--api-port` (default 8080). Key endpoints:
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/health` | GET | Health check (uptime, group binding, lock status) |
+| `/status` | GET | Per-table status + worker state + group info |
+| `/metrics` | GET | Full metrics snapshot (same JSON shape as `duckpipe.metrics()`) |
+| `/groups` | POST | Bind daemon to a sync group |
+| `/groups` | DELETE | Unbind daemon from current group |
+| `/tables` | GET | List table mappings for bound group |
+| `/tables` | POST | Add table to bound group |
+| `/tables/{source_table}` | DELETE | Remove table from bound group |
+| `/tables/{source_table}/resync` | POST | Re-snapshot a table |
+
+### Daemon Metrics
+
+```bash
+curl http://localhost:8080/metrics
+```
+
+Returns the same JSON structure as the PG `duckpipe.metrics()` function, merging in-process FlushCoordinator metrics with PG persisted data.
