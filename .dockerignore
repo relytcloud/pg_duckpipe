@@ -2,4 +2,6 @@ target/
 .git/
 doc/
 test/
+benchmark/
+.claude/
 *.md

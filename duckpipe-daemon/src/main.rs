@@ -27,7 +27,7 @@ use duckpipe_core::snapshot_manager::SnapshotManager;
 struct Args {
     /// PostgreSQL connection string (libpq key=value format).
     /// Example: "host=localhost port=5432 dbname=mydb user=replicator password=secret"
-    #[arg(long)]
+    #[arg(long, env = "CONNSTR")]
     connstr: String,
 
     /// Poll interval in milliseconds (min 100).
@@ -66,6 +66,10 @@ struct Args {
     /// HTTP API port (0 to disable).
     #[arg(long, default_value_t = 8080)]
     api_port: u16,
+
+    /// HTTP API bind address.
+    #[arg(long, default_value = "127.0.0.1")]
+    api_bind: String,
 }
 
 #[tokio::main]
@@ -110,9 +114,10 @@ async fn main() {
     if args.api_port > 0 {
         let api_state = state.clone();
         let api_port = args.api_port;
+        let api_bind = args.api_bind.clone();
         tokio::spawn(async move {
             let router = api::router(api_state);
-            let addr = format!("127.0.0.1:{}", api_port);
+            let addr = format!("{}:{}", api_bind, api_port);
             let listener = match tokio::net::TcpListener::bind(&addr).await {
                 Ok(l) => l,
                 Err(e) => {

@@ -8,13 +8,16 @@
 # The version on extensions.duckdb.org lacks the -Bsymbolic fix
 # (duckdb/duckdb-postgres#402) needed to run inside a PG backend.
 #
-# Installs to: /var/lib/postgresql/.duckdb/extensions/<ver>/<arch>/ducklake.duckdb_extension
+# Installs to: $DUCKDB_HOME/.duckdb/extensions/<ver>/<arch>/ducklake.duckdb_extension
+#
+# Set DUCKDB_HOME to override the base directory (default: /var/lib/postgresql).
 
 set -euo pipefail
 
 DUCKDB_VER="${1:-v1.4.3}"
+DUCKDB_HOME="${DUCKDB_HOME:-/var/lib/postgresql}"
 ARCH=$(uname -m | sed 's/x86_64/linux_amd64/;s/aarch64/linux_arm64/')
-EXT_DIR="/var/lib/postgresql/.duckdb/extensions/${DUCKDB_VER}/${ARCH}"
+EXT_DIR="${DUCKDB_HOME}/.duckdb/extensions/${DUCKDB_VER}/${ARCH}"
 
 mkdir -p "${EXT_DIR}"
 curl -fsSL \

@@ -23,6 +23,23 @@ target "pg_duckpipe_18" {
   }
 }
 
+// Standalone daemon image
+target "duckpipe_daemon" {
+  dockerfile = "Dockerfile.daemon"
+  args = {
+    PG_VERSION = "${PG_VERSION}"
+  }
+  target = "runtime"
+  tags   = ["pgducklake/duckpipe-daemon:${PG_VERSION}-dev"]
+}
+
+target "duckpipe_daemon_18" {
+  inherits = ["duckpipe_daemon"]
+  args = {
+    PG_VERSION = "18"
+  }
+}
+
 target "default" {
   inherits = ["pg_duckpipe_18"]
 }

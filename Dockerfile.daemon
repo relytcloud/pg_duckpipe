@@ -1,0 +1,89 @@
+ARG PG_VERSION=18
+
+###############################################################################
+### BUILDER — compile duckpipe-daemon against libduckdb from pg_ducklake
+###############################################################################
+FROM pgducklake/pgducklake:${PG_VERSION}-main AS builder
+ARG PG_VERSION
+
+USER root
+
+# Build tools (no PG dev headers or pgrx needed for the standalone daemon)
+RUN apt-get update -qq && \
+    apt-get install -y --no-install-recommends \
+        build-essential \
+        clang \
+        libclang-dev \
+        pkg-config \
+        curl \
+        ca-certificates \
+        libssl-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install Rust
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+    sh -s -- -y --no-modify-path --default-toolchain stable --profile minimal
+
+WORKDIR /build
+COPY . .
+
+# Point duckdb-rs at the shared libduckdb.so shipped by pg_ducklake
+ENV DUCKDB_LIB_DIR=/usr/lib/postgresql/${PG_VERSION}/lib \
+    LD_LIBRARY_PATH=/usr/lib/postgresql/${PG_VERSION}/lib
+
+# Build only the daemon binary
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/build/target \
+    cargo build --release -p duckpipe-daemon && \
+    cp target/release/duckpipe /usr/local/bin/duckpipe
+
+# Download the ducklake DuckDB extension into a staging directory.
+# DUCKDB_HOME controls the install prefix (see fetch-ducklake-ext.sh).
+ENV DUCKDB_HOME=/opt/duckdb-staging
+RUN /build/docker/fetch-ducklake-ext.sh
+
+###############################################################################
+### RUNTIME — minimal image with daemon binary + DuckDB libraries
+###############################################################################
+FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update -qq && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates \
+        libssl3 && \
+    rm -rf /var/lib/apt/lists/*
+
+# Non-root user
+RUN useradd --create-home --shell /bin/bash duckpipe
+
+ARG PG_VERSION=18
+
+# Daemon binary
+COPY --from=builder /usr/local/bin/duckpipe /usr/local/bin/duckpipe
+
+# libduckdb.so (from pg_ducklake base image)
+COPY --from=builder \
+    /usr/lib/postgresql/${PG_VERSION}/lib/libduckdb.so \
+    /usr/local/lib/
+
+RUN ldconfig
+
+# DuckDB extensions: ducklake (downloaded) + postgres_scanner (from pg_ducklake)
+COPY --from=builder --chown=duckpipe:duckpipe \
+    /opt/duckdb-staging/.duckdb/extensions/ \
+    /home/duckpipe/.duckdb/extensions/
+COPY --from=builder --chown=duckpipe:duckpipe \
+    /var/lib/postgresql/.duckdb/extensions/ \
+    /home/duckpipe/.duckdb/extensions/
+
+USER duckpipe
+WORKDIR /home/duckpipe
+
+EXPOSE 8080
+
+ENTRYPOINT ["duckpipe"]
+CMD ["--api-bind", "0.0.0.0"]
