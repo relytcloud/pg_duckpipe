@@ -1451,10 +1451,7 @@ CREATE FUNCTION duckpipe.status() RETURNS TABLE(
     retry_at TIMESTAMPTZ,
     applied_lsn TEXT,
     snapshot_duration_ms BIGINT,
-    snapshot_rows BIGINT,
-    duckdb_memory_bytes BIGINT,
-    flush_count BIGINT,
-    flush_duration_ms BIGINT
+    snapshot_rows BIGINT
 )
 AS 'MODULE_PATHNAME', '@FUNCTION_NAME@'
 LANGUAGE C STRICT;
@@ -1476,12 +1473,9 @@ fn status() -> TableIterator<
         name!(applied_lsn, Option<String>),
         name!(snapshot_duration_ms, Option<i64>),
         name!(snapshot_rows, Option<i64>),
-        name!(duckdb_memory_bytes, i64),
-        name!(flush_count, i64),
-        name!(flush_duration_ms, i64),
     ),
 > {
-    // Read SHM metrics keyed by mapping_id
+    // Read SHM metrics keyed by mapping_id (for queued_changes)
     let shm_map = crate::read_shmem_table_metrics();
 
     let mut rows = Vec::new();
@@ -1518,8 +1512,8 @@ fn status() -> TableIterator<
                 let snapshot_rows: Option<i64> = row.get(13).unwrap();
                 let mapping_id: i32 = row.get::<i32>(14).unwrap().unwrap_or(0);
 
-                // Read queued_changes, duckdb_memory_bytes, flush_count, flush_duration from SHM
-                let (queued_changes, duckdb_memory_bytes, flush_count, flush_duration_ms) =
+                // Read queued_changes from SHM
+                let (queued_changes, _, _, _) =
                     shm_map.get(&mapping_id).copied().unwrap_or((0, 0, 0, 0));
 
                 rows.push((
@@ -1537,9 +1531,6 @@ fn status() -> TableIterator<
                     applied_lsn,
                     snapshot_duration_ms,
                     snapshot_rows,
-                    duckdb_memory_bytes,
-                    flush_count,
-                    flush_duration_ms,
                 ));
             }
         }

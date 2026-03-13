@@ -97,7 +97,7 @@ SELECT duckpipe.stop_worker();
 ```sql
 SELECT source_table, state, rows_synced, last_sync,
        applied_lsn, consecutive_failures, retry_at, error_message,
-       queued_changes, duckdb_memory_bytes, flush_count, flush_duration_ms
+       queued_changes
 FROM duckpipe.status();
 ```
 
@@ -113,9 +113,6 @@ FROM duckpipe.status();
 | `snapshot_duration_ms` | Time taken by the initial snapshot (NULL before snapshot completes) |
 | `snapshot_rows` | Number of rows copied during the initial snapshot |
 | `queued_changes` | In-flight changes in this table's flush queue (from shared memory) |
-| `duckdb_memory_bytes` | DuckDB buffer manager memory usage for this table's flush worker (from shared memory) |
-| `flush_count` | Cumulative number of flushes completed (from shared memory) |
-| `flush_duration_ms` | Wall-clock duration of the last flush in milliseconds (from shared memory) |
 
 ### Group Overview
 

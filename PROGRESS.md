@@ -32,7 +32,7 @@
 - [x] Mixed DML correctness — flush DELETE used all-column WHERE instead of PK-only; fixed by caching `pk_key_attrs` per relation
 
 ### Observability
-- [x] `status()` SRF: `consecutive_failures`, `retry_at`, `applied_lsn`, `queued_changes`, `snapshot_duration_ms`, `snapshot_rows`, `duckdb_memory_bytes`, `flush_count`, `flush_duration_ms`
+- [x] `status()` SRF: `consecutive_failures`, `retry_at`, `applied_lsn`, `queued_changes`, `snapshot_duration_ms`, `snapshot_rows`, `duckdb_memory_bytes`
 - [x] `worker_status()` SRF: `total_queued_changes`, `is_backpressured` (now reads from SHM)
 - [x] `metrics()` SQL function — returns full JSON snapshot (SHM + PG persisted metrics)
 - [x] In-memory metrics via PG shared memory — `queued_changes`, `duckdb_memory_bytes`, `flush_count`, `flush_duration_ms` (per-table), `total_queued_changes`, `is_backpressured` (per-group) stored in SHM; eliminates 3 PG round-trips per sync cycle

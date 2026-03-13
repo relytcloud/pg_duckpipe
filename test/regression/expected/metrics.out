@@ -57,15 +57,6 @@ FROM jsonb_array_elements((duckpipe.metrics()::jsonb)->'groups') AS g;
  default    |            0 | f
 (1 row)
 
--- Verify status() also includes new flush columns
-SELECT flush_count, flush_duration_ms
-FROM duckpipe.status()
-WHERE source_table = 'public.metrics_test';
- flush_count | flush_duration_ms 
--------------+-------------------
-           0 |                 0
-(1 row)
-
 -- Cleanup
 SELECT duckpipe.remove_table('public.metrics_test', false);
  remove_table 

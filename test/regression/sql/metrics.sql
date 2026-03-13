@@ -32,11 +32,6 @@ SELECT
   (g->>'is_backpressured')::boolean AS is_bp
 FROM jsonb_array_elements((duckpipe.metrics()::jsonb)->'groups') AS g;
 
--- Verify status() also includes new flush columns
-SELECT flush_count, flush_duration_ms
-FROM duckpipe.status()
-WHERE source_table = 'public.metrics_test';
-
 -- Cleanup
 SELECT duckpipe.remove_table('public.metrics_test', false);
 DROP TABLE public.metrics_test_ducklake;
