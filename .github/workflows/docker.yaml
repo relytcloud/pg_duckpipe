@@ -12,9 +12,11 @@ on:
     tags: ["v*"]
   pull_request:
     paths:
-      - Dockerfile
-      - Dockerfile.daemon
-      - docker-bake.hcl
+      - "docker/Dockerfile"
+      - "docker/Dockerfile.daemon"
+      - "docker/docker-bake.hcl"
+      - "docker/fetch-ducklake-ext.sh"
+      - "docker/init.d/**"
       - ".github/workflows/docker.yaml"
   schedule:
     # Rebuild nightly to pick up base-image updates from pg_ducklake
@@ -95,6 +97,7 @@ jobs:
       - name: docker bake
         uses: docker/bake-action@v5
         with:
+          files: docker/docker-bake.hcl
           targets: pg_duckpipe_${{ matrix.postgres }}
           push: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
           set: |
@@ -142,19 +145,17 @@ jobs:
           docker buildx imagetools inspect \
             "pgducklake/pipe-ci-builds:${{ matrix.postgres }}-${{ github.sha }}"
 
-  # ---- Standalone daemon image ----
+  # ---- Standalone daemon image (PG-version-agnostic) ----
   docker_build_daemon:
-    name: Build daemon image for Postgres ${{ matrix.postgres }} on ${{ matrix.runner }}
+    name: Build daemon image on ${{ matrix.runner }}
     strategy:
       matrix:
-        postgres: ["18"]
         runner: ["ubuntu-24.04", "ubuntu-24.04-arm"]
 
     runs-on: ${{ matrix.runner }}
 
     env:
       BUILDKIT_PROGRESS: plain
-      PG_VERSION: ${{ matrix.postgres }}
       RAW_REF: ${{ github.head_ref || github.ref_name }}
     outputs:
       branch_tag: ${{ steps.params.outputs.branch_tag }}
@@ -192,7 +193,7 @@ jobs:
             TARGET_REPO='pgducklake/pipe-ci-builds'
           fi
 
-          LATEST_IMAGE="pgducklake/pipe-ci-builds:daemon-${{ matrix.postgres }}-${PLATFORM}-${BRANCH}-latest"
+          LATEST_IMAGE="pgducklake/pipe-ci-builds:daemon-${PLATFORM}-${BRANCH}-latest"
 
           echo "platform=$PLATFORM"             >> "$GITHUB_OUTPUT"
           echo "branch_tag=$BRANCH"             >> "$GITHUB_OUTPUT"
@@ -210,22 +211,20 @@ jobs:
       - name: docker bake (daemon)
         uses: docker/bake-action@v5
         with:
-          targets: duckpipe_daemon_${{ matrix.postgres }}
+          files: docker/docker-bake.hcl
+          targets: duckpipe_daemon
           push: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
           set: |
             *.platform=linux/${{ steps.params.outputs.platform }}
             *.cache-from=type=registry,ref=${{ steps.params.outputs.latest_image }}
             *.cache-from=type=gha,scope=${{ github.workflow }}-daemon
             *.cache-to=type=gha,mode=max,scope=${{ github.workflow }}-daemon
-            duckpipe_daemon.tags=pgducklake/pipe-ci-builds:daemon-${{ matrix.postgres }}-${{ steps.params.outputs.platform }}-${{ github.sha }}
+            duckpipe_daemon.tags=pgducklake/pipe-ci-builds:daemon-${{ steps.params.outputs.platform }}-${{ github.sha }}
             duckpipe_daemon.tags=${{ steps.params.outputs.latest_image }}
 
   docker_merge_daemon:
-    name: Merge daemon image for Postgres ${{ matrix.postgres }}
+    name: Merge daemon image
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    strategy:
-      matrix:
-        postgres: ["18"]
 
     runs-on: ubuntu-24.04
     needs: docker_build_daemon
@@ -240,19 +239,19 @@ jobs:
       - name: Merge amd64 + arm64 into a multi-arch manifest
         run: |
           docker pull --platform linux/amd64 \
-            pgducklake/pipe-ci-builds:daemon-${{ matrix.postgres }}-amd64-${{ github.sha }}
+            pgducklake/pipe-ci-builds:daemon-amd64-${{ github.sha }}
           docker pull --platform linux/arm64 \
-            pgducklake/pipe-ci-builds:daemon-${{ matrix.postgres }}-arm64-${{ github.sha }}
+            pgducklake/pipe-ci-builds:daemon-arm64-${{ github.sha }}
 
           BRANCH="${{ needs.docker_build_daemon.outputs.branch_tag }}"
           TARGET_REPO="${{ needs.docker_build_daemon.outputs.target_repo }}"
 
           echo "Pushing merged daemon manifest to '${TARGET_REPO}'"
           docker buildx imagetools create \
-            --tag "${TARGET_REPO}:${{ matrix.postgres }}-${BRANCH}" \
-            --tag "pgducklake/pipe-ci-builds:daemon-${{ matrix.postgres }}-${{ github.sha }}" \
-            "pgducklake/pipe-ci-builds:daemon-${{ matrix.postgres }}-amd64-${{ github.sha }}" \
-            "pgducklake/pipe-ci-builds:daemon-${{ matrix.postgres }}-arm64-${{ github.sha }}"
+            --tag "${TARGET_REPO}:${BRANCH}" \
+            --tag "pgducklake/pipe-ci-builds:daemon-${{ github.sha }}" \
+            "pgducklake/pipe-ci-builds:daemon-amd64-${{ github.sha }}" \
+            "pgducklake/pipe-ci-builds:daemon-arm64-${{ github.sha }}"
 
           docker buildx imagetools inspect \
-            "pgducklake/pipe-ci-builds:daemon-${{ matrix.postgres }}-${{ github.sha }}"
+            "pgducklake/pipe-ci-builds:daemon-${{ github.sha }}"

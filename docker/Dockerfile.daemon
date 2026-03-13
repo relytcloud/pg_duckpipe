@@ -1,5 +1,3 @@
-ARG PG_VERSION=18
-
 ###############################################################################
 ### EXT-FETCHER — download ducklake DuckDB extension (parallel with build)
 ###############################################################################
@@ -21,8 +19,12 @@ RUN /tmp/fetch-ducklake-ext.sh
 ###############################################################################
 ### BUILDER — compile duckpipe-daemon against libduckdb from pg_ducklake
 ###############################################################################
-FROM pgducklake/pgducklake:${PG_VERSION}-main AS builder
-ARG PG_VERSION
+# The daemon is PG-version-agnostic (pure TCP via tokio-postgres).
+# We only use the pg_ducklake image to borrow libduckdb.so at build time.
+# _BUILDER_PG is internal — not a CI matrix dimension.
+ARG _BUILDER_PG=18
+FROM pgducklake/pgducklake:${_BUILDER_PG}-main AS builder
+ARG _BUILDER_PG
 
 USER root
 
@@ -48,8 +50,8 @@ WORKDIR /build
 COPY . .
 
 # Point duckdb-rs at the shared libduckdb.so shipped by pg_ducklake
-ENV DUCKDB_LIB_DIR=/usr/lib/postgresql/${PG_VERSION}/lib \
-    LD_LIBRARY_PATH=/usr/lib/postgresql/${PG_VERSION}/lib
+ENV DUCKDB_LIB_DIR=/usr/lib/postgresql/${_BUILDER_PG}/lib \
+    LD_LIBRARY_PATH=/usr/lib/postgresql/${_BUILDER_PG}/lib
 
 # Build only the daemon binary
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
@@ -72,14 +74,13 @@ RUN apt-get update -qq && \
 # Non-root user
 RUN useradd --create-home --shell /bin/bash duckpipe
 
-ARG PG_VERSION=18
-
 # Daemon binary
 COPY --from=builder /usr/local/bin/duckpipe /usr/local/bin/duckpipe
 
-# libduckdb.so (from pg_ducklake base image)
+# libduckdb.so (from pg_ducklake base image — PG-agnostic shared library)
+ARG _BUILDER_PG=18
 COPY --from=builder \
-    /usr/lib/postgresql/${PG_VERSION}/lib/libduckdb.so \
+    /usr/lib/postgresql/${_BUILDER_PG}/lib/libduckdb.so \
     /usr/local/lib/
 
 RUN ldconfig

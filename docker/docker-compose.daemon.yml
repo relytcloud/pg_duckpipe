@@ -1,14 +1,16 @@
 # Example: standalone daemon connecting to a pg_duckpipe PostgreSQL instance.
 #
 # Usage:
-#   docker compose -f docker-compose.daemon.yml up -d
+#   docker compose -f docker/docker-compose.daemon.yml up -d
 #   curl http://localhost:8080/health
 #
 # The daemon starts unbound. Use POST /groups to create a sync group,
 # or pass --group via DAEMON_ARGS to pre-bind at startup.
 services:
   db:
-    build: .
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
     ports:
       - ${PORT:-5432}:5432
     environment:
@@ -24,8 +26,8 @@ services:
 
   daemon:
     build:
-      context: .
-      dockerfile: Dockerfile.daemon
+      context: ..
+      dockerfile: docker/Dockerfile.daemon
     ports:
       - ${API_PORT:-8080}:8080
     environment:
