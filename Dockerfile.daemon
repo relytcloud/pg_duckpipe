@@ -1,12 +1,9 @@
 ARG PG_VERSION=18
 
 ###############################################################################
-### EXT-FETCHER — download ducklake extension (runs in parallel with build)
+### EXT-FETCHER — download ducklake DuckDB extension (parallel with build)
 ###############################################################################
-FROM pgducklake/pgducklake:${PG_VERSION}-main AS ext-fetcher
-ARG PG_VERSION
-
-USER root
+FROM debian:bookworm-slim AS ext-fetcher
 
 RUN apt-get update -qq && \
     apt-get install -y --no-install-recommends curl ca-certificates && \
@@ -14,11 +11,12 @@ RUN apt-get update -qq && \
 
 COPY docker/fetch-ducklake-ext.sh /tmp/fetch-ducklake-ext.sh
 
-# Download ducklake into a staging directory; postgres_scanner already lives
-# under /var/lib/postgresql/.duckdb/extensions/ in the base image.
-ENV DUCKDB_HOME=/opt/duckdb-staging
-RUN /tmp/fetch-ducklake-ext.sh && \
-    cp -a /var/lib/postgresql/.duckdb/extensions/* /opt/duckdb-staging/.duckdb/extensions/
+# Download ducklake + postgres_scanner extensions.  The upstream
+# postgres_scanner is safe here — the -Bsymbolic issue only affects
+# PG backends, and the daemon runs standalone.
+ENV DUCKDB_HOME=/opt/duckdb-staging \
+    FETCH_POSTGRES_SCANNER=1
+RUN /tmp/fetch-ducklake-ext.sh
 
 ###############################################################################
 ### BUILDER — compile duckpipe-daemon against libduckdb from pg_ducklake
@@ -85,8 +83,7 @@ COPY --from=builder \
 
 RUN ldconfig
 
-# DuckDB extensions: ducklake (downloaded) + postgres_scanner (from pg_ducklake),
-# merged into a single directory by the ext-fetcher stage.
+# DuckDB extensions (ducklake + postgres_scanner, pre-installed for offline use)
 COPY --from=ext-fetcher --chown=duckpipe:duckpipe \
     /opt/duckdb-staging/.duckdb/extensions/ \
     /home/duckpipe/.duckdb/extensions/
