@@ -51,6 +51,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          file: docker/Dockerfile
           target: builder
           build-args: PG_VERSION=${{ matrix.pg_version }}
           load: true
@@ -129,6 +130,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          file: docker/Dockerfile
           target: builder
           build-args: PG_VERSION=${{ matrix.pg_version }}
           load: true

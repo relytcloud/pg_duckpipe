@@ -1,0 +1,40 @@
+# Example: standalone daemon connecting to a pg_duckpipe PostgreSQL instance.
+#
+# Usage:
+#   docker compose -f docker/docker-compose.daemon.yml up -d
+#   curl http://localhost:8080/health
+#
+# The daemon starts unbound. Use POST /groups to create a sync group,
+# or pass --group via DAEMON_ARGS to pre-bind at startup.
+services:
+  db:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    ports:
+      - ${PORT:-5432}:5432
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${PASSWORD:-duckdb}
+    volumes:
+      - pg_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  daemon:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.daemon
+    ports:
+      - ${API_PORT:-8080}:8080
+    environment:
+      CONNSTR: "host=db port=5432 dbname=postgres user=postgres password=${PASSWORD:-duckdb}"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pg_data:

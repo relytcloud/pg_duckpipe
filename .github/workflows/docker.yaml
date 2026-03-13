@@ -12,8 +12,11 @@ on:
     tags: ["v*"]
   pull_request:
     paths:
-      - Dockerfile
-      - docker-bake.hcl
+      - "docker/Dockerfile"
+      - "docker/Dockerfile.daemon"
+      - "docker/docker-bake.hcl"
+      - "docker/fetch-ducklake-ext.sh"
+      - "docker/init.d/**"
       - ".github/workflows/docker.yaml"
   schedule:
     # Rebuild nightly to pick up base-image updates from pg_ducklake
@@ -94,6 +97,7 @@ jobs:
       - name: docker bake
         uses: docker/bake-action@v5
         with:
+          files: docker/docker-bake.hcl
           targets: pg_duckpipe_${{ matrix.postgres }}
           push: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
           set: |
@@ -140,3 +144,114 @@ jobs:
 
           docker buildx imagetools inspect \
             "pgducklake/pipe-ci-builds:${{ matrix.postgres }}-${{ github.sha }}"
+
+  # ---- Standalone daemon image (PG-version-agnostic) ----
+  docker_build_daemon:
+    name: Build daemon image on ${{ matrix.runner }}
+    strategy:
+      matrix:
+        runner: ["ubuntu-24.04", "ubuntu-24.04-arm"]
+
+    runs-on: ${{ matrix.runner }}
+
+    env:
+      BUILDKIT_PROGRESS: plain
+      RAW_REF: ${{ github.head_ref || github.ref_name }}
+    outputs:
+      branch_tag: ${{ steps.params.outputs.branch_tag }}
+      target_repo: ${{ steps.params.outputs.target_repo }}
+
+    steps:
+      - name: Login to Docker Hub
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: docker/login-action@v3
+        with:
+          username: pgducklake
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Checkout pg_duckpipe code
+        uses: actions/checkout@v4
+
+      - name: Compute job parameters
+        id: params
+        run: |
+          BRANCH=$(printf '%s' "$RAW_REF" \
+              | sed 's/[^a-zA-Z0-9\-\.]/-/g' \
+              | cut -c 1-112 | tr '[:upper:]' '[:lower:]' \
+              | sed -e 's/-*$//')
+
+          if [ "${{ matrix.runner }}" = "ubuntu-24.04" ]; then
+            PLATFORM=amd64
+          else
+            PLATFORM=arm64
+          fi
+
+          git fetch --tags --force
+          if [ "$BRANCH" = "main" ] || git rev-parse --verify "$BRANCH"^{tag} > /dev/null 2>&1; then
+            TARGET_REPO='pgducklake/duckpipe-daemon'
+          else
+            TARGET_REPO='pgducklake/pipe-ci-builds'
+          fi
+
+          LATEST_IMAGE="pgducklake/pipe-ci-builds:daemon-${PLATFORM}-${BRANCH}-latest"
+
+          echo "platform=$PLATFORM"             >> "$GITHUB_OUTPUT"
+          echo "branch_tag=$BRANCH"             >> "$GITHUB_OUTPUT"
+          echo "target_repo=$TARGET_REPO"        >> "$GITHUB_OUTPUT"
+          echo "latest_image=$LATEST_IMAGE"      >> "$GITHUB_OUTPUT"
+
+      - name: Attempt to pull previous image for layer cache
+        run: docker pull "${{ steps.params.outputs.latest_image }}" || true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          platforms: linux/${{ steps.params.outputs.platform }}
+
+      - name: docker bake (daemon)
+        uses: docker/bake-action@v5
+        with:
+          files: docker/docker-bake.hcl
+          targets: duckpipe_daemon
+          push: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+          set: |
+            *.platform=linux/${{ steps.params.outputs.platform }}
+            *.cache-from=type=registry,ref=${{ steps.params.outputs.latest_image }}
+            *.cache-from=type=gha,scope=${{ github.workflow }}-daemon
+            *.cache-to=type=gha,mode=max,scope=${{ github.workflow }}-daemon
+            duckpipe_daemon.tags=pgducklake/pipe-ci-builds:daemon-${{ steps.params.outputs.platform }}-${{ github.sha }}
+            duckpipe_daemon.tags=${{ steps.params.outputs.latest_image }}
+
+  docker_merge_daemon:
+    name: Merge daemon image
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+
+    runs-on: ubuntu-24.04
+    needs: docker_build_daemon
+
+    steps:
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: pgducklake
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Merge amd64 + arm64 into a multi-arch manifest
+        run: |
+          docker pull --platform linux/amd64 \
+            pgducklake/pipe-ci-builds:daemon-amd64-${{ github.sha }}
+          docker pull --platform linux/arm64 \
+            pgducklake/pipe-ci-builds:daemon-arm64-${{ github.sha }}
+
+          BRANCH="${{ needs.docker_build_daemon.outputs.branch_tag }}"
+          TARGET_REPO="${{ needs.docker_build_daemon.outputs.target_repo }}"
+
+          echo "Pushing merged daemon manifest to '${TARGET_REPO}'"
+          docker buildx imagetools create \
+            --tag "${TARGET_REPO}:${BRANCH}" \
+            --tag "pgducklake/pipe-ci-builds:daemon-${{ github.sha }}" \
+            "pgducklake/pipe-ci-builds:daemon-amd64-${{ github.sha }}" \
+            "pgducklake/pipe-ci-builds:daemon-arm64-${{ github.sha }}"
+
+          docker buildx imagetools inspect \
+            "pgducklake/pipe-ci-builds:daemon-${{ github.sha }}"

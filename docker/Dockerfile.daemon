@@ -1,0 +1,99 @@
+# _BUILDER_PG is internal — not a CI matrix dimension.
+# The daemon is PG-version-agnostic; we only borrow libduckdb.so at build time.
+ARG _BUILDER_PG=18
+
+###############################################################################
+### EXT-FETCHER — download ducklake DuckDB extension (parallel with build)
+###############################################################################
+FROM debian:bookworm-slim AS ext-fetcher
+
+RUN apt-get update -qq && \
+    apt-get install -y --no-install-recommends curl ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY docker/fetch-ducklake-ext.sh /tmp/fetch-ducklake-ext.sh
+
+# Download ducklake + postgres_scanner extensions.  The upstream
+# postgres_scanner is safe here — the -Bsymbolic issue only affects
+# PG backends, and the daemon runs standalone.
+ENV DUCKDB_HOME=/opt/duckdb-staging \
+    FETCH_POSTGRES_SCANNER=1
+RUN /tmp/fetch-ducklake-ext.sh
+
+###############################################################################
+### BUILDER — compile duckpipe-daemon against libduckdb from pg_ducklake
+###############################################################################
+FROM pgducklake/pgducklake:${_BUILDER_PG}-main AS builder
+ARG _BUILDER_PG
+
+USER root
+
+# Build tools — no clang/libclang-dev needed (pgrx is not used for the daemon)
+RUN apt-get update -qq && \
+    apt-get install -y --no-install-recommends \
+        build-essential \
+        pkg-config \
+        curl \
+        ca-certificates \
+        libssl-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install Rust
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+    sh -s -- -y --no-modify-path --default-toolchain stable --profile minimal
+
+WORKDIR /build
+COPY . .
+
+# Point duckdb-rs at the shared libduckdb.so shipped by pg_ducklake
+ENV DUCKDB_LIB_DIR=/usr/lib/postgresql/${_BUILDER_PG}/lib \
+    LD_LIBRARY_PATH=/usr/lib/postgresql/${_BUILDER_PG}/lib
+
+# Build only the daemon binary
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/build/target \
+    cargo build --release -p duckpipe-daemon && \
+    cp target/release/duckpipe /usr/local/bin/duckpipe
+
+###############################################################################
+### RUNTIME — minimal image with daemon binary + DuckDB libraries
+###############################################################################
+FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update -qq && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates \
+        libssl3 \
+        libcurl4 && \
+    rm -rf /var/lib/apt/lists/*
+
+# Non-root user
+RUN useradd --create-home --shell /bin/bash duckpipe
+
+# Daemon binary
+COPY --from=builder /usr/local/bin/duckpipe /usr/local/bin/duckpipe
+
+# libduckdb.so (from pg_ducklake base image — PG-agnostic shared library)
+ARG _BUILDER_PG=18
+COPY --from=builder \
+    /usr/lib/postgresql/${_BUILDER_PG}/lib/libduckdb.so \
+    /usr/local/lib/
+
+RUN ldconfig
+
+# DuckDB extensions (ducklake + postgres_scanner, pre-installed for offline use)
+COPY --from=ext-fetcher --chown=duckpipe:duckpipe \
+    /opt/duckdb-staging/.duckdb/extensions/ \
+    /home/duckpipe/.duckdb/extensions/
+
+USER duckpipe
+WORKDIR /home/duckpipe
+
+EXPOSE 8080
+
+ENTRYPOINT ["duckpipe"]
+CMD ["--api-bind", "0.0.0.0"]

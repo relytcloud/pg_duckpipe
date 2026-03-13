@@ -1,13 +1,15 @@
 services:
   db:
-    build: .
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
     ports:
       - ${PORT:-5432}:5432
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${PASSWORD:-duckdb}
     volumes:
-      - pg_duckpipe_data:/var/lib/postgresql/data
+      - pg_duckpipe_data:/var/lib/postgresql
     restart: always
 
 volumes:
