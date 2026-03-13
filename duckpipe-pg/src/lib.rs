@@ -14,8 +14,8 @@ extension_sql_file!("./sql/bootstrap.sql", bootstrap);
 // Shared memory metrics
 // ---------------------------------------------------------------------------
 
-const MAX_METRICS_TABLES: usize = 128;
-const MAX_METRICS_GROUPS: usize = 8;
+const MAX_METRICS_TABLES: usize = 1024;
+const MAX_METRICS_GROUPS: usize = 64;
 
 #[derive(Copy, Clone)]
 #[repr(C)]
