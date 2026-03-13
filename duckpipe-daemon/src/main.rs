@@ -9,6 +9,7 @@
 
 mod api;
 
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -68,8 +69,8 @@ struct Args {
     api_port: u16,
 
     /// HTTP API bind address.
-    #[arg(long, default_value = "127.0.0.1")]
-    api_bind: String,
+    #[arg(long, default_value_t = IpAddr::from([127, 0, 0, 1]))]
+    api_bind: IpAddr,
 }
 
 #[tokio::main]
@@ -114,7 +115,7 @@ async fn main() {
     if args.api_port > 0 {
         let api_state = state.clone();
         let api_port = args.api_port;
-        let api_bind = args.api_bind.clone();
+        let api_bind = args.api_bind;
         tokio::spawn(async move {
             let router = api::router(api_state);
             let addr = format!("{}:{}", api_bind, api_port);

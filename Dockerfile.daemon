@@ -1,6 +1,26 @@
 ARG PG_VERSION=18
 
 ###############################################################################
+### EXT-FETCHER — download ducklake extension (runs in parallel with build)
+###############################################################################
+FROM pgducklake/pgducklake:${PG_VERSION}-main AS ext-fetcher
+ARG PG_VERSION
+
+USER root
+
+RUN apt-get update -qq && \
+    apt-get install -y --no-install-recommends curl ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY docker/fetch-ducklake-ext.sh /tmp/fetch-ducklake-ext.sh
+
+# Download ducklake into a staging directory; postgres_scanner already lives
+# under /var/lib/postgresql/.duckdb/extensions/ in the base image.
+ENV DUCKDB_HOME=/opt/duckdb-staging
+RUN /tmp/fetch-ducklake-ext.sh && \
+    cp -a /var/lib/postgresql/.duckdb/extensions/* /opt/duckdb-staging/.duckdb/extensions/
+
+###############################################################################
 ### BUILDER — compile duckpipe-daemon against libduckdb from pg_ducklake
 ###############################################################################
 FROM pgducklake/pgducklake:${PG_VERSION}-main AS builder
@@ -8,12 +28,10 @@ ARG PG_VERSION
 
 USER root
 
-# Build tools (no PG dev headers or pgrx needed for the standalone daemon)
+# Build tools — no clang/libclang-dev needed (pgrx is not used for the daemon)
 RUN apt-get update -qq && \
     apt-get install -y --no-install-recommends \
         build-essential \
-        clang \
-        libclang-dev \
         pkg-config \
         curl \
         ca-certificates \
@@ -41,11 +59,6 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release -p duckpipe-daemon && \
     cp target/release/duckpipe /usr/local/bin/duckpipe
 
-# Download the ducklake DuckDB extension into a staging directory.
-# DUCKDB_HOME controls the install prefix (see fetch-ducklake-ext.sh).
-ENV DUCKDB_HOME=/opt/duckdb-staging
-RUN /build/docker/fetch-ducklake-ext.sh
-
 ###############################################################################
 ### RUNTIME — minimal image with daemon binary + DuckDB libraries
 ###############################################################################
@@ -72,12 +85,10 @@ COPY --from=builder \
 
 RUN ldconfig
 
-# DuckDB extensions: ducklake (downloaded) + postgres_scanner (from pg_ducklake)
-COPY --from=builder --chown=duckpipe:duckpipe \
+# DuckDB extensions: ducklake (downloaded) + postgres_scanner (from pg_ducklake),
+# merged into a single directory by the ext-fetcher stage.
+COPY --from=ext-fetcher --chown=duckpipe:duckpipe \
     /opt/duckdb-staging/.duckdb/extensions/ \
-    /home/duckpipe/.duckdb/extensions/
-COPY --from=builder --chown=duckpipe:duckpipe \
-    /var/lib/postgresql/.duckdb/extensions/ \
     /home/duckpipe/.duckdb/extensions/
 
 USER duckpipe
