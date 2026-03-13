@@ -65,7 +65,8 @@ FROM debian:bookworm-slim AS runtime
 RUN apt-get update -qq && \
     apt-get install -y --no-install-recommends \
         ca-certificates \
-        libssl3 && \
+        libssl3 \
+        libcurl4 && \
     rm -rf /var/lib/apt/lists/*
 
 # Non-root user
