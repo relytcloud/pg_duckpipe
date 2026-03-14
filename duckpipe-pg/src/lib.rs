@@ -1,6 +1,8 @@
 mod api;
 mod worker;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use pgrx::guc::{GucContext, GucFlags, GucRegistry, GucSetting};
 use pgrx::lwlock::PgLwLock;
 use pgrx::pg_shmem_init;
@@ -66,11 +68,26 @@ unsafe impl PGRXSharedMemory for SharedMetrics {}
 // SAFETY: PgLwLock::new is const and only initialises the lock name; no runtime invariants.
 pub static METRICS_SHM: PgLwLock<SharedMetrics> = unsafe { PgLwLock::new(c"duckpipe_metrics") };
 
+/// Set to `true` during `_PG_init` only when loaded via `shared_preload_libraries`.
+/// pg_shmem_init! registers the lock for initialization in the shmem_startup_hook,
+/// which only fires during postmaster startup.  If the extension is loaded later
+/// (e.g. via CREATE EXTENSION without being in shared_preload_libraries), the hook
+/// has already run and the PgLwLock is never initialised — accessing it panics.
+/// This flag lets read/write helpers gracefully degrade instead of crashing.
+static SHM_AVAILABLE: AtomicBool = AtomicBool::new(false);
+
+fn shmem_available() -> bool {
+    SHM_AVAILABLE.load(Ordering::Relaxed)
+}
+
 /// Write all metrics to shared memory in a single lock acquisition.
 ///
 /// `group`: `(group_id, total_queued_changes, is_backpressured)`
 /// `tables`: `Vec<(mapping_id, queued_changes, duckdb_memory_bytes, flush_count, flush_duration_ms)>`
 pub fn write_shmem_metrics(group: (i32, i64, bool), tables: &[(i32, i64, i64, i64, i64)]) {
+    if !shmem_available() {
+        return;
+    }
     let mut shm = METRICS_SHM.exclusive();
 
     // Group metrics
@@ -134,6 +151,9 @@ pub fn write_shmem_metrics(group: (i32, i64, bool), tables: &[(i32, i64, i64, i6
 
 /// Clear a table slot from shared memory (called on table removal).
 pub fn clear_shmem_table_slot(mapping_id: i32) {
+    if !shmem_available() {
+        return;
+    }
     let mut shm = METRICS_SHM.exclusive();
     for slot in shm.tables.iter_mut() {
         if slot.mapping_id == mapping_id {
@@ -151,6 +171,9 @@ pub fn clear_shmem_table_slot(mapping_id: i32) {
 
 /// Clear a group slot from shared memory (called on group drop).
 pub fn clear_shmem_group_slot(group_id: i32) {
+    if !shmem_available() {
+        return;
+    }
     let mut shm = METRICS_SHM.exclusive();
     for slot in shm.groups.iter_mut() {
         if slot.group_id == group_id {
@@ -165,7 +188,15 @@ pub fn clear_shmem_group_slot(group_id: i32) {
 }
 
 /// Read all active table metrics slots from shared memory as a HashMap.
+/// Returns an empty map when SHM is not available (extension not in shared_preload_libraries).
 pub fn read_shmem_table_metrics() -> std::collections::HashMap<i32, (i64, i64, i64, i64)> {
+    if !shmem_available() {
+        pgrx::notice!(
+            "pg_duckpipe: shared-memory metrics unavailable \
+             (not in shared_preload_libraries); queued_changes will show 0"
+        );
+        return std::collections::HashMap::new();
+    }
     let shm = METRICS_SHM.share();
     shm.tables
         .iter()
@@ -185,7 +216,15 @@ pub fn read_shmem_table_metrics() -> std::collections::HashMap<i32, (i64, i64, i
 }
 
 /// Read all active group metrics slots from shared memory as a HashMap.
+/// Returns an empty map when SHM is not available (extension not in shared_preload_libraries).
 pub fn read_shmem_group_metrics() -> std::collections::HashMap<i32, (i64, bool)> {
+    if !shmem_available() {
+        pgrx::notice!(
+            "pg_duckpipe: shared-memory metrics unavailable \
+             (not in shared_preload_libraries); worker metrics will show defaults"
+        );
+        return std::collections::HashMap::new();
+    }
     let shm = METRICS_SHM.share();
     shm.groups
         .iter()
@@ -214,7 +253,21 @@ pub(crate) static MAX_QUEUED_CHANGES: GucSetting<i32> = GucSetting::<i32>::new(5
 
 #[pg_guard]
 extern "C-unwind" fn _PG_init() {
+    // pg_shmem_init! registers the lock for the shmem_startup_hook which only
+    // fires during postmaster startup — i.e. when loaded via shared_preload_libraries.
     pg_shmem_init!(METRICS_SHM);
+
+    // SAFETY: reading a global bool set by PostgreSQL during shared_preload_libraries processing.
+    let in_spl = unsafe { pg_sys::process_shared_preload_libraries_in_progress };
+    if in_spl {
+        SHM_AVAILABLE.store(true, Ordering::Relaxed);
+    } else {
+        pgrx::warning!(
+            "pg_duckpipe is not in shared_preload_libraries — \
+             shared-memory metrics are unavailable.  \
+             Add pg_duckpipe to shared_preload_libraries and restart PostgreSQL."
+        );
+    }
 
     GucRegistry::define_int_guc(
         c"duckpipe.poll_interval",
