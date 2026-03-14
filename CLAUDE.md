@@ -47,6 +47,7 @@ Heap Tables → WAL → Replication Slot (pgoutput) → Decoder → FlushCoordin
 |-----|---------|
 | `doc/USAGE.md` | User-facing: SQL API, monitoring, GUCs, tuning |
 | `doc/REMOTE_SYNC.md` | Remote sync: connection strings, TLS, architecture |
+| `doc/DATA_TYPES.md` | PG→DuckDB type mapping, conversion architecture, limitations |
 | `doc/CODE_WALKTHROUGH.md` | Developer-facing: detailed code walkthrough |
 | `doc/DESIGN_V2.md` | Historical: original v2 architecture design |
 | `doc/PARALLELISM.md` | Parallelism model: threads, async tasks, communication, backpressure |

@@ -71,7 +71,15 @@ fn quote_ident(name: &str) -> String {
     }
 }
 
-/// Quote a literal for SQL
+/// Map PG type names to DuckDB-compatible equivalents.
+fn map_pg_type_for_duckdb(pg_type: &str) -> String {
+    match pg_type {
+        "jsonb" | "json" => "JSON".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// Quote a literal for SQL.
 fn quote_literal(val: &str) -> String {
     unsafe {
         let c_val = std::ffi::CString::new(val).unwrap();
@@ -811,10 +819,10 @@ fn add_table(
         }
     };
 
-    // 6. Column definitions (remote only — needed for explicit CREATE TABLE DDL)
-    let col_defs: Option<Vec<(String, String)>> = if source.is_remote() {
+    // 6. Column definitions (introspect for both local and remote — needed for PG→DuckDB type mapping)
+    let col_defs: Vec<(String, String)> = {
         let col_sql = format!(
-            "SELECT a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod) \
+            "SELECT a.attname::text, pg_catalog.format_type(a.atttypid, a.atttypmod) \
              FROM pg_class c \
              JOIN pg_namespace n ON n.oid = c.relnamespace \
              JOIN pg_attribute a ON a.attrelid = c.oid \
@@ -830,7 +838,7 @@ fn add_table(
                 ereport!(
                     ERROR,
                     PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                    format!("Failed to introspect remote columns: {}", e)
+                    format!("Failed to introspect columns: {}", e)
                 );
             }
         };
@@ -838,12 +846,10 @@ fn add_table(
             ereport!(
                 ERROR,
                 PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                format!("no columns found for {}.{} on remote PG", schema, table)
+                format!("no columns found for {}.{}", schema, table)
             );
         }
-        Some(cols)
-    } else {
-        None
+        cols
     };
 
     // 7. Verify PK exists (remote only — local CREATE PUBLICATION would fail without one)
@@ -896,38 +902,31 @@ fn add_table(
             }
         }
 
-        // Create target table
-        let create_sql = if let Some(ref cols) = col_defs {
-            // Remote: explicit column definitions from introspection.
-            // Sanitize type_str: format_type() output from remote PG is untrusted.
-            for (name, type_str) in cols {
+        // Create target table — always use explicit column definitions with PG→DuckDB type mapping
+        {
+            // Sanitize type_str: for remote PG the format_type() output is untrusted;
+            // for local PG it's trusted but we check defensively anyway.
+            for (name, type_str) in &col_defs {
                 if type_str.contains(';') || type_str.contains("--") || type_str.contains("/*") {
                     return Err(format!(
-                        "suspicious type '{}' for column '{}' from remote PG — refusing to interpolate",
+                        "suspicious type '{}' for column '{}' — refusing to interpolate",
                         type_str, name
                     ));
                 }
             }
-            let col_clauses: Vec<String> = cols
-                .iter()
-                .map(|(name, type_str)| format!("{} {}", quote_ident(name), type_str))
-                .collect();
-            format!(
-                "CREATE TABLE IF NOT EXISTS {}.{} ({}) USING ducklake",
-                quote_ident(&t_schema),
-                quote_ident(&t_table),
-                col_clauses.join(", "),
-            )
-        } else {
-            // Local: LIKE source table
-            format!(
-                "CREATE TABLE IF NOT EXISTS {}.{} (LIKE {}.{}) USING ducklake",
-                quote_ident(&t_schema),
-                quote_ident(&t_table),
-                quote_ident(&schema),
-                quote_ident(&table)
-            )
-        };
+        }
+        let col_clauses: Vec<String> = col_defs
+            .iter()
+            .map(|(name, type_str)| {
+                format!("{} {}", quote_ident(name), map_pg_type_for_duckdb(type_str))
+            })
+            .collect();
+        let create_sql = format!(
+            "CREATE TABLE IF NOT EXISTS {}.{} ({}) USING ducklake",
+            quote_ident(&t_schema),
+            quote_ident(&t_table),
+            col_clauses.join(", "),
+        );
         client
             .update(&create_sql, None, &[])
             .map_err(|e| format!("CREATE TABLE: {}", e))?;

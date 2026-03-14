@@ -48,5 +48,7 @@ test: snapshot_race
 test: notify_wakeup
 # Removing a table must not hold back confirmed_lsn for remaining tables
 test: remove_table_lag
+# JSONB column type mapping (PG jsonb → DuckDB JSON)
+test: jsonb_type
 # Remote sync: loopback TCP exercises tokio-postgres DDL path
 test: remote_sync
