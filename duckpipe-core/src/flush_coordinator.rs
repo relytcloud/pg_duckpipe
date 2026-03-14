@@ -18,17 +18,15 @@ use std::time::{Duration, Instant};
 use crate::duckdb_flush::FlushWorker;
 use crate::flush_worker;
 use crate::metadata::ERRORED_THRESHOLD;
-use crate::queue::TableQueue;
 use crate::types::Change;
 
-/// Cloneable table schema info for constructing TableQueue inside the flush thread.
+/// Cloneable table schema info used by the flush thread for DuckDB buffer operations.
 #[derive(Clone, Debug)]
 struct QueueMeta {
     target_key: String,
     mapping_id: i32,
     attnames: Vec<String>,
     key_attrs: Vec<usize>,
-    atttypes: Vec<u32>,
 }
 
 /// Shared queue data protected by Mutex.
@@ -183,7 +181,7 @@ impl FlushCoordinator {
         initial_applied_lsn: u64,
         attnames: Vec<String>,
         key_attrs: Vec<usize>,
-        atttypes: Vec<u32>,
+        _atttypes: Vec<u32>,
         paused: bool,
     ) {
         // Seed in-memory LSN from the persistent PG value if we haven't seen this table yet.
@@ -221,7 +219,6 @@ impl FlushCoordinator {
             mapping_id,
             attnames,
             key_attrs,
-            atttypes,
         };
 
         let queue_handle = Arc::new(TableQueueHandle {
@@ -671,7 +668,11 @@ impl Drop for FlushCoordinator {
 /// Each thread owns its own `FlushWorker` (with a DuckDB connection).
 /// On flush error, the worker is dropped and lazily recreated on the next iteration.
 ///
-/// Self-trigger logic: flush when accumulated changes >= batch_threshold OR
+/// Changes are drained from the shared queue into a DuckDB buffer table (spillable
+/// to disk), decoupling queue consumption from flushing and enabling larger batch
+/// windows without unbounded Rust memory growth.
+///
+/// Self-trigger logic: flush when buffered changes >= batch_threshold OR
 /// time since last flush >= flush_interval. Flush threads also handle PG metadata
 /// updates (applied_lsn, metrics, error state) via their own tokio runtime.
 fn flush_thread_main(
@@ -696,18 +697,18 @@ fn flush_thread_main(
         .expect("failed to create flush thread runtime");
 
     let mut worker: Option<FlushWorker> = None;
-    let mut accumulated: Vec<Change> = Vec::new();
-    let mut accumulated_count: i64 = 0; // tracks changes in local accumulator for backpressure
-    let mut accumulated_lsn: u64 = 0;
-    let mut accumulated_meta: Option<QueueMeta> = None;
+    let mut buffered_count: i64 = 0; // tracks changes in DuckDB buffer for backpressure
+    let mut buffered_lsn: u64 = 0;
+    let mut buffered_meta: Option<QueueMeta> = None;
+    let mut next_seq: i32 = 0; // monotonic counter for _seq across appends
     let mut last_flush = Instant::now();
     let flush_interval = Duration::from_millis(flush_interval_ms);
 
     loop {
         // Calculate remaining time until next time-based flush
         let elapsed = last_flush.elapsed();
-        let wait_timeout = if accumulated.is_empty() {
-            // No accumulated changes — wait for full interval
+        let wait_timeout = if buffered_count == 0 {
+            // No buffered changes — wait for full interval
             flush_interval
         } else if elapsed >= flush_interval {
             // Already past interval — don't wait
@@ -736,11 +737,14 @@ fn flush_thread_main(
 
             // Check shutdown
             if control.shutdown.load(Ordering::Acquire) {
-                // Drop in-memory changes — confirmed_lsn was never advanced past them,
-                // so PostgreSQL will re-deliver them on the next startup.
+                // Clear DuckDB buffer — confirmed_lsn was never advanced past
+                // buffered data, so PostgreSQL will re-deliver on next startup.
+                if let Some(w) = worker.as_mut() {
+                    w.clear_buffer();
+                }
                 backpressure
                     .total_queued
-                    .fetch_sub(accumulated_count, Ordering::Relaxed);
+                    .fetch_sub(buffered_count, Ordering::Relaxed);
                 pending_local.store(0, Ordering::Relaxed);
                 if control.drain_requested.load(Ordering::Acquire) {
                     signal_drain_complete(&drain_complete, &control);
@@ -748,21 +752,19 @@ fn flush_thread_main(
                 return;
             }
 
-            // Drain up to `batch_threshold` changes from the shared queue into
-            // the local accumulator.
+            // Drain up to `batch_threshold` changes from the shared queue,
+            // append them to the DuckDB buffer table, then drop the local Vec.
             //
             // Capping the drain is critical for progress visibility: when the
             // WAL consumer has queued a large backlog (e.g. 200k catch-up
             // changes), draining all at once produces one monolithic DuckDB
             // transaction that takes 25+ seconds with no intermediate commits.
-            // The benchmark (and any monitoring query) sees 0 rows/s until the
-            // transaction commits, then a sudden jump.  With a per-drain cap of
-            // `batch_threshold`, large queues are processed in chunks: each
-            // chunk flushes independently, commits, and becomes immediately
-            // visible in DuckLake.
+            // With a per-drain cap of `batch_threshold`, large queues are
+            // processed in chunks: each chunk flushes independently, commits,
+            // and becomes immediately visible in DuckLake.
             //
-            // LSN safety: `accumulated_lsn` is derived from the drained
-            // changes only (max of their per-change `.lsn`).  We must NOT use
+            // LSN safety: `buffered_lsn` is derived from the drained changes
+            // only (max of their per-change `.lsn`).  We must NOT use
             // `guard.last_lsn` here because that reflects the last change in
             // the *entire* queue — setting applied_lsn past unflushed changes
             // would be crash-unsafe (slot could advance past un-flushed WAL).
@@ -772,22 +774,89 @@ fn flush_thread_main(
                 let count = changes.len() as i64;
                 // Max LSN across drained changes (WAL is ordered, so last = max).
                 let drained_lsn = changes.last().map(|c| c.lsn).unwrap_or(0);
-                if drained_lsn > accumulated_lsn {
-                    accumulated_lsn = drained_lsn;
+                if drained_lsn > buffered_lsn {
+                    buffered_lsn = drained_lsn;
                 }
-                if accumulated_meta.is_none() {
-                    accumulated_meta = Some(guard.meta.clone());
+                if buffered_meta.is_none() {
+                    buffered_meta = Some(guard.meta.clone());
                 }
-                drop(guard); // Release lock before extending accumulator
+                drop(guard); // Release lock before DuckDB work
 
-                accumulated.extend(changes);
-                accumulated_count += count;
-                // Update local-accumulator counter so the coordinator can read it
-                // without locking.  Relaxed ordering is fine for diagnostics.
-                pending_local.store(accumulated_count, Ordering::Relaxed);
-                // Note: backpressure counter is NOT decremented here.
-                // It is decremented after flush/clear to accurately reflect
-                // all in-flight data (shared queues + local accumulators).
+                // buffered_meta is a thread-local Option, safe to borrow after drop(guard)
+                let meta = buffered_meta.as_ref().unwrap();
+
+                // Ensure FlushWorker exists before appending
+                if worker.is_none() {
+                    match FlushWorker::new(pg_connstr, ducklake_schema) {
+                        Ok(w) => worker = Some(w),
+                        Err(e) => {
+                            let error_msg = format!("failed to create FlushWorker: {}", e);
+                            backpressure
+                                .total_queued
+                                .fetch_sub(buffered_count + count, Ordering::Relaxed);
+                            buffered_count = 0;
+                            next_seq = 0;
+                            pending_local.store(0, Ordering::Relaxed);
+                            buffered_lsn = 0;
+                            report_flush_error(
+                                &result_tx,
+                                &rt,
+                                pg_connstr,
+                                group_name,
+                                &meta.target_key,
+                                meta.mapping_id,
+                                &error_msg,
+                            );
+                            drain_requested = control.drain_requested.load(Ordering::Acquire);
+                            if drain_requested {
+                                signal_drain_complete(&drain_complete, &control);
+                            }
+                            continue;
+                        }
+                    }
+                }
+
+                // Append to DuckDB buffer
+                match worker.as_mut().unwrap().append_to_buffer(
+                    &changes,
+                    &meta.target_key,
+                    &meta.attnames,
+                    &meta.key_attrs,
+                    next_seq,
+                ) {
+                    Ok(new_seq) => {
+                        next_seq = new_seq;
+                        buffered_count += count;
+                        pending_local.store(buffered_count, Ordering::Relaxed);
+                    }
+                    Err(e) => {
+                        // Append failed — drop worker (loses DuckDB buffer),
+                        // decrement backpressure for all lost data, send error.
+                        worker = None;
+                        backpressure
+                            .total_queued
+                            .fetch_sub(buffered_count + count, Ordering::Relaxed);
+                        buffered_count = 0;
+                        next_seq = 0;
+                        pending_local.store(0, Ordering::Relaxed);
+                        buffered_lsn = 0;
+                        report_flush_error(
+                            &result_tx,
+                            &rt,
+                            pg_connstr,
+                            group_name,
+                            &meta.target_key,
+                            meta.mapping_id,
+                            &e,
+                        );
+                        drain_requested = control.drain_requested.load(Ordering::Acquire);
+                        if drain_requested {
+                            signal_drain_complete(&drain_complete, &control);
+                        }
+                        continue;
+                    }
+                }
+                // Local Vec<Change> is dropped here — Rust memory freed.
             } else {
                 drop(guard);
             }
@@ -797,15 +866,16 @@ fn flush_thread_main(
 
         // Determine whether to flush
         let should_flush = if control.paused.load(Ordering::Acquire) {
-            // Paused (SNAPSHOT in progress): accumulate only, don't flush.
-            // WAL changes are buffered until snapshot completes and unpause_table() is called.
+            // Paused (SNAPSHOT in progress): accumulate in DuckDB buffer only, don't flush.
+            // WAL changes are buffered (spillable to disk) until snapshot completes
+            // and unpause_table() is called.
             false
         } else if drain_requested {
             // Explicit drain request (TRUNCATE or shutdown) — always flush
             true
-        } else if accumulated.is_empty() {
+        } else if buffered_count == 0 {
             false
-        } else if accumulated.len() >= batch_threshold {
+        } else if buffered_count as usize >= batch_threshold {
             // Batch threshold reached
             true
         } else {
@@ -813,27 +883,26 @@ fn flush_thread_main(
             last_flush.elapsed() >= flush_interval
         };
 
-        if should_flush && !accumulated.is_empty() {
-            if let Some(meta) = accumulated_meta.as_ref() {
-                do_flush(
+        if should_flush && buffered_count > 0 {
+            if let Some(meta) = buffered_meta.as_ref() {
+                do_flush_buffer(
                     &mut worker,
-                    &mut accumulated,
-                    accumulated_lsn,
+                    buffered_count,
+                    buffered_lsn,
                     meta,
                     pg_connstr,
-                    ducklake_schema,
                     group_name,
                     &result_tx,
                     &rt,
                 );
             }
-            accumulated.clear();
             backpressure
                 .total_queued
-                .fetch_sub(accumulated_count, Ordering::Relaxed);
-            accumulated_count = 0;
+                .fetch_sub(buffered_count, Ordering::Relaxed);
+            buffered_count = 0;
+            next_seq = 0;
             pending_local.store(0, Ordering::Relaxed);
-            accumulated_lsn = 0;
+            buffered_lsn = 0;
             // Reset from AFTER flush completion, not before. This gives a
             // cooldown of flush_interval between flushes. Under a slow flush,
             // the next trigger comes from batch_threshold, not the timer.
@@ -847,56 +916,35 @@ fn flush_thread_main(
     }
 }
 
-/// Execute a flush: build TableQueue, run FlushWorker, update PG metadata.
-fn do_flush(
+/// Execute a flush from the DuckDB buffer: compact, apply to DuckLake, update PG metadata.
+fn do_flush_buffer(
     worker: &mut Option<FlushWorker>,
-    accumulated: &mut Vec<Change>,
+    buffered_count: i64,
     last_lsn: u64,
     meta: &QueueMeta,
     pg_connstr: &str,
-    ducklake_schema: &str,
     group_name: &str,
     result_tx: &mpsc::Sender<FlushThreadResult>,
     rt: &tokio::runtime::Runtime,
 ) {
-    // Build a TableQueue from accumulated changes
-    let mut table_queue = TableQueue::new(
-        meta.target_key.clone(),
-        meta.mapping_id,
-        meta.attnames.clone(),
-        meta.key_attrs.clone(),
-        meta.atttypes.clone(),
-    );
-    for change in accumulated.drain(..) {
-        table_queue.push(change);
-    }
-
-    // Ensure we have a FlushWorker
-    if worker.is_none() {
-        match FlushWorker::new(pg_connstr, ducklake_schema) {
-            Ok(w) => *worker = Some(w),
-            Err(e) => {
-                let error_msg = format!("failed to create FlushWorker: {}", e);
-                let _ = result_tx.send(FlushThreadResult::Error {
-                    target_key: meta.target_key.clone(),
-                    mapping_id: meta.mapping_id,
-                    error: error_msg.clone(),
-                });
-                // Update error state in PG
-                let _ = rt.block_on(flush_worker::update_error_state(
-                    pg_connstr,
-                    meta.mapping_id,
-                    &error_msg,
-                    ERRORED_THRESHOLD,
-                    group_name,
-                ));
-                return;
-            }
+    let w = match worker.as_mut() {
+        Some(w) => w,
+        None => {
+            // Worker should exist if buffered_count > 0, but handle gracefully
+            report_flush_error(
+                result_tx,
+                rt,
+                pg_connstr,
+                group_name,
+                &meta.target_key,
+                meta.mapping_id,
+                "FlushWorker missing at flush time",
+            );
+            return;
         }
-    }
+    };
 
-    // Flush
-    match worker.as_mut().unwrap().flush(table_queue) {
+    match w.flush_buffer(&meta.target_key, meta.mapping_id, buffered_count) {
         Ok(result) => {
             // Update PG metadata: metrics + applied_lsn
             if let Err(e) = rt.block_on(flush_worker::update_metrics_via_pg(
@@ -931,21 +979,41 @@ fn do_flush(
         Err(e) => {
             // Drop worker on error — will be recreated on next iteration
             *worker = None;
-            let _ = result_tx.send(FlushThreadResult::Error {
-                target_key: meta.target_key.clone(),
-                mapping_id: meta.mapping_id,
-                error: e.clone(),
-            });
-            // Update error state in PG
-            let _ = rt.block_on(flush_worker::update_error_state(
+            report_flush_error(
+                result_tx,
+                rt,
                 pg_connstr,
+                group_name,
+                &meta.target_key,
                 meta.mapping_id,
                 &e,
-                ERRORED_THRESHOLD,
-                group_name,
-            ));
+            );
         }
     }
+}
+
+/// Send error result via mpsc and update PG error state.
+fn report_flush_error(
+    result_tx: &mpsc::Sender<FlushThreadResult>,
+    rt: &tokio::runtime::Runtime,
+    pg_connstr: &str,
+    group_name: &str,
+    target_key: &str,
+    mapping_id: i32,
+    error: &str,
+) {
+    let _ = result_tx.send(FlushThreadResult::Error {
+        target_key: target_key.to_string(),
+        mapping_id,
+        error: error.to_string(),
+    });
+    let _ = rt.block_on(flush_worker::update_error_state(
+        pg_connstr,
+        mapping_id,
+        error,
+        ERRORED_THRESHOLD,
+        group_name,
+    ));
 }
 
 /// Helper: signal the drain_complete condvar and clear the drain_requested flag.

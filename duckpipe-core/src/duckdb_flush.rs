@@ -2,14 +2,17 @@
 //!
 //! Each target table gets a persistent `FlushWorker` holding a long-lived `duckdb::Connection`.
 //! The expensive one-time setup (INSTALL+LOAD+ATTACH) happens once at creation.
-//! Subsequent flushes only create/drop the lightweight buffer table.
+//!
+//! The buffer lifecycle is split into three phases:
+//! 1. `append_to_buffer()` — lazy-creates the buffer table, loads changes via DuckDB Appender
+//! 2. `flush_buffer()` — compacts (dedup by PK), applies DELETE+INSERT to DuckLake, drops buffer
+//! 3. `clear_buffer()` — drops the buffer table without flushing (shutdown/error)
 
 use std::time::Instant;
 
 use duckdb::{Config, Connection};
 
-use crate::queue::TableQueue;
-use crate::types::{ChangeType, Value};
+use crate::types::{Change, ChangeType, Value};
 
 /// Push a Value into a row Vec for the DuckDB Appender.
 /// Text values are auto-cast by DuckDB to the buffer table's declared column type.
@@ -166,13 +169,31 @@ fn query_memory_usage(db: &Connection) -> i64 {
     rows.iter().map(|s| parse_memory_usage(s)).sum()
 }
 
+/// Parse a "schema.table" target_key into (schema, table).
+fn parse_target_key(target_key: &str) -> Result<(&str, &str), String> {
+    target_key
+        .split_once('.')
+        .ok_or_else(|| format!("invalid target_key: {}", target_key))
+}
+
 /// Persistent flush worker for a single target table.
 ///
 /// Holds a long-lived DuckDB connection with INSTALL+LOAD+ATTACH done once at creation.
-/// Subsequent flushes only create/drop the lightweight buffer table.
+/// The buffer table is lazily created and persists across append calls within a flush window,
+/// allowing DuckDB to spill to disk for large batches.
 pub struct FlushWorker {
     db: Connection,
     lake_info: Option<LakeTableInfo>,
+    /// True while a `buffer` table exists in the DuckDB instance.
+    buffer_exists: bool,
+    /// Tracked during `append_to_buffer()`, reset when buffer is cleared/flushed.
+    has_non_inserts: bool,
+    /// Cached from `ensure_buffer()` — the table name portion of target_key.
+    target_table: Option<String>,
+    /// Cached from `ensure_buffer()` — quoted PK column identifiers.
+    cached_pk_cols: Option<Vec<String>>,
+    /// Cached from `ensure_buffer()` — quoted all column identifiers.
+    cached_all_cols: Option<Vec<String>>,
     /// True while this worker may encounter duplicate PKs between the lake and an
     /// incoming pure-insert batch (e.g., during WAL replay after initial snapshot
     /// or after a resync).  The DELETE step is always run while this flag is set.
@@ -218,75 +239,61 @@ impl FlushWorker {
         Ok(FlushWorker {
             db,
             lake_info: None,
+            buffer_exists: false,
+            has_non_inserts: false,
+            target_table: None,
+            cached_pk_cols: None,
+            cached_all_cols: None,
             may_have_conflicts: true,
         })
     }
 
-    /// Flush a table queue using the persistent DuckDB connection.
-    pub fn flush(&mut self, mut queue: TableQueue) -> Result<DuckDbFlushResult, String> {
-        let target_key = queue.target_key.clone();
-        let mapping_id = queue.mapping_id;
-
-        if queue.is_empty() {
-            return Ok(DuckDbFlushResult {
-                target_key,
-                mapping_id,
-                applied_count: 0,
-                memory_bytes: 0,
-                flush_duration_ms: 0,
-            });
+    /// Lazy-create the buffer table if it doesn't exist yet.
+    ///
+    /// Discovers `lake_info` if not cached, then creates:
+    /// `CREATE TABLE buffer (_seq INTEGER, _op_type INTEGER, col1 TYPE1, ...)`
+    ///
+    /// Also caches `target_table`, `pk_cols`, and `all_cols` for use by `flush_buffer()`.
+    /// No-op if buffer already exists.
+    fn ensure_buffer(
+        &mut self,
+        target_key: &str,
+        attnames: &[String],
+        key_attrs: &[usize],
+    ) -> Result<(), String> {
+        if self.buffer_exists {
+            return Ok(());
         }
 
-        let attnames = queue.attnames.clone();
-        let key_attrs = queue.key_attrs.clone();
-        let changes = queue.drain();
-        let applied_count = changes.len() as i64;
-        let flush_start = Instant::now();
-
-        // Track whether this batch contains any UPDATE or DELETE operations.
-        // Used below to annotate the timing log.
-        let has_non_inserts = changes
-            .iter()
-            .any(|c| !matches!(c.change_type, ChangeType::Insert));
-
-        // Parse target schema.table
-        let parts: Vec<&str> = target_key.splitn(2, '.').collect();
-        if parts.len() != 2 {
-            return Err(format!("invalid target_key: {}", target_key));
-        }
-        let target_schema = parts[0];
-        let target_table = parts[1];
+        let (target_schema, target_table) = parse_target_key(target_key)?;
 
         // Discover lake table info on first call or when cache is empty
-        let t_phase = Instant::now();
         if self.lake_info.is_none() {
             self.lake_info = Some(discover_lake_table_info(
                 &self.db,
                 target_schema,
                 target_table,
-                &attnames,
+                attnames,
             )?);
         }
         let lake_info = self.lake_info.as_ref().unwrap();
-        let t_discover_ms = t_phase.elapsed().as_secs_f64() * 1000.0;
 
-        // Enforce REPLICA IDENTITY FULL: all source tables must have it set so
-        // pgoutput always includes every column value in UPDATE WAL records.
-        // Any 'u'-status (TOAST unchanged) column reaching the flush path means
-        // the source table had its REPLICA IDENTITY changed after add_table().
-        if changes.iter().any(|c| c.col_unchanged.iter().any(|&u| u)) {
-            return Err(
-                "TOAST unchanged column detected in WAL — source table must have \
-                 REPLICA IDENTITY FULL. Run: ALTER TABLE <name> REPLICA IDENTITY FULL"
-                    .to_string(),
-            );
-        }
+        // Cache parsed/formatted values for flush_buffer()
+        self.target_table = Some(target_table.to_string());
+        self.cached_pk_cols = Some(
+            key_attrs
+                .iter()
+                .map(|&i| format!("\"{}\"", attnames[i].replace('"', "\"\"")))
+                .collect(),
+        );
+        self.cached_all_cols = Some(
+            attnames
+                .iter()
+                .map(|n| format!("\"{}\"", n.replace('"', "\"\"")))
+                .collect(),
+        );
 
-        // Build buffer table schema:
-        // _seq INTEGER, _op_type INTEGER (0=INSERT, 1=UPDATE, 2=DELETE),
-        // all data columns with real types (from DuckLake catalog).
-        // No {col}_unchanged columns needed — REPLICA IDENTITY FULL guarantees
-        // every column value is present in every UPDATE record.
+        // Build buffer table schema
         let mut buf_cols = Vec::new();
         buf_cols.push("_seq INTEGER".to_string());
         buf_cols.push("_op_type INTEGER".to_string());
@@ -299,16 +306,53 @@ impl FlushWorker {
         }
 
         let create_buf = format!("CREATE TABLE buffer ({})", buf_cols.join(", "));
-        let t_phase = Instant::now();
         self.db
             .execute_batch(&create_buf)
             .map_err(|e| format!("duckdb create buffer: {}", e))?;
-        let t_buf_create_ms = t_phase.elapsed().as_secs_f64() * 1000.0;
 
-        // Load changes into buffer using DuckDB Appender (bypasses SQL parsing).
-        let t_phase = Instant::now();
+        self.buffer_exists = true;
+        self.has_non_inserts = false;
+        Ok(())
+    }
+
+    /// Append changes to the DuckDB buffer table.
+    ///
+    /// Calls `ensure_buffer` first, then opens a DuckDB Appender, loads changes
+    /// with incrementing `_seq` starting from `seq_start`. Returns the next seq value.
+    ///
+    /// Also checks REPLICA IDENTITY FULL (col_unchanged).
+    pub fn append_to_buffer(
+        &mut self,
+        changes: &[Change],
+        target_key: &str,
+        attnames: &[String],
+        key_attrs: &[usize],
+        seq_start: i32,
+    ) -> Result<i32, String> {
+        if changes.is_empty() {
+            return Ok(seq_start);
+        }
+
+        self.ensure_buffer(target_key, attnames, key_attrs)?;
+
+        // Track non-inserts (short-circuits if already true)
+        if !self.has_non_inserts {
+            self.has_non_inserts = changes
+                .iter()
+                .any(|c| !matches!(c.change_type, ChangeType::Insert));
+        }
+
+        // Enforce REPLICA IDENTITY FULL
+        if changes.iter().any(|c| c.col_unchanged.iter().any(|&u| u)) {
+            return Err(
+                "TOAST unchanged column detected in WAL — source table must have \
+                 REPLICA IDENTITY FULL. Run: ALTER TABLE <name> REPLICA IDENTITY FULL"
+                    .to_string(),
+            );
+        }
+
         let ncols = attnames.len();
-        let mut seq: i32 = 0;
+        let mut seq = seq_start;
 
         {
             let mut appender = self
@@ -316,7 +360,7 @@ impl FlushWorker {
                 .appender("buffer")
                 .map_err(|e| format!("duckdb appender: {}", e))?;
 
-            for change in &changes {
+            for change in changes {
                 seq += 1;
                 let op_type: i32 = match change.change_type {
                     ChangeType::Insert => 0,
@@ -324,12 +368,10 @@ impl FlushWorker {
                     ChangeType::Delete => 2,
                 };
 
-                // Build row as Vec<Box<dyn ToSql>>
                 let mut row: Vec<Box<dyn duckdb::ToSql>> = Vec::with_capacity(2 + ncols);
                 row.push(Box::new(seq));
                 row.push(Box::new(op_type));
 
-                // Data columns
                 match change.change_type {
                     ChangeType::Insert | ChangeType::Update => {
                         for i in 0..ncols {
@@ -359,13 +401,49 @@ impl FlushWorker {
                 .flush()
                 .map_err(|e| format!("duckdb appender flush: {}", e))?;
         }
-        let t_load_ms = t_phase.elapsed().as_secs_f64() * 1000.0;
 
-        // Build PK column list for compact and MERGE
-        let pk_cols: Vec<String> = key_attrs
-            .iter()
-            .map(|&i| format!("\"{}\"", attnames[i].replace('"', "\"\"")))
-            .collect();
+        Ok(seq)
+    }
+
+    /// Compact the buffer (dedup by PK), apply DELETE+INSERT to DuckLake in a
+    /// transaction, then drop the buffer table.
+    ///
+    /// Returns the flush result with timing and memory metrics.
+    pub fn flush_buffer(
+        &mut self,
+        target_key: &str,
+        mapping_id: i32,
+        applied_count: i64,
+    ) -> Result<DuckDbFlushResult, String> {
+        if !self.buffer_exists {
+            return Ok(DuckDbFlushResult {
+                target_key: target_key.to_string(),
+                mapping_id,
+                applied_count: 0,
+                memory_bytes: 0,
+                flush_duration_ms: 0,
+            });
+        }
+
+        let flush_start = Instant::now();
+
+        let target_table = self
+            .target_table
+            .as_ref()
+            .ok_or("target_table not cached — ensure_buffer should have been called")?;
+        let lake_info = self.lake_info.as_ref().ok_or_else(|| {
+            "lake_info not available — ensure_buffer should have been called".to_string()
+        })?;
+        let pk_cols = self
+            .cached_pk_cols
+            .as_ref()
+            .ok_or("pk_cols not cached — ensure_buffer should have been called")?;
+        let all_cols = self
+            .cached_all_cols
+            .as_ref()
+            .ok_or("all_cols not cached — ensure_buffer should have been called")?;
+        let has_non_inserts = self.has_non_inserts;
+
         // Step 1: Compact — deduplicate by PK, keep last operation (highest seq).
         let t_phase = Instant::now();
         let compact_sql = format!(
@@ -381,21 +459,12 @@ impl FlushWorker {
             .map_err(|e| format!("duckdb compact: {}", e))?;
         let t_compact_ms = t_phase.elapsed().as_secs_f64() * 1000.0;
 
-        // Step 2: Apply changes to DuckLake target using separate DML statements.
+        // Step 2: Apply changes to DuckLake target
         let target_ref = format!(
             "lake.\"{}\".\"{}\"",
             lake_info.lake_schema.replace('"', "\"\""),
             target_table.replace('"', "\"\"")
         );
-
-        let all_cols: Vec<String> = attnames
-            .iter()
-            .map(|n| format!("\"{}\"", n.replace('"', "\"\"")))
-            .collect();
-
-        // (No TOAST resolution step — REPLICA IDENTITY FULL guarantees all column
-        // values are present in every UPDATE record.  Any violation was already
-        // caught by the col_unchanged check above.)
 
         // Wrap DELETE+INSERT in a transaction for atomicity.
         let t_phase = Instant::now();
@@ -404,22 +473,7 @@ impl FlushWorker {
             .map_err(|e| format!("duckdb begin: {}", e))?;
         let t_begin_ms = t_phase.elapsed().as_secs_f64() * 1000.0;
 
-        // Step 2b: DELETE — remove rows from target that match any compacted row's PK.
-        //
-        // Correctness requirement: when confirmed_lsn = 0 (or just after a fresh
-        // snapshot), the slot can replay WAL INSERTs for rows already present in the
-        // snapshot copy.  DELETE removes the old copy before INSERT re-adds the new
-        // version, preventing duplicates.
-        //
-        // Optimisation — skip the expensive O(lake_size) Parquet scan when:
-        //   1. The batch is pure-insert (no UPDATEs/DELETEs in WAL), AND
-        //   2. `may_have_conflicts` is false (a prior pure-insert batch returned
-        //      zero deletes, proving the WAL-replay window is over).
-        //
-        // While `may_have_conflicts` is true (initial state and after any error/
-        // resync), DELETE always runs.  It clears to false the first time a
-        // pure-insert batch returns 0 — after that, pure-insert batches skip the
-        // scan entirely.
+        // Step 2b: DELETE
         let skip_delete = !has_non_inserts && !self.may_have_conflicts;
 
         let pk_where: Vec<String> = pk_cols
@@ -445,14 +499,11 @@ impl FlushWorker {
         };
         let t_delete_ms = t_phase.elapsed().as_secs_f64() * 1000.0;
 
-        // If this was a pure-insert batch and DELETE matched nothing, the
-        // WAL-replay conflict window is over — clear the flag so future
-        // pure-insert batches skip the scan entirely.
         if !has_non_inserts && deleted_count == 0 {
             self.may_have_conflicts = false;
         }
 
-        // Step 2c: INSERT — re-insert rows for INSERT and UPDATE ops.
+        // Step 2c: INSERT
         let t_phase = Instant::now();
         let insert_sql = format!(
             "INSERT INTO {target_ref} ({cols}) \
@@ -477,18 +528,16 @@ impl FlushWorker {
         self.db
             .execute_batch("DROP TABLE IF EXISTS compacted; DROP TABLE IF EXISTS buffer;")
             .map_err(|e| format!("duckdb cleanup: {}", e))?;
+        self.buffer_exists = false;
+        self.has_non_inserts = false;
         let t_cleanup_ms = t_phase.elapsed().as_secs_f64() * 1000.0;
 
         tracing::debug!(
             "DuckPipe perf: action=duckdb_flush target={} rows={} \
-             discover_ms={:.1} buf_create_ms={:.1} load_ms={:.1} compact_ms={:.1} \
-             begin_ms={:.1} delete_ms={:.1} insert_ms={:.1} \
+             compact_ms={:.1} begin_ms={:.1} delete_ms={:.1} insert_ms={:.1} \
              commit_ms={:.1} cleanup_ms={:.1} total_ms={:.1}",
             target_key,
             applied_count,
-            t_discover_ms,
-            t_buf_create_ms,
-            t_load_ms,
             t_compact_ms,
             t_begin_ms,
             t_delete_ms,
@@ -513,12 +562,23 @@ impl FlushWorker {
         let flush_duration_ms = flush_start.elapsed().as_millis() as i64;
 
         Ok(DuckDbFlushResult {
-            target_key,
+            target_key: target_key.to_string(),
             mapping_id,
             applied_count,
             memory_bytes,
             flush_duration_ms,
         })
+    }
+
+    /// Drop the buffer table if it exists (used on shutdown/error).
+    pub fn clear_buffer(&mut self) {
+        if self.buffer_exists {
+            let _ = self
+                .db
+                .execute_batch("DROP TABLE IF EXISTS compacted; DROP TABLE IF EXISTS buffer;");
+            self.buffer_exists = false;
+            self.has_non_inserts = false;
+        }
     }
 }
 
