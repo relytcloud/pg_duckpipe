@@ -1,0 +1,49 @@
+-- Test JSONB column type support
+SET client_min_messages = warning;
+SELECT duckpipe.start_worker();
+ start_worker 
+--------------
+ 
+(1 row)
+
+RESET client_min_messages;
+CREATE TABLE jsonb_test (
+    id int primary key,
+    data jsonb
+);
+-- Insert data before add_table so snapshot captures it
+INSERT INTO jsonb_test VALUES (1, '{"key": "value"}'::jsonb);
+SELECT duckpipe.add_table('public.jsonb_test');
+ add_table 
+-----------
+ 
+(1 row)
+
+SELECT pg_sleep(5);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+SELECT * FROM public.jsonb_test_ducklake ORDER BY id;
+ id |       data       
+----+------------------
+  1 | {"key": "value"}
+(1 row)
+
+SELECT duckpipe.remove_table('public.jsonb_test', false);
+ remove_table 
+--------------
+ 
+(1 row)
+
+DROP TABLE public.jsonb_test_ducklake;
+DROP TABLE jsonb_test;
+SET client_min_messages = warning;
+SELECT duckpipe.stop_worker();
+ stop_worker 
+-------------
+ 
+(1 row)
+
+RESET client_min_messages;
