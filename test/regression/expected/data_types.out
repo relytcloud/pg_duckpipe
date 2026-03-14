@@ -67,7 +67,7 @@ SELECT id, col_json, col_jsonb, col_uuid, col_numeric FROM public.dtype_test_duc
 SELECT id, col_timestamptz, col_time, col_char, col_smallserial FROM public.dtype_test_ducklake ORDER BY id;
  id |       col_timestamptz        | col_time |  col_char  | col_smallserial 
 ----+------------------------------+----------+------------+-----------------
-  1 | Mon Jan 15 10:30:00 2024 PST | 14:30:00 | fixed      |               1
+  1 | Mon Jan 15 02:30:00 2024 PST | 14:30:00 | fixed      |               1
   2 |                              |          |            |               2
   3 |                              |          |            |               3
 (3 rows)
