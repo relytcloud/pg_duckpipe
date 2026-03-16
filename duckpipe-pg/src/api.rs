@@ -1958,6 +1958,8 @@ fn set_config(key: &str, value: &str) {
         error!("{}", e);
     }
 
+    log!("pg_duckpipe: set_config('{}', '{}')", key, value);
+
     Spi::connect_mut(|client| {
         let args = unsafe {
             [
@@ -2036,8 +2038,15 @@ fn set_group_config(group_name: &str, key: &str, value: &str) {
         error!("{}", e);
     }
 
+    log!(
+        "pg_duckpipe: set_group_config('{}', '{}', '{}')",
+        group_name,
+        key,
+        value
+    );
+
     Spi::connect_mut(|client| {
-        // Check group exists
+        // Lock the row to prevent concurrent read-modify-write race
         let args = unsafe {
             [DatumWithOid::new(
                 group_name,
@@ -2045,8 +2054,8 @@ fn set_group_config(group_name: &str, key: &str, value: &str) {
             )]
         };
         let result = client
-            .select(
-                "SELECT config::text FROM duckpipe.sync_groups WHERE name = $1",
+            .update(
+                "SELECT config::text FROM duckpipe.sync_groups WHERE name = $1 FOR UPDATE",
                 Some(1),
                 &args,
             )
@@ -2136,35 +2145,16 @@ fn get_group_config(group_name: &str, key: default!(Option<&str>, "NULL")) -> Op
         let resolved = ResolvedConfig::resolve(&global, &group_config);
 
         match key {
-            Some(k) => {
-                // Return single resolved value
-                match k {
-                    "duckdb_buffer_memory_mb" => Some(resolved.duckdb_buffer_memory_mb.to_string()),
-                    "duckdb_flush_memory_mb" => Some(resolved.duckdb_flush_memory_mb.to_string()),
-                    "duckdb_threads" => Some(resolved.duckdb_threads.to_string()),
-                    "flush_interval_ms" => Some(resolved.flush_interval_ms.to_string()),
-                    "flush_batch_threshold" => Some(resolved.flush_batch_threshold.to_string()),
-                    "max_queued_changes" => Some(resolved.max_queued_changes.to_string()),
-                    _ => {
-                        error!(
-                            "unknown config key: '{}'. Valid keys: duckdb_buffer_memory_mb, duckdb_flush_memory_mb, duckdb_threads, flush_interval_ms, flush_batch_threshold, max_queued_changes",
-                            k
-                        );
-                    }
+            Some(k) => match resolved.get_key(k) {
+                Some(v) => Some(v),
+                None => {
+                    error!(
+                        "unknown config key: '{}'. Valid keys: duckdb_buffer_memory_mb, duckdb_flush_memory_mb, duckdb_threads, flush_interval_ms, flush_batch_threshold, max_queued_changes",
+                        k
+                    );
                 }
-            }
-            None => {
-                // Return full resolved config as JSON
-                let resolved_group = GroupConfig {
-                    duckdb_buffer_memory_mb: Some(resolved.duckdb_buffer_memory_mb),
-                    duckdb_flush_memory_mb: Some(resolved.duckdb_flush_memory_mb),
-                    duckdb_threads: Some(resolved.duckdb_threads),
-                    flush_interval_ms: Some(resolved.flush_interval_ms),
-                    flush_batch_threshold: Some(resolved.flush_batch_threshold),
-                    max_queued_changes: Some(resolved.max_queued_changes),
-                };
-                Some(resolved_group.to_json_string())
-            }
+            },
+            None => Some(resolved.to_group_config().to_json_string()),
         }
     })
 }

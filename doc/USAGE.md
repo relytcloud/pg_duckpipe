@@ -201,8 +201,8 @@ DuckDB resource limits and flush tuning are managed via the `duckpipe.global_con
 | `duckdb_buffer_memory_mb` | int | `16` | DuckDB memory limit (MB) during buffer accumulation (low, allows spill to disk) |
 | `duckdb_flush_memory_mb` | int | `512` | DuckDB memory limit (MB) during flush/compaction (high, for DuckLake writes) |
 | `duckdb_threads` | int | `1` | DuckDB `SET threads` per FlushWorker |
-| `flush_interval_ms` | int | `1000` | Time-based flush trigger (ms) |
-| `flush_batch_threshold` | int | `10000` | Queue-size flush trigger |
+| `flush_interval_ms` | int | `5000` | Time-based flush trigger (ms) |
+| `flush_batch_threshold` | int | `50000` | Queue-size flush trigger |
 | `max_queued_changes` | int | `500000` | Backpressure threshold |
 
 #### Config API

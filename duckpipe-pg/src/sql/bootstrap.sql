@@ -61,8 +61,8 @@ INSERT INTO duckpipe.global_config VALUES
     ('duckdb_buffer_memory_mb', '16'),
     ('duckdb_flush_memory_mb', '512'),
     ('duckdb_threads', '1'),
-    ('flush_interval_ms', '1000'),
-    ('flush_batch_threshold', '10000'),
+    ('flush_interval_ms', '5000'),
+    ('flush_batch_threshold', '50000'),
     ('max_queued_changes', '500000');
 
 -- Default sync group

@@ -1,5 +1,9 @@
 -- Test auto-start: add_table() should start background worker automatically
 
+-- Set fast flush for regression tests (default 5s is too slow for pg_sleep(2) waits)
+SELECT duckpipe.set_config('flush_interval_ms', '1000');
+SELECT duckpipe.set_config('flush_batch_threshold', '10000');
+
 -- Verify no worker is running yet
 SELECT count(*) AS workers_before FROM pg_stat_activity WHERE backend_type LIKE 'pg_duckpipe:%';
 

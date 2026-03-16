@@ -129,14 +129,39 @@ impl Default for ResolvedConfig {
             duckdb_buffer_memory_mb: 16,
             duckdb_flush_memory_mb: 512,
             duckdb_threads: 1,
-            flush_interval_ms: 1000,
-            flush_batch_threshold: 10000,
+            flush_interval_ms: 5000,
+            flush_batch_threshold: 50000,
             max_queued_changes: 500000,
         }
     }
 }
 
 impl ResolvedConfig {
+    /// Convert to a GroupConfig with all fields set (for JSON serialization).
+    pub fn to_group_config(&self) -> GroupConfig {
+        GroupConfig {
+            duckdb_buffer_memory_mb: Some(self.duckdb_buffer_memory_mb),
+            duckdb_flush_memory_mb: Some(self.duckdb_flush_memory_mb),
+            duckdb_threads: Some(self.duckdb_threads),
+            flush_interval_ms: Some(self.flush_interval_ms),
+            flush_batch_threshold: Some(self.flush_batch_threshold),
+            max_queued_changes: Some(self.max_queued_changes),
+        }
+    }
+
+    /// Get a single key's value as a string.
+    pub fn get_key(&self, key: &str) -> Option<String> {
+        match key {
+            "duckdb_buffer_memory_mb" => Some(self.duckdb_buffer_memory_mb.to_string()),
+            "duckdb_flush_memory_mb" => Some(self.duckdb_flush_memory_mb.to_string()),
+            "duckdb_threads" => Some(self.duckdb_threads.to_string()),
+            "flush_interval_ms" => Some(self.flush_interval_ms.to_string()),
+            "flush_batch_threshold" => Some(self.flush_batch_threshold.to_string()),
+            "max_queued_changes" => Some(self.max_queued_changes.to_string()),
+            _ => None,
+        }
+    }
+
     /// Resolve: hardcoded defaults ← global config ← per-group config.
     pub fn resolve(global: &GroupConfig, group: &GroupConfig) -> Self {
         let defaults = ResolvedConfig::default();
