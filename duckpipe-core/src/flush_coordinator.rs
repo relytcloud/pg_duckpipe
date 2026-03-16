@@ -323,10 +323,8 @@ pub struct FlushCoordinator {
     /// In-memory per-table last flush duration in ms, updated from flush thread results.
     per_table_flush_duration: HashMap<i32, i64>, // mapping_id -> flush_duration_ms
 
-    /// Cumulative bytes flushed per table (for avg_row_bytes computation).
-    per_table_total_bytes: HashMap<i32, i64>, // mapping_id -> total bytes
-    /// Cumulative rows flushed per table (for avg_row_bytes computation).
-    per_table_total_rows: HashMap<i32, i64>, // mapping_id -> total rows
+    /// Exponential moving average of row bytes per table (alpha=0.3).
+    per_table_avg_row_bytes: HashMap<i32, i64>, // mapping_id -> EMA avg_row_bytes
 
     /// Cache: target_key → mapping_id.  Populated in `ensure_queue`, used in
     /// `get_min_applied_lsn_in_coordinator` to avoid O(n) mutex locks per call.
@@ -371,8 +369,7 @@ impl FlushCoordinator {
             per_table_memory: HashMap::new(),
             per_table_flush_count: HashMap::new(),
             per_table_flush_duration: HashMap::new(),
-            per_table_total_bytes: HashMap::new(),
-            per_table_total_rows: HashMap::new(),
+            per_table_avg_row_bytes: HashMap::new(),
             target_to_mapping: HashMap::new(),
             buffer_memory_mb,
             flush_memory_mb,
@@ -602,13 +599,7 @@ impl FlushCoordinator {
                 let shared = entry.queue_handle.inner.lock().unwrap().changes.len() as i64;
                 let local = entry.pending_local.load(Ordering::Relaxed);
                 let mid = entry.mapping_id;
-                let total_bytes = self.per_table_total_bytes.get(&mid).copied().unwrap_or(0);
-                let total_rows = self.per_table_total_rows.get(&mid).copied().unwrap_or(0);
-                let avg_row_bytes = if total_rows > 0 {
-                    total_bytes / total_rows
-                } else {
-                    0
-                };
+                let avg_row_bytes = self.per_table_avg_row_bytes.get(&mid).copied().unwrap_or(0);
                 TableMetrics {
                     mapping_id: mid,
                     queued_changes: shared + local,
@@ -742,9 +733,7 @@ impl FlushCoordinator {
             .retain(|id, _| active_mapping_ids.contains(id));
         self.per_table_flush_duration
             .retain(|id, _| active_mapping_ids.contains(id));
-        self.per_table_total_bytes
-            .retain(|id, _| active_mapping_ids.contains(id));
-        self.per_table_total_rows
+        self.per_table_avg_row_bytes
             .retain(|id, _| active_mapping_ids.contains(id));
     }
 
@@ -835,8 +824,16 @@ impl FlushCoordinator {
                 *self.per_table_flush_count.entry(*mapping_id).or_insert(0) += 1;
                 self.per_table_flush_duration
                     .insert(*mapping_id, *flush_duration_ms);
-                *self.per_table_total_bytes.entry(*mapping_id).or_insert(0) += *buffered_bytes;
-                *self.per_table_total_rows.entry(*mapping_id).or_insert(0) += *applied_count;
+                if *applied_count > 0 {
+                    const EMA_ALPHA: f64 = 0.3;
+                    let batch_avg = *buffered_bytes / *applied_count;
+                    let prev = self.per_table_avg_row_bytes.entry(*mapping_id).or_insert(0);
+                    *prev = if *prev == 0 {
+                        batch_avg
+                    } else {
+                        (EMA_ALPHA * batch_avg as f64 + (1.0 - EMA_ALPHA) * *prev as f64) as i64
+                    };
+                }
             }
             results.push(r);
         }
@@ -870,8 +867,7 @@ impl FlushCoordinator {
         self.per_table_memory.clear();
         self.per_table_flush_count.clear();
         self.per_table_flush_duration.clear();
-        self.per_table_total_bytes.clear();
-        self.per_table_total_rows.clear();
+        self.per_table_avg_row_bytes.clear();
         self.target_to_mapping.clear();
     }
 
