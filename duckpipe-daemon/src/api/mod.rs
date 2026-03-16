@@ -18,13 +18,13 @@ pub(crate) fn default_true() -> bool {
     true
 }
 
+use duckpipe_core::flush_coordinator::{GroupMetrics, TableMetrics};
+
 /// Cached in-memory metrics from FlushCoordinator, updated after each sync cycle.
 #[derive(Clone, Default)]
 pub struct MetricsCache {
-    /// Per-table: (mapping_id, queued_changes, memory_bytes, flush_count, flush_duration_ms)
-    pub tables: Vec<(i32, i64, i64, i64, i64)>,
-    /// Group: (total_queued_changes, is_backpressured, active_flushes)
-    pub group: (i64, bool, usize),
+    pub tables: Vec<TableMetrics>,
+    pub group: GroupMetrics,
 }
 
 /// Shared state for the HTTP API server.

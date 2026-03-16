@@ -300,7 +300,15 @@ async fn run_sync_loop(
                             {
                                 let mut cache = state.metrics_cache.lock().await;
                                 cache.tables = coordinator.table_combined_metrics();
-                                cache.group = (coordinator.total_queued(), coordinator.is_backpressured(), coordinator.active_flush_count());
+                                let (gate_wait_avg_ms, gate_timeouts) = coordinator.gate_stats();
+                                cache.group = duckpipe_core::flush_coordinator::GroupMetrics {
+                                    group_id: 0, // daemon doesn't use PG group_id
+                                    total_queued_changes: coordinator.total_queued(),
+                                    is_backpressured: coordinator.is_backpressured(),
+                                    active_flushes: coordinator.active_flush_count() as i32,
+                                    gate_wait_avg_ms,
+                                    gate_timeouts,
+                                };
                             }
 
                             if !any_work {

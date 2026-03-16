@@ -18,6 +18,27 @@ use std::time::{Duration, Instant};
 use crate::duckdb_flush::FlushWorker;
 use crate::flush_worker;
 use crate::metadata::ERRORED_THRESHOLD;
+
+/// In-memory group-level metrics from FlushCoordinator.
+#[derive(Clone, Copy, Default)]
+pub struct GroupMetrics {
+    pub group_id: i32,
+    pub total_queued_changes: i64,
+    pub is_backpressured: bool,
+    pub active_flushes: i32,
+    pub gate_wait_avg_ms: i64,
+    pub gate_timeouts: i64,
+}
+
+/// In-memory per-table metrics from FlushCoordinator.
+#[derive(Clone, Copy, Default)]
+pub struct TableMetrics {
+    pub mapping_id: i32,
+    pub queued_changes: i64,
+    pub duckdb_memory_bytes: i64,
+    pub flush_count: i64,
+    pub flush_duration_ms: i64,
+}
 use crate::types::Change;
 
 /// Cloneable table schema info used by the flush thread for DuckDB buffer operations.
@@ -112,6 +133,12 @@ struct FlushGateInner {
     duration_ring: [u64; FLUSH_DURATION_RING_SIZE],
     duration_count: usize, // total recorded (may exceed ring size)
     duration_write: usize, // next write index (wraps around)
+    /// Cumulative wait time in milliseconds across all acquire() calls.
+    total_wait_ms: u64,
+    /// Number of successful acquire() calls.
+    acquire_count: u64,
+    /// Number of timed-out (failed) acquire() calls.
+    timeout_count: u64,
 }
 
 impl FlushGate {
@@ -125,6 +152,9 @@ impl FlushGate {
                 duration_ring: [0; FLUSH_DURATION_RING_SIZE],
                 duration_count: 0,
                 duration_write: 0,
+                total_wait_ms: 0,
+                acquire_count: 0,
+                timeout_count: 0,
             }),
             turn: Condvar::new(),
         }
@@ -134,21 +164,26 @@ impl FlushGate {
     /// Returns true if a slot was acquired, false on timeout.
     /// On timeout, forfeits the ticket so the queue isn't blocked.
     fn acquire(&self, timeout: Duration) -> bool {
+        let start = Instant::now();
         let mut inner = self.inner.lock().unwrap();
         let my_ticket = inner.next_ticket;
         inner.next_ticket += 1;
 
-        let deadline = Instant::now() + timeout;
+        let deadline = start + timeout;
         loop {
             if my_ticket == inner.now_serving && inner.active < inner.max_concurrent {
                 inner.active += 1;
                 inner.now_serving += 1;
+                inner.total_wait_ms += start.elapsed().as_millis() as u64;
+                inner.acquire_count += 1;
                 return true;
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 // Timed out: if it's our turn, skip our ticket so we don't
                 // block everyone behind us.
+                inner.total_wait_ms += start.elapsed().as_millis() as u64;
+                inner.timeout_count += 1;
                 if my_ticket == inner.now_serving {
                     inner.now_serving += 1;
                     drop(inner);
@@ -214,6 +249,19 @@ impl FlushGate {
     fn active_count(&self) -> usize {
         let inner = self.inner.lock().unwrap();
         inner.active
+    }
+
+    /// Gate statistics: (avg_wait_ms, timeout_count).
+    /// avg_wait_ms is the mean wait time across all acquire() calls (success + timeout).
+    fn stats(&self) -> (i64, i64) {
+        let inner = self.inner.lock().unwrap();
+        let total_calls = inner.acquire_count + inner.timeout_count;
+        let avg_wait_ms = if total_calls > 0 {
+            (inner.total_wait_ms / total_calls) as i64
+        } else {
+            0
+        };
+        (avg_wait_ms, inner.timeout_count as i64)
     }
 }
 
@@ -317,6 +365,11 @@ impl FlushCoordinator {
     /// Current number of active flush operations.
     pub fn active_flush_count(&self) -> usize {
         self.flush_gate.active_count()
+    }
+
+    /// Gate statistics: (avg_wait_ms, timeout_count).
+    pub fn gate_stats(&self) -> (i64, i64) {
+        self.flush_gate.stats()
     }
 
     /// Ensure a queue + flush thread exists for the given target table.
@@ -515,25 +568,24 @@ impl FlushCoordinator {
     }
 
     /// Return all per-table metrics combined in a single pass.
-    ///
-    /// Returns `(mapping_id, queued_changes, memory_bytes, flush_count, flush_duration_ms)`.
-    /// Eliminates the need for callers to call `table_pending_counts()`,
-    /// `table_memory_bytes()`, and `table_flush_metrics()` separately and join by mapping_id.
-    pub fn table_combined_metrics(&self) -> Vec<(i32, i64, i64, i64, i64)> {
+    pub fn table_combined_metrics(&self) -> Vec<TableMetrics> {
         self.threads
             .values()
             .map(|entry| {
                 let shared = entry.queue_handle.inner.lock().unwrap().changes.len() as i64;
                 let local = entry.pending_local.load(Ordering::Relaxed);
                 let mid = entry.mapping_id;
-                let mem = self.per_table_memory.get(&mid).copied().unwrap_or(0);
-                let fc = self.per_table_flush_count.get(&mid).copied().unwrap_or(0);
-                let fd = self
-                    .per_table_flush_duration
-                    .get(&mid)
-                    .copied()
-                    .unwrap_or(0);
-                (mid, shared + local, mem, fc, fd)
+                TableMetrics {
+                    mapping_id: mid,
+                    queued_changes: shared + local,
+                    duckdb_memory_bytes: self.per_table_memory.get(&mid).copied().unwrap_or(0),
+                    flush_count: self.per_table_flush_count.get(&mid).copied().unwrap_or(0),
+                    flush_duration_ms: self
+                        .per_table_flush_duration
+                        .get(&mid)
+                        .copied()
+                        .unwrap_or(0),
+                }
             })
             .collect()
     }
