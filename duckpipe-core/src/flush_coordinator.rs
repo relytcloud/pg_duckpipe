@@ -119,10 +119,15 @@ pub enum FlushThreadResult {
 struct FlushGate {
     inner: Mutex<FlushGateInner>,
     turn: Condvar,
+    /// Fallback timeout used until enough flush durations are recorded.
+    default_timeout: Duration,
 }
 
 /// Number of recent flush durations to keep for median calculation.
 const FLUSH_DURATION_RING_SIZE: usize = 64;
+
+/// Minimum acquire timeout to avoid churn when flushes are very fast.
+const MIN_GATE_TIMEOUT: Duration = Duration::from_secs(1);
 
 struct FlushGateInner {
     active: usize,
@@ -142,7 +147,7 @@ struct FlushGateInner {
 }
 
 impl FlushGate {
-    fn new(max_concurrent: usize) -> Self {
+    fn new(max_concurrent: usize, default_timeout: Duration) -> Self {
         FlushGate {
             inner: Mutex::new(FlushGateInner {
                 active: 0,
@@ -157,15 +162,18 @@ impl FlushGate {
                 timeout_count: 0,
             }),
             turn: Condvar::new(),
+            default_timeout,
         }
     }
 
     /// Take a ticket and wait until it's our turn AND a slot is available.
+    /// Timeout is adaptive: median of recent flush durations, or the default
+    /// timeout until enough data is collected.
     /// Returns true if a slot was acquired, false on timeout.
-    /// On timeout, forfeits the ticket so the queue isn't blocked.
-    fn acquire(&self, timeout: Duration) -> bool {
+    fn acquire(&self) -> bool {
         let start = Instant::now();
         let mut inner = self.inner.lock().unwrap();
+        let timeout = Self::median_duration(&inner).unwrap_or(self.default_timeout);
         let my_ticket = inner.next_ticket;
         inner.next_ticket += 1;
 
@@ -196,9 +204,9 @@ impl FlushGate {
         }
     }
 
-    /// Release a flush slot after flush completes. Wakes all waiters so the
-    /// next-in-line thread can check its turn.
-    fn release(&self) {
+    /// Release a flush slot and record the flush duration for adaptive timeout.
+    /// Wakes all waiters so the next-in-line thread can check its turn.
+    fn release(&self, flush_duration: Duration) {
         {
             let mut inner = self.inner.lock().unwrap();
             debug_assert!(
@@ -206,6 +214,12 @@ impl FlushGate {
                 "FlushGate::release without matching acquire"
             );
             inner.active -= 1;
+
+            // Record flush duration into ring buffer
+            let idx = inner.duration_write;
+            inner.duration_ring[idx] = flush_duration.as_millis() as u64;
+            inner.duration_write = (idx + 1) % FLUSH_DURATION_RING_SIZE;
+            inner.duration_count += 1;
         }
         self.turn.notify_all();
     }
@@ -220,19 +234,8 @@ impl FlushGate {
         self.turn.notify_all();
     }
 
-    /// Record a completed flush duration for adaptive timeout calculation.
-    fn record_duration(&self, duration_ms: i64) {
-        let mut inner = self.inner.lock().unwrap();
-        let idx = inner.duration_write;
-        inner.duration_ring[idx] = duration_ms.max(0) as u64;
-        inner.duration_write = (idx + 1) % FLUSH_DURATION_RING_SIZE;
-        inner.duration_count += 1;
-    }
-
-    /// Compute the median flush duration from recent history.
-    /// Returns `None` if no flush durations have been recorded yet.
-    fn median_timeout(&self) -> Option<Duration> {
-        let inner = self.inner.lock().unwrap();
+    /// Compute the median flush duration from the ring buffer (called with lock held).
+    fn median_duration(inner: &FlushGateInner) -> Option<Duration> {
         let n = inner.duration_count.min(FLUSH_DURATION_RING_SIZE);
         if n == 0 {
             return None;
@@ -241,8 +244,7 @@ impl FlushGate {
         sorted[..n].copy_from_slice(&inner.duration_ring[..n]);
         sorted[..n].sort_unstable();
         let median_ms = sorted[n / 2];
-        // Floor of 1s — avoid churn when flushes are very fast
-        Some(Duration::from_millis(median_ms.max(1000)))
+        Some(Duration::from_millis(median_ms).max(MIN_GATE_TIMEOUT))
     }
 
     /// Current number of active flushes.
@@ -251,9 +253,8 @@ impl FlushGate {
         inner.active
     }
 
-    /// Gate statistics: (avg_wait_ms, timeout_count).
-    /// avg_wait_ms is the mean wait time across all acquire() calls (success + timeout).
-    fn stats(&self) -> (i64, i64) {
+    /// Gate statistics for monitoring.
+    fn stats(&self) -> GateStats {
         let inner = self.inner.lock().unwrap();
         let total_calls = inner.acquire_count + inner.timeout_count;
         let avg_wait_ms = if total_calls > 0 {
@@ -261,8 +262,20 @@ impl FlushGate {
         } else {
             0
         };
-        (avg_wait_ms, inner.timeout_count as i64)
+        GateStats {
+            avg_wait_ms,
+            timeout_count: inner.timeout_count as i64,
+        }
     }
+}
+
+/// Gate-level metrics returned by [`FlushGate::stats`].
+#[derive(Clone, Copy, Default)]
+pub struct GateStats {
+    /// Mean wait time in ms across all acquire() calls (success + timeout).
+    pub avg_wait_ms: i64,
+    /// Number of timed-out acquire() calls.
+    pub timeout_count: i64,
 }
 
 /// Shared backpressure state between producer (WAL consumer) and flush threads.
@@ -353,7 +366,10 @@ impl FlushCoordinator {
             target_to_mapping: HashMap::new(),
             buffer_memory_mb,
             flush_memory_mb,
-            flush_gate: Arc::new(FlushGate::new(max_concurrent_flushes as usize)),
+            flush_gate: Arc::new(FlushGate::new(
+                max_concurrent_flushes as usize,
+                Duration::from_millis(flush_interval_ms as u64),
+            )),
         }
     }
 
@@ -367,8 +383,8 @@ impl FlushCoordinator {
         self.flush_gate.active_count()
     }
 
-    /// Gate statistics: (avg_wait_ms, timeout_count).
-    pub fn gate_stats(&self) -> (i64, i64) {
+    /// Gate statistics for monitoring.
+    pub fn gate_stats(&self) -> GateStats {
         self.flush_gate.stats()
     }
 
@@ -1108,19 +1124,13 @@ fn flush_thread_main(
             // Gate: ticket-based FIFO to guarantee fairness.
             //   - drain_requested: bypass gate entirely (TRUNCATE must flush now)
             //   - otherwise: acquire() blocks until our ticket is served or timeout
-            //   - timeout adapts to median flush duration (falls back to flush_interval
-            //     until enough flushes have been observed)
             let gate_acquired = if drain_requested {
                 false // drain bypasses gate; don't acquire a slot
+            } else if flush_gate.acquire() {
+                true
             } else {
-                let timeout = flush_gate.median_timeout().unwrap_or(flush_interval);
-                if flush_gate.acquire(timeout) {
-                    true
-                } else {
-                    // Timed out — all slots occupied for a full timeout period.
-                    // Continue to next iteration (will re-check queue & retry).
-                    continue;
-                }
+                // Timed out — continue to next iteration (will re-check queue & retry).
+                continue;
             };
 
             let flush_start = Instant::now();
@@ -1139,8 +1149,7 @@ fn flush_thread_main(
             }
 
             if gate_acquired {
-                flush_gate.record_duration(flush_start.elapsed().as_millis() as i64);
-                flush_gate.release();
+                flush_gate.release(flush_start.elapsed());
             }
 
             backpressure

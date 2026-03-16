@@ -297,15 +297,15 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
                     {
                         Ok(any_work) => {
                             // Write all metrics to SHM in a single lock acquisition
-                            let (gate_wait_avg_ms, gate_timeouts) = coord.gate_stats();
+                            let gs = coord.gate_stats();
                             crate::write_shmem_metrics(
                                 &crate::GroupMetrics {
                                     group_id,
                                     total_queued_changes: coord.total_queued(),
                                     is_backpressured: coord.is_backpressured(),
                                     active_flushes: coord.active_flush_count() as i32,
-                                    gate_wait_avg_ms,
-                                    gate_timeouts,
+                                    gate_wait_avg_ms: gs.avg_wait_ms,
+                                    gate_timeouts: gs.timeout_count,
                                 },
                                 &coord.table_combined_metrics(),
                             );
