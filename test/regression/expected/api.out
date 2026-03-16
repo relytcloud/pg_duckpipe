@@ -53,6 +53,7 @@ WHERE m.source_table = 't1';
 
 -- Test remove_table
 SELECT duckpipe.remove_table('public.t1', false);
+WARNING:  Group 'default' has no remaining tables — its replication slot is still holding WAL. Run SELECT duckpipe.drop_group('default') to release it.
  remove_table 
 --------------
  

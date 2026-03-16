@@ -77,6 +77,7 @@ SELECT duckpipe.stop_worker();
 
 RESET client_min_messages;
 SELECT duckpipe.remove_table('public.ri_test', false);
+WARNING:  Group 'default' has no remaining tables — its replication slot is still holding WAL. Run SELECT duckpipe.drop_group('default') to release it.
  remove_table 
 --------------
  

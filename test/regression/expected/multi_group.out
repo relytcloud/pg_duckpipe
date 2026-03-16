@@ -160,12 +160,14 @@ SELECT duckpipe.stop_worker();
 
 RESET client_min_messages;
 SELECT duckpipe.remove_table('public.grp_a_t1', false);
+WARNING:  Group 'default' has no remaining tables — its replication slot is still holding WAL. Run SELECT duckpipe.drop_group('default') to release it.
  remove_table 
 --------------
  
 (1 row)
 
 SELECT duckpipe.remove_table('public.grp_b_t1', false);
+WARNING:  Group 'group_b' has no remaining tables — its replication slot is still holding WAL. Run SELECT duckpipe.drop_group('group_b') to release it.
  remove_table 
 --------------
  

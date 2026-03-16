@@ -68,6 +68,7 @@ SELECT * FROM public.shutdown_test_ducklake ORDER BY id;
 
 -- Cleanup
 SELECT duckpipe.remove_table('public.shutdown_test', false);
+WARNING:  Group 'default' has no remaining tables — its replication slot is still holding WAL. Run SELECT duckpipe.drop_group('default') to release it.
  remove_table 
 --------------
  

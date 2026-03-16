@@ -166,11 +166,7 @@ Returns `409 Conflict` if:
 Drop the bound group. The daemon becomes unbound.
 
 ```bash
-# Drop group and its replication slot (default)
-curl -s -X DELETE 'http://localhost:8080/groups?drop_slot=true'
-
-# Drop group but keep the slot
-curl -s -X DELETE 'http://localhost:8080/groups?drop_slot=false'
+curl -s -X DELETE 'http://localhost:8080/groups'
 ```
 
 ### POST /groups/enable

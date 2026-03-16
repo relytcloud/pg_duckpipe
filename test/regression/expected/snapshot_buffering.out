@@ -151,6 +151,7 @@ SELECT state IN ('CATCHUP', 'STREAMING') AS past_snapshot FROM duckpipe.status()
 
 -- Cleanup
 SELECT duckpipe.remove_table('public.snap_buf', false);
+WARNING:  Group 'default' has no remaining tables — its replication slot is still holding WAL. Run SELECT duckpipe.drop_group('default') to release it.
  remove_table 
 --------------
  

@@ -73,6 +73,7 @@ SELECT id, col_timestamptz, col_time, col_char, col_smallserial FROM public.dtyp
 (3 rows)
 
 SELECT duckpipe.remove_table('public.dtype_test', false);
+WARNING:  Group 'default' has no remaining tables — its replication slot is still holding WAL. Run SELECT duckpipe.drop_group('default') to release it.
  remove_table 
 --------------
  

@@ -63,9 +63,6 @@ SELECT duckpipe.disable_group('analytics');
 
 -- Drop a group (also drops slot and publication)
 SELECT duckpipe.drop_group('analytics');
-
--- Drop group but keep the replication slot
-SELECT duckpipe.drop_group('analytics', false);
 ```
 
 ### Remote Sync
@@ -261,3 +258,50 @@ curl http://localhost:8080/metrics
 ```
 
 Returns the same JSON structure as the PG `duckpipe.metrics()` function, merging in-process FlushCoordinator metrics with PG persisted data.
+
+## Operational Safety
+
+### WAL Retention and `max_slot_wal_keep_size`
+
+pg_duckpipe uses a logical replication slot to track its position in the WAL stream. PostgreSQL **cannot recycle WAL segments** past a slot's `restart_lsn`. If the duckpipe worker crashes or is stopped without calling `drop_group()`, the slot remains and WAL files accumulate indefinitely — potentially filling the disk and blocking all writes on the cluster.
+
+**Recommended**: set `max_slot_wal_keep_size` (PostgreSQL 13+) to cap WAL retention per slot:
+
+```sql
+-- Cap WAL retained per slot to 10 GB (adjust to your disk capacity)
+ALTER SYSTEM SET max_slot_wal_keep_size = '10GB';
+SELECT pg_reload_conf();
+```
+
+When a slot exceeds this limit, PostgreSQL invalidates it. An invalidated slot no longer holds WAL. If duckpipe restarts and finds its slot invalidated, it must re-snapshot — but the database stays healthy.
+
+### Monitoring for WAL Lag
+
+Check replication slot lag regularly:
+
+```sql
+SELECT slot_name,
+       pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn)) AS lag
+FROM pg_replication_slots
+WHERE slot_name LIKE 'duckpipe_%';
+```
+
+### Cleaning Up Orphaned Slots
+
+If duckpipe is permanently removed without cleanup:
+
+```sql
+-- Drop the replication slot
+SELECT pg_drop_replication_slot('duckpipe_slot_default');
+
+-- Drop the publication
+DROP PUBLICATION IF EXISTS duckpipe_pub_default;
+```
+
+### Empty Groups
+
+When the last table is removed from a sync group via `remove_table()`, a WARNING is emitted reminding you to drop the group. An empty group's replication slot still holds WAL — run `drop_group()` to release it:
+
+```sql
+SELECT duckpipe.drop_group('my_group');
+```

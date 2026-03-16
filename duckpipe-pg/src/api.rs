@@ -477,14 +477,13 @@ fn create_group(
 
 #[pg_extern(sql = "
 CREATE FUNCTION duckpipe.drop_group(
-    name TEXT,
-    drop_slot BOOLEAN DEFAULT true
+    name TEXT
 ) RETURNS void
 AS 'MODULE_PATHNAME', '@FUNCTION_NAME@'
 LANGUAGE C STRICT;
-REVOKE ALL ON FUNCTION duckpipe.drop_group(TEXT, BOOLEAN) FROM PUBLIC;
+REVOKE ALL ON FUNCTION duckpipe.drop_group(TEXT) FROM PUBLIC;
 ")]
-fn drop_group(name: &str, drop_slot: bool) {
+fn drop_group(name: &str) {
     // Terminate the group's worker before cleanup
     terminate_group_worker(name);
 
@@ -533,10 +532,8 @@ fn drop_group(name: &str, drop_slot: bool) {
             // Remote group: slot + publication cleanup via tokio-postgres (done below)
         } else {
             // Local group: drop slot + publication via SPI
-            if drop_slot {
-                let sql = format!("SELECT pg_drop_replication_slot({})", quote_literal(&slot));
-                let _ = client.update(&sql, None, &[]);
-            }
+            let sql = format!("SELECT pg_drop_replication_slot({})", quote_literal(&slot));
+            let _ = client.update(&sql, None, &[]);
 
             let sql = format!("DROP PUBLICATION IF EXISTS {}", quote_ident(&pub_name));
             let _ = client.update(&sql, None, &[]);
@@ -561,11 +558,9 @@ fn drop_group(name: &str, drop_slot: bool) {
         let ddl_app = duckpipe_core::connstr::app_name(name, "ddl");
         let result: Result<(), String> = block_on(async {
             let (client, _conn) = remote_connect(&ci, &ddl_app).await?;
-            if drop_slot {
-                let _ = client
-                    .execute("SELECT pg_drop_replication_slot($1)", &[&slot])
-                    .await;
-            }
+            let _ = client
+                .execute("SELECT pg_drop_replication_slot($1)", &[&slot])
+                .await;
             let sql = format!("DROP PUBLICATION IF EXISTS {}", quote_ident(&pub_name));
             let _ = client.execute(&sql, &[]).await;
             Ok(())
@@ -1018,9 +1013,10 @@ fn remove_table(source_table: &str, drop_target: Option<bool>) {
     let mut group_conninfo: Option<String> = None;
     let mut group_name_for_app = String::new();
     let mut mapping_id: Option<i32> = None;
+    let mut group_id: Option<i32> = None;
 
     Spi::connect_mut(|client| {
-        // Get publication, target info, conninfo, group name, and mapping id
+        // Get publication, target info, conninfo, group name, group id, and mapping id
         let args = unsafe {
             [
                 DatumWithOid::new(schema.as_str(), PgBuiltInOids::TEXTOID.value()),
@@ -1029,7 +1025,7 @@ fn remove_table(source_table: &str, drop_target: Option<bool>) {
         };
         let result = client
             .select(
-                "SELECT g.publication, m.target_schema, m.target_table, g.conninfo, g.name, m.id \
+                "SELECT g.publication, m.target_schema, m.target_table, g.conninfo, g.name, m.id, g.id \
                  FROM duckpipe.table_mappings m \
                  JOIN duckpipe.sync_groups g ON m.group_id = g.id \
                  WHERE m.source_schema = $1 AND m.source_table = $2",
@@ -1045,6 +1041,7 @@ fn remove_table(source_table: &str, drop_target: Option<bool>) {
             group_conninfo = r.get::<String>(4).unwrap();
             group_name_for_app = r.get::<String>(5).unwrap().unwrap_or_default();
             mapping_id = r.get::<i32>(6).unwrap();
+            group_id = r.get::<i32>(7).unwrap();
             break;
         }
 
@@ -1103,6 +1100,32 @@ fn remove_table(source_table: &str, drop_target: Option<bool>) {
     // Clear SHM slot for removed table
     if let Some(mid) = mapping_id {
         crate::clear_shmem_table_slot(mid);
+    }
+
+    // Warn if the group has no remaining tables (slot still holds WAL)
+    if let Some(gid) = group_id {
+        let remaining: i64 = Spi::connect(|client| {
+            let args = unsafe { [DatumWithOid::new(gid, PgBuiltInOids::INT4OID.value())] };
+            let result = client
+                .select(
+                    "SELECT count(*)::bigint FROM duckpipe.table_mappings WHERE group_id = $1",
+                    None,
+                    &args,
+                )
+                .unwrap();
+            for r in result {
+                return r.get::<i64>(1).unwrap().unwrap_or(0);
+            }
+            0
+        });
+        if remaining == 0 {
+            warning!(
+                "Group '{}' has no remaining tables — its replication slot is still holding WAL. \
+                 Run SELECT duckpipe.drop_group('{}') to release it.",
+                group_name_for_app,
+                group_name_for_app
+            );
+        }
     }
 }
 

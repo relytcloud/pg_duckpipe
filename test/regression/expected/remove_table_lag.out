@@ -89,6 +89,7 @@ FROM duckpipe.sync_groups WHERE name = 'default';
 
 -- Cleanup
 SELECT duckpipe.remove_table('public.rtl_keep', false);
+WARNING:  Group 'default' has no remaining tables — its replication slot is still holding WAL. Run SELECT duckpipe.drop_group('default') to release it.
  remove_table 
 --------------
  

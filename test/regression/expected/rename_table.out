@@ -83,6 +83,7 @@ SELECT * FROM public.rename_src_ducklake ORDER BY id;
 
 -- Cleanup (use new name)
 SELECT duckpipe.remove_table('public.rename_src_v2', false);
+WARNING:  Group 'default' has no remaining tables — its replication slot is still holding WAL. Run SELECT duckpipe.drop_group('default') to release it.
  remove_table 
 --------------
  

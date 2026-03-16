@@ -32,6 +32,7 @@ SELECT * FROM public.jsonb_test_ducklake ORDER BY id;
 (1 row)
 
 SELECT duckpipe.remove_table('public.jsonb_test', false);
+WARNING:  Group 'default' has no remaining tables — its replication slot is still holding WAL. Run SELECT duckpipe.drop_group('default') to release it.
  remove_table 
 --------------
  

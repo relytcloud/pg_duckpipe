@@ -82,6 +82,7 @@ WARNING:  Group 'daemon_test' has mode 'daemon' — use the duckpipe daemon bina
 
 -- Cleanup
 SELECT duckpipe.remove_table('public.t_daemon_mode', true);
+WARNING:  Group 'daemon_test' has no remaining tables — its replication slot is still holding WAL. Run SELECT duckpipe.drop_group('daemon_test') to release it.
  remove_table 
 --------------
  

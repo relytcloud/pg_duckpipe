@@ -93,6 +93,7 @@ SELECT count(*) AS final_count FROM public.mixed_test_ducklake;
 
 -- Cleanup
 SELECT duckpipe.remove_table('public.mixed_test', false);
+WARNING:  Group 'default' has no remaining tables — its replication slot is still holding WAL. Run SELECT duckpipe.drop_group('default') to release it.
  remove_table 
 --------------
  
