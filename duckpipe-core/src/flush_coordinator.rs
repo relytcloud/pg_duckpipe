@@ -38,6 +38,7 @@ pub struct TableMetrics {
     pub duckdb_memory_bytes: i64,
     pub flush_count: i64,
     pub flush_duration_ms: i64,
+    pub avg_row_bytes: i64,
 }
 use crate::types::Change;
 
@@ -48,6 +49,7 @@ struct QueueMeta {
     mapping_id: i32,
     attnames: Vec<String>,
     key_attrs: Vec<usize>,
+    atttypes: Vec<u32>,
 }
 
 /// Shared queue data protected by Mutex.
@@ -97,6 +99,7 @@ pub enum FlushThreadResult {
         last_lsn: u64,
         memory_bytes: i64,
         flush_duration_ms: i64,
+        buffered_bytes: i64,
     },
     Error {
         target_key: String,
@@ -320,6 +323,11 @@ pub struct FlushCoordinator {
     /// In-memory per-table last flush duration in ms, updated from flush thread results.
     per_table_flush_duration: HashMap<i32, i64>, // mapping_id -> flush_duration_ms
 
+    /// Cumulative bytes flushed per table (for avg_row_bytes computation).
+    per_table_total_bytes: HashMap<i32, i64>, // mapping_id -> total bytes
+    /// Cumulative rows flushed per table (for avg_row_bytes computation).
+    per_table_total_rows: HashMap<i32, i64>, // mapping_id -> total rows
+
     /// Cache: target_key → mapping_id.  Populated in `ensure_queue`, used in
     /// `get_min_applied_lsn_in_coordinator` to avoid O(n) mutex locks per call.
     target_to_mapping: HashMap<String, i32>,
@@ -363,6 +371,8 @@ impl FlushCoordinator {
             per_table_memory: HashMap::new(),
             per_table_flush_count: HashMap::new(),
             per_table_flush_duration: HashMap::new(),
+            per_table_total_bytes: HashMap::new(),
+            per_table_total_rows: HashMap::new(),
             target_to_mapping: HashMap::new(),
             buffer_memory_mb,
             flush_memory_mb,
@@ -405,7 +415,7 @@ impl FlushCoordinator {
         initial_applied_lsn: u64,
         attnames: Vec<String>,
         key_attrs: Vec<usize>,
-        _atttypes: Vec<u32>,
+        atttypes: Vec<u32>,
         paused: bool,
     ) {
         // Seed in-memory LSN from the persistent PG value if we haven't seen this table yet.
@@ -443,6 +453,7 @@ impl FlushCoordinator {
             mapping_id,
             attnames,
             key_attrs,
+            atttypes,
         };
 
         let queue_handle = Arc::new(TableQueueHandle {
@@ -591,6 +602,13 @@ impl FlushCoordinator {
                 let shared = entry.queue_handle.inner.lock().unwrap().changes.len() as i64;
                 let local = entry.pending_local.load(Ordering::Relaxed);
                 let mid = entry.mapping_id;
+                let total_bytes = self.per_table_total_bytes.get(&mid).copied().unwrap_or(0);
+                let total_rows = self.per_table_total_rows.get(&mid).copied().unwrap_or(0);
+                let avg_row_bytes = if total_rows > 0 {
+                    total_bytes / total_rows
+                } else {
+                    0
+                };
                 TableMetrics {
                     mapping_id: mid,
                     queued_changes: shared + local,
@@ -601,6 +619,7 @@ impl FlushCoordinator {
                         .get(&mid)
                         .copied()
                         .unwrap_or(0),
+                    avg_row_bytes,
                 }
             })
             .collect()
@@ -723,6 +742,10 @@ impl FlushCoordinator {
             .retain(|id, _| active_mapping_ids.contains(id));
         self.per_table_flush_duration
             .retain(|id, _| active_mapping_ids.contains(id));
+        self.per_table_total_bytes
+            .retain(|id, _| active_mapping_ids.contains(id));
+        self.per_table_total_rows
+            .retain(|id, _| active_mapping_ids.contains(id));
     }
 
     /// Per-table synchronous drain: signal one flush thread to drain, wait for completion.
@@ -797,6 +820,8 @@ impl FlushCoordinator {
                 last_lsn,
                 memory_bytes,
                 flush_duration_ms,
+                applied_count,
+                buffered_bytes,
                 ..
             } = &r
             {
@@ -810,6 +835,8 @@ impl FlushCoordinator {
                 *self.per_table_flush_count.entry(*mapping_id).or_insert(0) += 1;
                 self.per_table_flush_duration
                     .insert(*mapping_id, *flush_duration_ms);
+                *self.per_table_total_bytes.entry(*mapping_id).or_insert(0) += *buffered_bytes;
+                *self.per_table_total_rows.entry(*mapping_id).or_insert(0) += *applied_count;
             }
             results.push(r);
         }
@@ -843,6 +870,8 @@ impl FlushCoordinator {
         self.per_table_memory.clear();
         self.per_table_flush_count.clear();
         self.per_table_flush_duration.clear();
+        self.per_table_total_bytes.clear();
+        self.per_table_total_rows.clear();
         self.target_to_mapping.clear();
     }
 
@@ -930,6 +959,7 @@ fn flush_thread_main(
 
     let mut worker: Option<FlushWorker> = None;
     let mut buffered_count: i64 = 0; // tracks changes in DuckDB buffer for backpressure
+    let mut buffered_bytes: i64 = 0; // estimated bytes in DuckDB buffer for avg_row_bytes
     let mut buffered_lsn: u64 = 0;
     let mut buffered_meta: Option<QueueMeta> = None;
     let mut next_seq: i32 = 0; // monotonic counter for _seq across appends
@@ -1032,6 +1062,7 @@ fn flush_thread_main(
                                 .total_queued
                                 .fetch_sub(buffered_count + count, Ordering::Relaxed);
                             buffered_count = 0;
+                            buffered_bytes = 0;
                             next_seq = 0;
                             pending_local.store(0, Ordering::Relaxed);
                             buffered_lsn = 0;
@@ -1059,11 +1090,13 @@ fn flush_thread_main(
                     &meta.target_key,
                     &meta.attnames,
                     &meta.key_attrs,
+                    &meta.atttypes,
                     next_seq,
                 ) {
-                    Ok(new_seq) => {
+                    Ok((new_seq, batch_bytes)) => {
                         next_seq = new_seq;
                         buffered_count += count;
+                        buffered_bytes += batch_bytes;
                         pending_local.store(buffered_count, Ordering::Relaxed);
                     }
                     Err(e) => {
@@ -1074,6 +1107,7 @@ fn flush_thread_main(
                             .total_queued
                             .fetch_sub(buffered_count + count, Ordering::Relaxed);
                         buffered_count = 0;
+                        buffered_bytes = 0;
                         next_seq = 0;
                         pending_local.store(0, Ordering::Relaxed);
                         buffered_lsn = 0;
@@ -1139,6 +1173,7 @@ fn flush_thread_main(
                 do_flush_buffer(
                     &mut worker,
                     buffered_count,
+                    buffered_bytes,
                     buffered_lsn,
                     meta,
                     pg_connstr,
@@ -1156,6 +1191,7 @@ fn flush_thread_main(
                 .total_queued
                 .fetch_sub(buffered_count, Ordering::Relaxed);
             buffered_count = 0;
+            buffered_bytes = 0;
             next_seq = 0;
             pending_local.store(0, Ordering::Relaxed);
             buffered_lsn = 0;
@@ -1176,6 +1212,7 @@ fn flush_thread_main(
 fn do_flush_buffer(
     worker: &mut Option<FlushWorker>,
     buffered_count: i64,
+    buffered_bytes: i64,
     last_lsn: u64,
     meta: &QueueMeta,
     pg_connstr: &str,
@@ -1200,7 +1237,12 @@ fn do_flush_buffer(
         }
     };
 
-    match w.flush_buffer(&meta.target_key, meta.mapping_id, buffered_count) {
+    match w.flush_buffer(
+        &meta.target_key,
+        meta.mapping_id,
+        buffered_count,
+        buffered_bytes,
+    ) {
         Ok(result) => {
             // Update PG metadata: metrics + applied_lsn
             if let Err(e) = rt.block_on(flush_worker::update_metrics_via_pg(
@@ -1230,6 +1272,7 @@ fn do_flush_buffer(
                 last_lsn,
                 memory_bytes: result.memory_bytes,
                 flush_duration_ms: result.flush_duration_ms,
+                buffered_bytes: result.buffered_bytes,
             });
 
             // Drop worker after successful flush — recreated lazily on next cycle.

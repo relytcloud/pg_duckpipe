@@ -13,6 +13,18 @@ pub enum Value {
     Text(String),
 }
 
+impl Value {
+    /// Returns byte size only for variable-length values (Text).
+    /// Fixed-size types return 0 — their cost is precomputed from schema.
+    #[inline]
+    pub fn var_bytes(&self) -> usize {
+        match self {
+            Value::Text(s) => s.len(),
+            _ => 0,
+        }
+    }
+}
+
 impl std::fmt::Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -118,6 +130,22 @@ pub struct TableMapping {
     pub enabled: bool,
     pub source_oid: Option<i64>,
     pub error_message: Option<String>,
+}
+
+/// Fixed byte size for a column type OID. Returns 0 for variable-length types (text, jsonb, etc).
+pub fn fixed_bytes_for_oid(oid: u32) -> usize {
+    match oid {
+        16 => 1,          // bool
+        21 => 2,          // int2
+        23 => 4,          // int4
+        20 => 8,          // int8
+        700 => 4,         // float4
+        701 => 8,         // float8
+        26 => 4,          // oid
+        1082 => 4,        // date
+        1114 | 1184 => 8, // timestamp / timestamptz
+        _ => 0,           // text, varchar, jsonb, etc — variable
+    }
 }
 
 /// Parse pg_lsn string (e.g., "0/1C463F8") to u64

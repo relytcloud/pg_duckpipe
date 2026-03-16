@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use duckdb::{Config, Connection};
 
-use crate::types::{Change, ChangeType, Value};
+use crate::types::{fixed_bytes_for_oid, Change, ChangeType, Value};
 
 /// Push a Value into a row Vec for the DuckDB Appender.
 /// Text values are auto-cast by DuckDB to the buffer table's declared column type.
@@ -347,10 +347,11 @@ impl FlushWorker {
         target_key: &str,
         attnames: &[String],
         key_attrs: &[usize],
+        atttypes: &[u32],
         seq_start: i32,
-    ) -> Result<i32, String> {
+    ) -> Result<(i32, i64), String> {
         if changes.is_empty() {
-            return Ok(seq_start);
+            return Ok((seq_start, 0));
         }
 
         self.ensure_buffer(target_key, attnames, key_attrs)?;
@@ -373,6 +374,8 @@ impl FlushWorker {
 
         let ncols = attnames.len();
         let mut seq = seq_start;
+        let fixed_row_bytes: usize = atttypes.iter().map(|&oid| fixed_bytes_for_oid(oid)).sum();
+        let mut var_total: usize = 0;
 
         {
             let mut appender = self
@@ -396,6 +399,7 @@ impl FlushWorker {
                     ChangeType::Insert | ChangeType::Update => {
                         for i in 0..ncols {
                             let val = change.col_values.get(i).unwrap_or(&Value::Null);
+                            var_total += val.var_bytes();
                             push_value_to_row(&mut row, val);
                         }
                     }
@@ -403,6 +407,7 @@ impl FlushWorker {
                         for i in 0..ncols {
                             if let Some(ki) = key_attrs.iter().position(|&k| k == i) {
                                 let val = change.key_values.get(ki).unwrap_or(&Value::Null);
+                                var_total += val.var_bytes();
                                 push_value_to_row(&mut row, val);
                             } else {
                                 row.push(Box::new(Option::<String>::None));
@@ -422,7 +427,8 @@ impl FlushWorker {
                 .map_err(|e| format!("duckdb appender flush: {}", e))?;
         }
 
-        Ok(seq)
+        let batch_bytes = (changes.len() * fixed_row_bytes + var_total) as i64;
+        Ok((seq, batch_bytes))
     }
 
     /// Compact the buffer (dedup by PK), apply DELETE+INSERT to DuckLake in a
@@ -434,6 +440,7 @@ impl FlushWorker {
         target_key: &str,
         mapping_id: i32,
         applied_count: i64,
+        buffered_bytes: i64,
     ) -> Result<DuckDbFlushResult, String> {
         if !self.buffer_exists {
             return Ok(DuckDbFlushResult {
@@ -442,6 +449,7 @@ impl FlushWorker {
                 applied_count: 0,
                 memory_bytes: 0,
                 flush_duration_ms: 0,
+                buffered_bytes: 0,
             });
         }
 
@@ -595,6 +603,7 @@ impl FlushWorker {
             applied_count,
             memory_bytes,
             flush_duration_ms,
+            buffered_bytes,
         })
     }
 
@@ -620,4 +629,6 @@ pub struct DuckDbFlushResult {
     pub memory_bytes: i64,
     /// Wall-clock duration of the flush in milliseconds.
     pub flush_duration_ms: i64,
+    /// Estimated total bytes of the flushed batch (fixed + variable).
+    pub buffered_bytes: i64,
 }

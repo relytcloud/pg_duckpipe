@@ -83,7 +83,7 @@
 - [x] Daemon HTTP `GET /metrics` endpoint — returns JSON merging FlushCoordinator in-memory metrics with PG persisted data; same shape as PG `duckpipe.metrics()` function
 - [ ] Replication lag in `status()` — compute `pg_current_wal_lsn() - applied_lsn` as `lag_bytes`; needs special handling for remote groups (lag is relative to remote WAL tip, not local)
 - [ ] Prometheus text rendering — expose metrics as Prometheus-compatible text format via external tools (postgres_exporter, JSON exporter) or native endpoint
-- [ ] Per-table `avg_row_bytes` metric — track cumulative bytes and row count during `append_to_buffer()`, expose `avg_row_bytes` in `status()` / `metrics()` for capacity planning and byte-based flush threshold
+- [x] Per-table `avg_row_bytes` metric — track cumulative bytes and row count during `append_to_buffer()`, expose `avg_row_bytes` in `status()` / `metrics()` for capacity planning and byte-based flush threshold
 - [ ] `applied_lsn` stays NULL during SNAPSHOT/CATCHUP — should be set to `snapshot_lsn` after snapshot completes
 - [x] `worker_state` not updated during snapshot processing — resolved: observability metrics moved to SHM, updated every cycle regardless of snapshot state
 - [x] Flush runtime stats for fixed-interval scraping — `flush_count` and `flush_duration_ms` now tracked in SHM and exposed via `status()` and `metrics()`

@@ -27,6 +27,7 @@ pub struct TableMetricsSlot {
     pub duckdb_memory_bytes: i64,
     pub flush_count: i64,
     pub flush_duration_ms: i64,
+    pub avg_row_bytes: i64,
 }
 
 #[derive(Copy, Clone)]
@@ -56,6 +57,7 @@ impl Default for SharedMetrics {
                 duckdb_memory_bytes: 0,
                 flush_count: 0,
                 flush_duration_ms: 0,
+                avg_row_bytes: 0,
             }; MAX_METRICS_TABLES],
             groups: [GroupMetricsSlot {
                 group_id: 0,
@@ -135,6 +137,7 @@ pub fn write_shmem_metrics(group: &GroupMetrics, tables: &[TableMetrics]) {
                 slot.duckdb_memory_bytes = t.duckdb_memory_bytes;
                 slot.flush_count = t.flush_count;
                 slot.flush_duration_ms = t.flush_duration_ms;
+                slot.avg_row_bytes = t.avg_row_bytes;
                 found = true;
                 break;
             }
@@ -150,6 +153,7 @@ pub fn write_shmem_metrics(group: &GroupMetrics, tables: &[TableMetrics]) {
                     duckdb_memory_bytes: t.duckdb_memory_bytes,
                     flush_count: t.flush_count,
                     flush_duration_ms: t.flush_duration_ms,
+                    avg_row_bytes: t.avg_row_bytes,
                 };
             } else {
                 tracing::warn!("duckpipe: SHM table slots full ({MAX_METRICS_TABLES}), metrics for mapping_id={} dropped", t.mapping_id);
@@ -172,6 +176,7 @@ pub fn clear_shmem_table_slot(mapping_id: i32) {
                 duckdb_memory_bytes: 0,
                 flush_count: 0,
                 flush_duration_ms: 0,
+                avg_row_bytes: 0,
             };
             return;
         }
@@ -222,6 +227,7 @@ pub fn read_shmem_table_metrics() -> std::collections::HashMap<i32, TableMetrics
                     duckdb_memory_bytes: s.duckdb_memory_bytes,
                     flush_count: s.flush_count,
                     flush_duration_ms: s.flush_duration_ms,
+                    avg_row_bytes: s.avg_row_bytes,
                 },
             )
         })
