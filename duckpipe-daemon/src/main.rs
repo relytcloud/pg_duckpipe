@@ -67,6 +67,10 @@ struct Args {
     #[arg(long, default_value_t = 512, value_parser = clap::value_parser!(i32).range(16..=65536))]
     duckdb_flush_memory_mb: i32,
 
+    /// Maximum concurrent flush operations per sync group (1-1000, default 4).
+    #[arg(long, default_value_t = 4, value_parser = clap::value_parser!(i32).range(1..=1000))]
+    max_concurrent_flushes: i32,
+
     /// Sync group to process. If omitted, daemon starts unbound and waits
     /// for a group to be created via POST /groups.
     #[arg(long)]
@@ -114,6 +118,7 @@ async fn main() {
         duckdb_buffer_memory_mb: args.duckdb_buffer_memory_mb,
         duckdb_flush_memory_mb: args.duckdb_flush_memory_mb,
         max_queued_changes: args.max_queued_changes,
+        max_concurrent_flushes: args.max_concurrent_flushes,
     };
 
     let slot_params = to_slot_connect_params(&connstr).unwrap_or_else(|e| {
@@ -256,6 +261,7 @@ async fn run_sync_loop(
             config.max_queued_changes,
             config.duckdb_buffer_memory_mb,
             config.duckdb_flush_memory_mb,
+            config.max_concurrent_flushes,
         );
         let mut snapshot_manager = SnapshotManager::new();
         let mut consumer: Option<SlotState> = None;

@@ -84,6 +84,62 @@ pub enum FlushThreadResult {
     },
 }
 
+/// Global-per-group semaphore limiting concurrent flush operations.
+///
+/// With 100+ tables syncing, all flush threads can execute `flush_buffer()` concurrently,
+/// causing peak memory spikes (each gets `flush_memory_mb`) and DuckLake commit lock
+/// contention. FlushGate ensures only N threads flush at once while the rest continue
+/// buffering in low-memory mode.
+pub struct FlushGate {
+    inner: Mutex<FlushGateInner>,
+}
+
+struct FlushGateInner {
+    active: usize,
+    max_concurrent: usize,
+}
+
+impl FlushGate {
+    fn new(max_concurrent: usize) -> Self {
+        FlushGate {
+            inner: Mutex::new(FlushGateInner {
+                active: 0,
+                max_concurrent,
+            }),
+        }
+    }
+
+    /// Non-blocking attempt to acquire a flush slot.
+    /// Returns true if a slot was acquired, false if the gate is full.
+    fn try_acquire(&self) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.active < inner.max_concurrent {
+            inner.active += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Release a flush slot after flush completes.
+    fn release(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.active = inner.active.saturating_sub(1);
+    }
+
+    /// Dynamically update the max concurrent flushes (for runtime GUC changes).
+    fn set_max(&self, n: usize) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.max_concurrent = n;
+    }
+
+    /// Current number of active flushes.
+    fn active_count(&self) -> usize {
+        let inner = self.inner.lock().unwrap();
+        inner.active
+    }
+}
+
 /// Shared backpressure state between producer (WAL consumer) and flush threads.
 struct BackpressureState {
     /// Total number of in-flight changes (shared queues + local accumulators).
@@ -133,6 +189,8 @@ pub struct FlushCoordinator {
     buffer_memory_mb: i32,
     /// DuckDB memory limit in MB during flush/compaction.
     flush_memory_mb: i32,
+    /// Global-per-group semaphore limiting concurrent flush operations.
+    flush_gate: Arc<FlushGate>,
 }
 
 impl FlushCoordinator {
@@ -146,6 +204,7 @@ impl FlushCoordinator {
         max_queued_changes: i32,
         buffer_memory_mb: i32,
         flush_memory_mb: i32,
+        max_concurrent_flushes: i32,
     ) -> Self {
         let (tx, rx) = mpsc::channel();
         FlushCoordinator {
@@ -169,7 +228,18 @@ impl FlushCoordinator {
             target_to_mapping: HashMap::new(),
             buffer_memory_mb,
             flush_memory_mb,
+            flush_gate: Arc::new(FlushGate::new(max_concurrent_flushes as usize)),
         }
+    }
+
+    /// Update the maximum concurrent flushes (for runtime GUC changes).
+    pub fn set_max_concurrent_flushes(&self, n: i32) {
+        self.flush_gate.set_max(n as usize);
+    }
+
+    /// Current number of active flush operations.
+    pub fn active_flush_count(&self) -> usize {
+        self.flush_gate.active_count()
     }
 
     /// Ensure a queue + flush thread exists for the given target table.
@@ -257,6 +327,7 @@ impl FlushCoordinator {
         let ducklake_schema = self.ducklake_schema.clone();
         let group_name = self.group_name.clone();
         let bp = Arc::clone(&self.backpressure);
+        let fg = Arc::clone(&self.flush_gate);
         let batch_threshold = self.flush_batch_threshold;
         let interval_ms = self.flush_interval_ms;
         let buffer_memory_mb = self.buffer_memory_mb;
@@ -275,6 +346,7 @@ impl FlushCoordinator {
                     &ducklake_schema,
                     &group_name,
                     bp,
+                    fg,
                     batch_threshold,
                     interval_ms,
                     buffer_memory_mb,
@@ -697,6 +769,7 @@ fn flush_thread_main(
     ducklake_schema: &str,
     group_name: &str,
     backpressure: Arc<BackpressureState>,
+    flush_gate: Arc<FlushGate>,
     batch_threshold: usize,
     flush_interval_ms: u64,
     buffer_memory_mb: i32,
@@ -903,6 +976,28 @@ fn flush_thread_main(
         };
 
         if should_flush && buffered_count > 0 {
+            // Gate: drain requests bypass the gate (TRUNCATE must flush immediately),
+            // normal flushes must acquire a slot. If the gate is full, skip flushing
+            // and continue buffering — the thread will retry next iteration.
+            let gate_acquired = if drain_requested {
+                false // drain bypasses gate; don't acquire a slot
+            } else if flush_gate.try_acquire() {
+                true
+            } else {
+                tracing::debug!(
+                    "pg_duckpipe: flush gate full, deferring flush for {}",
+                    buffered_meta
+                        .as_ref()
+                        .map_or("?", |m| m.target_key.as_str())
+                );
+                // Signal drain_complete if a drain was requested (shouldn't happen
+                // in this branch, but defensive)
+                if drain_requested {
+                    signal_drain_complete(&drain_complete, &control);
+                }
+                continue;
+            };
+
             if let Some(meta) = buffered_meta.as_ref() {
                 do_flush_buffer(
                     &mut worker,
@@ -915,6 +1010,11 @@ fn flush_thread_main(
                     &rt,
                 );
             }
+
+            if gate_acquired {
+                flush_gate.release();
+            }
+
             backpressure
                 .total_queued
                 .fetch_sub(buffered_count, Ordering::Relaxed);

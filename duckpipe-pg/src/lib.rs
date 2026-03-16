@@ -252,6 +252,7 @@ pub(crate) static FLUSH_BATCH_THRESHOLD: GucSetting<i32> = GucSetting::<i32>::ne
 pub(crate) static MAX_QUEUED_CHANGES: GucSetting<i32> = GucSetting::<i32>::new(500000);
 pub(crate) static DUCKDB_BUFFER_MEMORY_MB: GucSetting<i32> = GucSetting::<i32>::new(16);
 pub(crate) static DUCKDB_FLUSH_MEMORY_MB: GucSetting<i32> = GucSetting::<i32>::new(512);
+pub(crate) static MAX_CONCURRENT_FLUSHES: GucSetting<i32> = GucSetting::<i32>::new(4);
 
 #[pg_guard]
 extern "C-unwind" fn _PG_init() {
@@ -373,6 +374,17 @@ extern "C-unwind" fn _PG_init() {
         &DUCKDB_FLUSH_MEMORY_MB,
         16,
         65536,
+        GucContext::Sighup,
+        GucFlags::empty(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"duckpipe.max_concurrent_flushes",
+        c"Maximum concurrent flush operations per sync group",
+        c"Maximum concurrent flush operations per sync group",
+        &MAX_CONCURRENT_FLUSHES,
+        1,
+        1000,
         GucContext::Sighup,
         GucFlags::empty(),
     );

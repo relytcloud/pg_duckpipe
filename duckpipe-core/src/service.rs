@@ -43,6 +43,8 @@ pub struct ServiceConfig {
     pub duckdb_flush_memory_mb: i32,
     /// Maximum total queued changes before backpressure pauses WAL consumption (default 500000)
     pub max_queued_changes: i32,
+    /// Maximum concurrent flush operations per group (default 4)
+    pub max_concurrent_flushes: i32,
 }
 
 /// How often the per-slot relation cache refreshes `enabled` (and `state`) from PG.
