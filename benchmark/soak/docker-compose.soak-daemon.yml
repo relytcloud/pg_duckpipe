@@ -1,0 +1,69 @@
+services:
+  db:
+    build:
+      context: ../..
+      dockerfile: benchmark/soak/Dockerfile.db
+    platform: linux/amd64
+    command: >-
+      -c shared_preload_libraries=pg_duckdb,pg_ducklake,pg_duckpipe
+      -c wal_level=logical
+    ports:
+      - "${PORT:-5432}:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${PASSWORD:-duckdb}
+    volumes:
+      - daemon_pgdata:/var/lib/postgresql
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  daemon:
+    build:
+      context: ../..
+      dockerfile: docker/Dockerfile.daemon
+    platform: linux/amd64
+    ports:
+      - "${API_PORT:-8080}:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      CONNSTR: "host=db port=5432 dbname=postgres user=postgres password=${PASSWORD:-duckdb}"
+      # DuckDB extensions are installed in /home/duckpipe; set HOME for root user
+      HOME: /home/duckpipe
+    # Share PG data volume so daemon's DuckDB can access DuckLake data files
+    # Run as root so DuckDB can write to PG-owned DuckLake data directory
+    user: root
+    volumes:
+      - daemon_pgdata:/var/lib/postgresql
+    # Pre-bind to "default" group (auto-created by DB init script).
+    # CMD from Dockerfile: --api-bind 0.0.0.0
+    command: ["--api-bind", "0.0.0.0", "--group", "default"]
+    restart: unless-stopped
+
+  bench:
+    build:
+      context: ..
+      dockerfile: soak/Dockerfile.bench
+    platform: linux/amd64
+    entrypoint: ["python3", "/bench/soak_test_daemon.py"]
+    depends_on:
+      db:
+        condition: service_healthy
+      daemon:
+        condition: service_started
+    environment:
+      DB_URL: "host=db port=5432 user=postgres password=${PASSWORD:-duckdb} dbname=postgres"
+      DAEMON_URL: "http://daemon:8080"
+      SOAK_SCENARIO: "${SCENARIO:-sustained-insert}"
+      SOAK_DURATION: "${DURATION:-3600}"
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ./soak_results:/bench/soak_results
+
+volumes:
+  daemon_pgdata:
