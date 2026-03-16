@@ -63,6 +63,7 @@ INSERT INTO duckpipe.global_config VALUES
     ('duckdb_threads', '1'),
     ('flush_interval_ms', '5000'),
     ('flush_batch_threshold', '50000'),
+    ('max_concurrent_flushes', '4'),
     ('max_queued_changes', '500000');
 
 -- Default sync group

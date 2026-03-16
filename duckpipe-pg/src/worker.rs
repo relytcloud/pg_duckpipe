@@ -12,7 +12,7 @@ use duckpipe_core::service::{self, ServiceConfig, SlotConnectParams, SlotState};
 use duckpipe_core::snapshot_manager::SnapshotManager;
 use duckpipe_core::types::{GroupConfig, ResolvedConfig};
 
-use crate::{BATCH_SIZE_PER_GROUP, DEBUG_LOG, ENABLED, MAX_CONCURRENT_FLUSHES, POLL_INTERVAL};
+use crate::{BATCH_SIZE_PER_GROUP, DEBUG_LOG, ENABLED, POLL_INTERVAL};
 
 /// Check if shutdown has been requested.
 fn should_shutdown() -> bool {
@@ -28,7 +28,6 @@ fn read_config(connstr: &str, duckdb_pg_connstr: &str) -> ServiceConfig {
         connstr: connstr.to_string(),
         duckdb_pg_connstr: duckdb_pg_connstr.to_string(),
         ducklake_schema: "ducklake".to_string(),
-        max_concurrent_flushes: MAX_CONCURRENT_FLUSHES.get(),
     }
 }
 
@@ -231,7 +230,6 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
         "ducklake".to_string(),
         group_name.clone(),
         resolved_config,
-        MAX_CONCURRENT_FLUSHES.get(),
     );
     let mut snapshot_manager = SnapshotManager::new();
 
@@ -316,7 +314,8 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
                     }
 
                     let config = read_config(&connstr, &duckdb_pg_connstr);
-                    coord.set_max_concurrent_flushes(config.max_concurrent_flushes);
+                    let rc = read_resolved_config(&group_name);
+                    coord.set_max_concurrent_flushes(rc.max_concurrent_flushes);
 
                     match service::run_group_sync_cycle(
                         &config,

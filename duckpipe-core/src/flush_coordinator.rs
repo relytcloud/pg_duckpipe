@@ -339,10 +339,10 @@ impl FlushCoordinator {
         ducklake_schema: String,
         group_name: String,
         resolved_config: ResolvedConfig,
-        max_concurrent_flushes: i32,
     ) -> Self {
         let (tx, rx) = mpsc::channel();
         let max_queued = resolved_config.max_queued_changes as i64;
+        let max_concurrent = resolved_config.max_concurrent_flushes as usize;
         FlushCoordinator {
             pg_connstr,
             ducklake_schema,
@@ -362,10 +362,7 @@ impl FlushCoordinator {
             per_table_flush_duration: HashMap::new(),
             per_table_avg_row_bytes: HashMap::new(),
             target_to_mapping: HashMap::new(),
-            flush_gate: Arc::new(FlushGate::new(
-                max_concurrent_flushes as usize,
-                Duration::from_millis(5000),
-            )),
+            flush_gate: Arc::new(FlushGate::new(max_concurrent, Duration::from_millis(5000))),
         }
     }
 

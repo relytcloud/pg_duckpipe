@@ -33,8 +33,6 @@ pub struct ServiceConfig {
     pub duckdb_pg_connstr: String,
     /// DuckLake metadata schema name (e.g., "ducklake")
     pub ducklake_schema: String,
-    /// Maximum concurrent flush operations per group (default 4)
-    pub max_concurrent_flushes: i32,
 }
 
 /// How often the per-slot relation cache refreshes `enabled` (and `state`) from PG.

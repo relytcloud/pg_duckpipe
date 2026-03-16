@@ -272,7 +272,6 @@ pub(crate) static BATCH_SIZE_PER_GROUP: GucSetting<i32> = GucSetting::<i32>::new
 pub(crate) static ENABLED: GucSetting<bool> = GucSetting::<bool>::new(true);
 pub(crate) static DEBUG_LOG: GucSetting<bool> = GucSetting::<bool>::new(false);
 pub(crate) static DATA_INLINING_ROW_LIMIT: GucSetting<i32> = GucSetting::<i32>::new(0);
-pub(crate) static MAX_CONCURRENT_FLUSHES: GucSetting<i32> = GucSetting::<i32>::new(4);
 
 #[pg_guard]
 extern "C-unwind" fn _PG_init() {
@@ -340,17 +339,6 @@ extern "C-unwind" fn _PG_init() {
         0,
         1000000,
         GucContext::Userset,
-        GucFlags::empty(),
-    );
-
-    GucRegistry::define_int_guc(
-        c"duckpipe.max_concurrent_flushes",
-        c"Maximum concurrent flush operations per sync group",
-        c"Maximum concurrent flush operations per sync group",
-        &MAX_CONCURRENT_FLUSHES,
-        1,
-        1000,
-        GucContext::Sighup,
         GucFlags::empty(),
     );
 }

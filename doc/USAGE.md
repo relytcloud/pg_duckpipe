@@ -188,7 +188,6 @@ These parameters require `ALTER SYSTEM SET` + `SELECT pg_reload_conf()` (SIGHUP-
 | `duckpipe.enabled` | `on` | — | Enable/disable the background worker |
 | `duckpipe.poll_interval` | `1000` | 100–3600000 ms | Interval between WAL poll cycles |
 | `duckpipe.batch_size_per_group` | `100000` | 100–10000000 | Max WAL messages per group per cycle |
-| `duckpipe.max_concurrent_flushes` | `4` | 1–1000 | Max concurrent flush operations per group |
 | `duckpipe.debug_log` | `off` | — | Emit critical-path timing logs |
 | `duckpipe.data_inlining_row_limit` | `0` | 0–1000000 | DuckLake data inlining row limit |
 
@@ -203,6 +202,7 @@ DuckDB resource limits and flush tuning are managed via the `duckpipe.global_con
 | `duckdb_threads` | int | `1` | DuckDB `SET threads` per FlushWorker |
 | `flush_interval_ms` | int | `5000` | Time-based flush trigger (ms) |
 | `flush_batch_threshold` | int | `50000` | Queue-size flush trigger |
+| `max_concurrent_flushes` | int | `4` | Max concurrent flush operations per group |
 | `max_queued_changes` | int | `500000` | Backpressure threshold |
 
 #### Config API

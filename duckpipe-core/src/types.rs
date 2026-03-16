@@ -7,6 +7,7 @@ const VALID_CONFIG_KEYS: &[(&str, &str)] = &[
     ("duckdb_threads", "int"),
     ("flush_interval_ms", "int"),
     ("flush_batch_threshold", "int"),
+    ("max_concurrent_flushes", "int"),
     ("max_queued_changes", "int"),
 ];
 
@@ -24,6 +25,8 @@ pub struct GroupConfig {
     pub flush_interval_ms: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub flush_batch_threshold: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_concurrent_flushes: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_queued_changes: Option<i32>,
 }
@@ -61,6 +64,9 @@ impl GroupConfig {
             "flush_batch_threshold" => {
                 self.flush_batch_threshold = Some(value.parse::<i32>().unwrap())
             }
+            "max_concurrent_flushes" => {
+                self.max_concurrent_flushes = Some(value.parse::<i32>().unwrap())
+            }
             "max_queued_changes" => self.max_queued_changes = Some(value.parse::<i32>().unwrap()),
             _ => return Err(format!("unknown config key: '{}'", key)),
         }
@@ -75,6 +81,7 @@ impl GroupConfig {
             "duckdb_threads" => self.duckdb_threads.map(|v| v.to_string()),
             "flush_interval_ms" => self.flush_interval_ms.map(|v| v.to_string()),
             "flush_batch_threshold" => self.flush_batch_threshold.map(|v| v.to_string()),
+            "max_concurrent_flushes" => self.max_concurrent_flushes.map(|v| v.to_string()),
             "max_queued_changes" => self.max_queued_changes.map(|v| v.to_string()),
             _ => None,
         }
@@ -120,6 +127,7 @@ pub struct ResolvedConfig {
     pub duckdb_threads: i32,
     pub flush_interval_ms: i32,
     pub flush_batch_threshold: i32,
+    pub max_concurrent_flushes: i32,
     pub max_queued_changes: i32,
 }
 
@@ -131,6 +139,7 @@ impl Default for ResolvedConfig {
             duckdb_threads: 1,
             flush_interval_ms: 5000,
             flush_batch_threshold: 50000,
+            max_concurrent_flushes: 4,
             max_queued_changes: 500000,
         }
     }
@@ -145,6 +154,7 @@ impl ResolvedConfig {
             duckdb_threads: Some(self.duckdb_threads),
             flush_interval_ms: Some(self.flush_interval_ms),
             flush_batch_threshold: Some(self.flush_batch_threshold),
+            max_concurrent_flushes: Some(self.max_concurrent_flushes),
             max_queued_changes: Some(self.max_queued_changes),
         }
     }
@@ -157,6 +167,7 @@ impl ResolvedConfig {
             "duckdb_threads" => Some(self.duckdb_threads.to_string()),
             "flush_interval_ms" => Some(self.flush_interval_ms.to_string()),
             "flush_batch_threshold" => Some(self.flush_batch_threshold.to_string()),
+            "max_concurrent_flushes" => Some(self.max_concurrent_flushes.to_string()),
             "max_queued_changes" => Some(self.max_queued_changes.to_string()),
             _ => None,
         }
@@ -186,6 +197,10 @@ impl ResolvedConfig {
                 .flush_batch_threshold
                 .or(global.flush_batch_threshold)
                 .unwrap_or(defaults.flush_batch_threshold),
+            max_concurrent_flushes: group
+                .max_concurrent_flushes
+                .or(global.max_concurrent_flushes)
+                .unwrap_or(defaults.max_concurrent_flushes),
             max_queued_changes: group
                 .max_queued_changes
                 .or(global.max_queued_changes)

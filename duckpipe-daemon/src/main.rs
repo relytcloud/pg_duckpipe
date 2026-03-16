@@ -48,10 +48,6 @@ struct Args {
     #[arg(long, default_value_t = false)]
     debug: bool,
 
-    /// Maximum concurrent flush operations per sync group (1-1000, default 4).
-    #[arg(long, default_value_t = 4, value_parser = clap::value_parser!(i32).range(1..=1000))]
-    max_concurrent_flushes: i32,
-
     /// Sync group to process. If omitted, daemon starts unbound and waits
     /// for a group to be created via POST /groups.
     #[arg(long)]
@@ -94,7 +90,6 @@ async fn main() {
         connstr: connstr.clone(),
         duckdb_pg_connstr: connstr.clone(),
         ducklake_schema: args.ducklake_schema.clone(),
-        max_concurrent_flushes: args.max_concurrent_flushes,
     };
 
     let slot_params = to_slot_connect_params(&connstr).unwrap_or_else(|e| {
@@ -294,7 +289,6 @@ async fn run_sync_loop(
             config.ducklake_schema.clone(),
             group_name.clone(),
             resolved_config,
-            config.max_concurrent_flushes,
         );
         let mut snapshot_manager = SnapshotManager::new();
         let mut consumer: Option<SlotState> = None;
