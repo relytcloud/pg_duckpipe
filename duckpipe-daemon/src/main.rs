@@ -47,8 +47,8 @@ struct Args {
     #[arg(long, default_value_t = false)]
     debug: bool,
 
-    /// Flush interval in milliseconds (min 100, default 1000).
-    #[arg(long, default_value_t = 1000, value_parser = clap::value_parser!(i32).range(100..=60000))]
+    /// Flush interval in milliseconds (min 100, default 5000).
+    #[arg(long, default_value_t = 5000, value_parser = clap::value_parser!(i32).range(100..))]
     flush_interval: i32,
 
     /// Number of queued changes that triggers an immediate flush (min 100, default 10000).
@@ -58,6 +58,14 @@ struct Args {
     /// Maximum total queued changes before backpressure pauses WAL consumption (min 1000, default 500000).
     #[arg(long, default_value_t = 500000, value_parser = clap::value_parser!(i32).range(1000..=10000000))]
     max_queued_changes: i32,
+
+    /// DuckDB memory limit in MB during buffer accumulation (1-4096, default 16).
+    #[arg(long, default_value_t = 16, value_parser = clap::value_parser!(i32).range(1..=4096))]
+    duckdb_buffer_memory_mb: i32,
+
+    /// DuckDB memory limit in MB during flush/compaction (16-65536, default 512).
+    #[arg(long, default_value_t = 512, value_parser = clap::value_parser!(i32).range(16..=65536))]
+    duckdb_flush_memory_mb: i32,
 
     /// Sync group to process. If omitted, daemon starts unbound and waits
     /// for a group to be created via POST /groups.
@@ -103,6 +111,8 @@ async fn main() {
         ducklake_schema: args.ducklake_schema.clone(),
         flush_interval_ms: args.flush_interval,
         flush_batch_threshold: args.flush_batch_threshold,
+        duckdb_buffer_memory_mb: args.duckdb_buffer_memory_mb,
+        duckdb_flush_memory_mb: args.duckdb_flush_memory_mb,
         max_queued_changes: args.max_queued_changes,
     };
 
@@ -244,6 +254,8 @@ async fn run_sync_loop(
             config.flush_batch_threshold,
             config.flush_interval_ms,
             config.max_queued_changes,
+            config.duckdb_buffer_memory_mb,
+            config.duckdb_flush_memory_mb,
         );
         let mut snapshot_manager = SnapshotManager::new();
         let mut consumer: Option<SlotState> = None;

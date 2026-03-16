@@ -129,6 +129,10 @@ pub struct FlushCoordinator {
     /// Cache: target_key → mapping_id.  Populated in `ensure_queue`, used in
     /// `get_min_applied_lsn_in_coordinator` to avoid O(n) mutex locks per call.
     target_to_mapping: HashMap<String, i32>,
+    /// DuckDB memory limit in MB during buffer accumulation.
+    buffer_memory_mb: i32,
+    /// DuckDB memory limit in MB during flush/compaction.
+    flush_memory_mb: i32,
 }
 
 impl FlushCoordinator {
@@ -140,6 +144,8 @@ impl FlushCoordinator {
         flush_batch_threshold: i32,
         flush_interval_ms: i32,
         max_queued_changes: i32,
+        buffer_memory_mb: i32,
+        flush_memory_mb: i32,
     ) -> Self {
         let (tx, rx) = mpsc::channel();
         FlushCoordinator {
@@ -161,6 +167,8 @@ impl FlushCoordinator {
             per_table_flush_count: HashMap::new(),
             per_table_flush_duration: HashMap::new(),
             target_to_mapping: HashMap::new(),
+            buffer_memory_mb,
+            flush_memory_mb,
         }
     }
 
@@ -251,6 +259,8 @@ impl FlushCoordinator {
         let bp = Arc::clone(&self.backpressure);
         let batch_threshold = self.flush_batch_threshold;
         let interval_ms = self.flush_interval_ms;
+        let buffer_memory_mb = self.buffer_memory_mb;
+        let flush_memory_mb = self.flush_memory_mb;
 
         let join_handle = std::thread::Builder::new()
             .name(format!("duckpipe-flush-{}", target_key))
@@ -267,6 +277,8 @@ impl FlushCoordinator {
                     bp,
                     batch_threshold,
                     interval_ms,
+                    buffer_memory_mb,
+                    flush_memory_mb,
                 );
             })
             .expect("failed to spawn flush thread");
@@ -687,6 +699,8 @@ fn flush_thread_main(
     backpressure: Arc<BackpressureState>,
     batch_threshold: usize,
     flush_interval_ms: u64,
+    buffer_memory_mb: i32,
+    flush_memory_mb: i32,
 ) {
     // Each flush thread owns its own tokio runtime for async PG metadata updates.
     // This avoids deadlock with the main thread's current_thread runtime, since
@@ -787,7 +801,12 @@ fn flush_thread_main(
 
                 // Ensure FlushWorker exists before appending
                 if worker.is_none() {
-                    match FlushWorker::new(pg_connstr, ducklake_schema) {
+                    match FlushWorker::new(
+                        pg_connstr,
+                        ducklake_schema,
+                        buffer_memory_mb,
+                        flush_memory_mb,
+                    ) {
                         Ok(w) => worker = Some(w),
                         Err(e) => {
                             let error_msg = format!("failed to create FlushWorker: {}", e);
@@ -975,6 +994,11 @@ fn do_flush_buffer(
                 memory_bytes: result.memory_bytes,
                 flush_duration_ms: result.flush_duration_ms,
             });
+
+            // Drop worker after successful flush — recreated lazily on next cycle.
+            // This releases the DuckDB connection and its allocated memory back to
+            // the OS, preventing RSS from staying at the flush-phase high-water mark.
+            *worker = None;
         }
         Err(e) => {
             // Drop worker on error — will be recreated on next iteration

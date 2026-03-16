@@ -176,9 +176,10 @@ fn parse_target_key(target_key: &str) -> Result<(&str, &str), String> {
         .ok_or_else(|| format!("invalid target_key: {}", target_key))
 }
 
-/// Persistent flush worker for a single target table.
+/// Flush worker for a single target table.
 ///
-/// Holds a long-lived DuckDB connection with INSTALL+LOAD+ATTACH done once at creation.
+/// Holds a DuckDB connection with INSTALL+LOAD+ATTACH done at creation.
+/// The connection is recreated after each flush cycle to release memory back to the OS.
 /// The buffer table is lazily created and persists across append calls within a flush window,
 /// allowing DuckDB to spill to disk for large batches.
 pub struct FlushWorker {
@@ -206,12 +207,23 @@ pub struct FlushWorker {
     /// Reset to `true` when the worker is recreated (after error or resync) so
     /// the invariant is always established conservatively.
     may_have_conflicts: bool,
+    /// DuckDB memory limit string for the flush phase (e.g. "512MB").
+    /// Stored so `flush_buffer()` can raise the limit before compaction.
+    flush_memory_limit: String,
 }
 
 impl FlushWorker {
-    /// Create a new FlushWorker with a persistent DuckDB connection.
-    /// Performs one-time setup: open in-memory DB, INSTALL+LOAD ducklake, ATTACH to PG.
-    pub fn new(pg_connstr: &str, ducklake_schema: &str) -> Result<Self, String> {
+    /// Create a new FlushWorker with a fresh DuckDB connection.
+    /// Performs setup: open in-memory DB, INSTALL+LOAD ducklake, ATTACH to PG.
+    /// The initial memory limit is set to `buffer_memory_mb` (low, for 100+ concurrent tables).
+    /// During `flush_buffer()`, it's raised to `flush_memory_mb` (high, for compaction + DuckLake writes).
+    /// The worker is dropped after each flush cycle to release memory back to the OS.
+    pub fn new(
+        pg_connstr: &str,
+        ducklake_schema: &str,
+        buffer_memory_mb: i32,
+        flush_memory_mb: i32,
+    ) -> Result<Self, String> {
         let config = Config::default()
             .allow_unsigned_extensions()
             .map_err(|e| format!("duckdb config: {}", e))?;
@@ -236,6 +248,13 @@ impl FlushWorker {
         )
         .map_err(|e| format!("duckdb set retry: {}", e))?;
 
+        let buffer_memory_limit = format!("{}MB", buffer_memory_mb);
+        let flush_memory_limit = format!("{}MB", flush_memory_mb);
+
+        // Set initial memory limit to buffer phase (low limit for spilling)
+        db.execute_batch(&format!("SET memory_limit = '{}'", buffer_memory_limit))
+            .map_err(|e| format!("duckdb set memory_limit: {}", e))?;
+
         Ok(FlushWorker {
             db,
             lake_info: None,
@@ -245,6 +264,7 @@ impl FlushWorker {
             cached_pk_cols: None,
             cached_all_cols: None,
             may_have_conflicts: true,
+            flush_memory_limit,
         })
     }
 
@@ -444,6 +464,11 @@ impl FlushWorker {
             .ok_or("all_cols not cached — ensure_buffer should have been called")?;
         let has_non_inserts = self.has_non_inserts;
 
+        // Raise memory limit for flush phase (compaction + DuckLake writes)
+        self.db
+            .execute_batch(&format!("SET memory_limit = '{}'", self.flush_memory_limit))
+            .map_err(|e| format!("duckdb raise memory_limit: {}", e))?;
+
         // Step 1: Compact — deduplicate by PK, keep last operation (highest seq).
         let t_phase = Instant::now();
         let compact_sql = format!(
@@ -531,6 +556,9 @@ impl FlushWorker {
         self.buffer_exists = false;
         self.has_non_inserts = false;
         let t_cleanup_ms = t_phase.elapsed().as_secs_f64() * 1000.0;
+
+        // No need to restore buffer-phase memory limit — the worker is dropped
+        // after each flush cycle and recreated with buffer_memory_limit on next use.
 
         tracing::debug!(
             "DuckPipe perf: action=duckdb_flush target={} rows={} \
