@@ -294,6 +294,6 @@ Note: In-flight consistency checks during active workload will show FAIL (row co
 ## Notes
 
 - Always use `-v` in teardown to remove the database volume between runs.
-- The Docker images are `linux/amd64` only. On Apple Silicon, local runs use Rosetta emulation (slower but functional).
+- The docker-compose files set `platform: linux/amd64`. Remove this line if running on an arm64 host with arm64 base images available.
 - First build on a clean machine takes 5-15 minutes due to Rust compilation. Docker cache speeds up subsequent builds.
 - The daemon compose requires the full repo (not just `benchmark/`) because it builds from `docker/Dockerfile.daemon` and `benchmark/soak/Dockerfile.db`.
