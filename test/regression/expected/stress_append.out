@@ -73,6 +73,7 @@ SELECT count(*) > 0 AS worker_alive FROM pg_stat_activity
 -- Cleanup
 DROP PROCEDURE stress_insert_one_row_txn;
 SELECT duckpipe.remove_table('public.stress_src', false);
+WARNING:  Group 'default' has no remaining tables — its replication slot is still holding WAL. Run SELECT duckpipe.drop_group('default') to release it.
  remove_table 
 --------------
  

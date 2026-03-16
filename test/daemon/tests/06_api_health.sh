@@ -11,7 +11,7 @@
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/helpers.sh"
 
-trap 'daemon_stop; run_sql "SELECT duckpipe.drop_group('"'"'api_test'"'"', true);" 2>/dev/null || true' EXIT
+trap 'daemon_stop; run_sql "SELECT duckpipe.drop_group('"'"'api_test'"'"');" 2>/dev/null || true' EXIT
 
 # --- Start daemon unbound (no --group) ---
 daemon_start_api
@@ -38,6 +38,6 @@ http_post "http://localhost:${API_PORT}/groups" '{"name":"another"}'
 assert_http_code "409" "duplicate bind should be 409"
 
 # --- Cleanup: drop the group we created ---
-http_delete "http://localhost:${API_PORT}/groups?drop_slot=true"
+http_delete "http://localhost:${API_PORT}/groups"
 
 echo "  api health: OK"

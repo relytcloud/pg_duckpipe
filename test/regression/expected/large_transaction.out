@@ -97,6 +97,7 @@ SELECT count(*) AS remaining_rows FROM public.large_txn_ducklake;
 
 -- Cleanup
 SELECT duckpipe.remove_table('public.large_txn', false);
+WARNING:  Group 'default' has no remaining tables — its replication slot is still holding WAL. Run SELECT duckpipe.drop_group('default') to release it.
  remove_table 
 --------------
  

@@ -59,6 +59,7 @@ FROM jsonb_array_elements((duckpipe.metrics()::jsonb)->'groups') AS g;
 
 -- Cleanup
 SELECT duckpipe.remove_table('public.metrics_test', false);
+WARNING:  Group 'default' has no remaining tables — its replication slot is still holding WAL. Run SELECT duckpipe.drop_group('default') to release it.
  remove_table 
 --------------
  

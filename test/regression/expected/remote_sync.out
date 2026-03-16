@@ -138,6 +138,7 @@ SELECT duckpipe.stop_worker();
 RESET client_min_messages;
 -- Remove table (should drop from remote publication)
 SELECT duckpipe.remove_table('t_remote');
+WARNING:  Group 'remote_test' has no remaining tables — its replication slot is still holding WAL. Run SELECT duckpipe.drop_group('remote_test') to release it.
  remove_table 
 --------------
  

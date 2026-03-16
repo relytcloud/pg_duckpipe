@@ -97,6 +97,7 @@ SELECT (SELECT count(*) FROM premature_catchup_src) AS source_count,
 -- ============================================================
 DROP PROCEDURE premature_catchup_insert;
 SELECT duckpipe.remove_table('public.premature_catchup_src', false);
+WARNING:  Group 'default' has no remaining tables — its replication slot is still holding WAL. Run SELECT duckpipe.drop_group('default') to release it.
  remove_table 
 --------------
  

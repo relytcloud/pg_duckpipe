@@ -40,6 +40,7 @@ SELECT sync_group, total_queued_changes, is_backpressured FROM duckpipe.worker_s
 
 -- Cleanup
 SELECT duckpipe.remove_table('public.mon_test', false);
+WARNING:  Group 'default' has no remaining tables — its replication slot is still holding WAL. Run SELECT duckpipe.drop_group('default') to release it.
  remove_table 
 --------------
  

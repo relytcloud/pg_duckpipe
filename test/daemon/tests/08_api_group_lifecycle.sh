@@ -46,7 +46,7 @@ assert_http_code "200" "enable group"
 assert_eq "$(jq_field '.enabled')" "true" "group enabled"
 
 # --- Test 5: Drop group ---
-http_delete "http://localhost:${API_PORT}/groups?drop_slot=true"
+http_delete "http://localhost:${API_PORT}/groups"
 assert_http_code "200" "drop group"
 
 # --- Test 6: Health shows unbound ---

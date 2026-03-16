@@ -60,6 +60,7 @@ SELECT * FROM public.resync_src_ducklake ORDER BY id;
 (3 rows)
 
 SELECT duckpipe.remove_table('public.resync_src', false);
+WARNING:  Group 'default' has no remaining tables — its replication slot is still holding WAL. Run SELECT duckpipe.drop_group('default') to release it.
  remove_table 
 --------------
  

@@ -130,6 +130,7 @@ SELECT id, val, val IS NULL AS is_null FROM special_chars_ducklake WHERE id = 17
 (1 row)
 
 SELECT duckpipe.remove_table('public.special_chars', false);
+WARNING:  Group 'default' has no remaining tables — its replication slot is still holding WAL. Run SELECT duckpipe.drop_group('default') to release it.
  remove_table 
 --------------
  

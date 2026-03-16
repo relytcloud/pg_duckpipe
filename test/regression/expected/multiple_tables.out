@@ -96,6 +96,7 @@ SELECT duckpipe.remove_table('public.multi_b', false);
 (1 row)
 
 SELECT duckpipe.remove_table('public.multi_c', false);
+WARNING:  Group 'default' has no remaining tables — its replication slot is still holding WAL. Run SELECT duckpipe.drop_group('default') to release it.
  remove_table 
 --------------
  

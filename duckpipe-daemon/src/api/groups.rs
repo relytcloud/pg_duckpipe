@@ -1,24 +1,18 @@
 use std::sync::Arc;
 
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::response::IntoResponse;
 use axum::Json;
 use serde::Deserialize;
 use serde_json::json;
 
 use super::error::ApiError;
-use super::{default_true, pg_connect, AppState, LockConn};
+use super::{pg_connect, AppState, LockConn};
 
 #[derive(Deserialize)]
 pub struct CreateGroupRequest {
     pub name: String,
     pub conninfo: Option<String>,
-}
-
-#[derive(Deserialize)]
-pub struct DropGroupQuery {
-    #[serde(default = "default_true")]
-    pub drop_slot: bool,
 }
 
 /// Acquire an advisory lock for the given group name.
@@ -92,10 +86,7 @@ pub async fn create_group(
 ///
 /// Unbinds the daemon and stops the sync loop first so that the replication
 /// slot is released before `duckpipe.drop_group()` tries to drop it.
-pub async fn drop_group(
-    State(state): State<Arc<AppState>>,
-    query: Query<DropGroupQuery>,
-) -> Result<impl IntoResponse, ApiError> {
+pub async fn drop_group(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, ApiError> {
     let group_name = state.require_group().await?;
 
     // 1. Unbind the daemon so the sync loop will notice and stop.
@@ -144,10 +135,7 @@ pub async fn drop_group(
 
     // 6. Now safe to drop the group (slot should be released).
     client
-        .execute(
-            "SELECT duckpipe.drop_group($1, $2)",
-            &[&group_name, &query.drop_slot],
-        )
+        .execute("SELECT duckpipe.drop_group($1)", &[&group_name])
         .await?;
 
     Ok(Json(json!({
