@@ -30,6 +30,7 @@
 - [x] Large catch-up batch stall — fixed via `may_have_conflicts` flag skipping DELETE scan on pure-insert path
 - [x] Flush-thread drain capped at `batch_threshold` for incremental progress visibility
 - [x] Mixed DML correctness — flush DELETE used all-column WHERE instead of PK-only; fixed by caching `pk_key_attrs` per relation
+- [x] Flush parallelism control — ticket-based FIFO `FlushGate` semaphore in `FlushCoordinator` limits concurrent `flush_buffer()` calls per group; `duckpipe.max_concurrent_flushes` GUC (default 4, range 1–1000, SIGHUP) + `--max-concurrent-flushes` daemon CLI; runtime-adjustable; drain requests (TRUNCATE) bypass the gate; threads waiting for a slot continue buffering in low-memory mode; `active_flushes` metric exposed in SHM, `worker_status()`, `metrics()`, and daemon `/metrics`
 
 ### Observability
 - [x] `status()` SRF: `consecutive_failures`, `retry_at`, `applied_lsn`, `queued_changes`, `snapshot_duration_ms`, `snapshot_rows`, `duckdb_memory_bytes`
@@ -57,7 +58,6 @@
 - [x] Multi-table streaming lag 20x single-table — two bugs: (1) benchmark `prepare_env` only cleaned up `sbtest1..args.tables` mappings, leaving orphans from wider prior scenarios; (2) `FlushCoordinator` never pruned stale `per_table_lsn` entries and flush threads for removed tables, freezing `confirmed_lsn`. Fixed via `prune_removed_tables()` in coordinator (called each cycle with `get_all_mapping_ids`) + benchmark cleanup queries all existing mappings
 - [x] Snapshot detection delay up to `poll_interval` — LISTEN/NOTIFY wakeup: `add_table()`, `resync_table()`, `enable_group()` fire `NOTIFY duckpipe_wakeup_{group}`; bgworker LISTENs and wakes immediately
 - [ ] Snapshot producers block WAL consumer — snapshot CSV producers (`run_csv_producer`) do sync file I/O (`fs::File::write_all`) and byte-by-byte quote tracking on the single-threaded tokio runtime, blocking the WAL consumer and all other async tasks during those windows; move producers to `spawn_blocking` or a dedicated thread so snapshots never interfere with WAL streaming
-- [x] Flush parallelism control — `FlushGate` semaphore in `FlushCoordinator` limits concurrent `flush_buffer()` calls per group; `duckpipe.max_concurrent_flushes` GUC (default 4, range 1–1000, SIGHUP) + `--max-concurrent-flushes` daemon CLI; runtime-adjustable via `ALTER SYSTEM` / `pg_reload_conf()` — worker calls `set_max_concurrent_flushes()` each cycle; drain requests (TRUNCATE) bypass the gate; threads denied a slot continue buffering in low-memory mode
 - [ ] Byte-based flush threshold — replace row-count `flush_batch_threshold` with `flush_buffer_size_mb`; estimate change byte size during `append_to_buffer()` (sum of `Value` sizes), track cumulative bytes per table, trigger flush when `buffered_bytes >= threshold`; uses `avg_row_bytes` from metrics for capacity planning
 - [ ] Batch compaction tuning — reduce Parquet file proliferation under sustained small-batch writes
 - [ ] Inline data flush
