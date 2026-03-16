@@ -2149,7 +2149,7 @@ fn get_group_config(group_name: &str, key: default!(Option<&str>, "NULL")) -> Op
                 Some(v) => Some(v),
                 None => {
                     error!(
-                        "unknown config key: '{}'. Valid keys: duckdb_buffer_memory_mb, duckdb_flush_memory_mb, duckdb_threads, flush_interval_ms, flush_batch_threshold, max_queued_changes",
+                        "unknown config key: '{}'. Valid keys: duckdb_buffer_memory_mb, duckdb_flush_memory_mb, duckdb_threads, flush_interval_ms, flush_batch_threshold, max_concurrent_flushes, max_queued_changes",
                         k
                     );
                 }

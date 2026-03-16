@@ -8,14 +8,15 @@ SELECT key, value FROM duckpipe.global_config ORDER BY key;
  duckdb_threads          | 1
  flush_batch_threshold   | 10000
  flush_interval_ms       | 1000
+ max_concurrent_flushes  | 4
  max_queued_changes      | 500000
-(6 rows)
+(7 rows)
 
 -- 2. get_config() returns all defaults as JSON
 SELECT duckpipe.get_config();
-                                                                            get_config                                                                             
--------------------------------------------------------------------------------------------------------------------------------------------------------------------
- {"duckdb_buffer_memory_mb":16,"duckdb_flush_memory_mb":512,"duckdb_threads":1,"flush_interval_ms":1000,"flush_batch_threshold":10000,"max_queued_changes":500000}
+                                                                                          get_config                                                                                          
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ {"duckdb_buffer_memory_mb":16,"duckdb_flush_memory_mb":512,"duckdb_threads":1,"flush_interval_ms":1000,"flush_batch_threshold":10000,"max_concurrent_flushes":4,"max_queued_changes":500000}
 (1 row)
 
 -- 3. get_config(key) returns single value
@@ -53,7 +54,7 @@ SELECT duckpipe.get_config('duckdb_threads');
 
 -- 6. Invalid key errors
 SELECT duckpipe.set_config('nonexistent_key', '123');
-ERROR:  unknown config key: 'nonexistent_key'. Valid keys: duckdb_buffer_memory_mb, duckdb_flush_memory_mb, duckdb_threads, flush_interval_ms, flush_batch_threshold, max_queued_changes
+ERROR:  unknown config key: 'nonexistent_key'. Valid keys: duckdb_buffer_memory_mb, duckdb_flush_memory_mb, duckdb_threads, flush_interval_ms, flush_batch_threshold, max_concurrent_flushes, max_queued_changes
 SELECT duckpipe.get_config('nonexistent_key');
  get_config 
 ------------
@@ -67,9 +68,9 @@ SELECT duckpipe.set_config('duckdb_threads', '-1');
 ERROR:  'duckdb_threads' must be positive, got -1
 -- 8. Per-group: get_group_config defaults (inherits from global)
 SELECT duckpipe.get_group_config('default');
-                                                                         get_group_config                                                                          
--------------------------------------------------------------------------------------------------------------------------------------------------------------------
- {"duckdb_buffer_memory_mb":32,"duckdb_flush_memory_mb":512,"duckdb_threads":4,"flush_interval_ms":1000,"flush_batch_threshold":10000,"max_queued_changes":500000}
+                                                                                       get_group_config                                                                                       
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ {"duckdb_buffer_memory_mb":32,"duckdb_flush_memory_mb":512,"duckdb_threads":4,"flush_interval_ms":1000,"flush_batch_threshold":10000,"max_concurrent_flushes":4,"max_queued_changes":500000}
 (1 row)
 
 -- 9. Per-group: get single key (resolved from global)
@@ -100,9 +101,9 @@ SELECT duckpipe.get_group_config('default', 'duckdb_buffer_memory_mb');
 
 -- 11. Per-group: resolved JSON shows override + inherited values
 SELECT duckpipe.get_group_config('default');
-                                                                         get_group_config                                                                          
--------------------------------------------------------------------------------------------------------------------------------------------------------------------
- {"duckdb_buffer_memory_mb":64,"duckdb_flush_memory_mb":512,"duckdb_threads":4,"flush_interval_ms":1000,"flush_batch_threshold":10000,"max_queued_changes":500000}
+                                                                                       get_group_config                                                                                       
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ {"duckdb_buffer_memory_mb":64,"duckdb_flush_memory_mb":512,"duckdb_threads":4,"flush_interval_ms":1000,"flush_batch_threshold":10000,"max_concurrent_flushes":4,"max_queued_changes":500000}
 (1 row)
 
 -- 12. Per-group: nonexistent group errors
@@ -112,7 +113,7 @@ SELECT duckpipe.get_group_config('nonexistent');
 ERROR:  sync group 'nonexistent' does not exist
 -- 13. Per-group: invalid key errors
 SELECT duckpipe.set_group_config('default', 'bad_key', '123');
-ERROR:  unknown config key: 'bad_key'. Valid keys: duckdb_buffer_memory_mb, duckdb_flush_memory_mb, duckdb_threads, flush_interval_ms, flush_batch_threshold, max_queued_changes
+ERROR:  unknown config key: 'bad_key'. Valid keys: duckdb_buffer_memory_mb, duckdb_flush_memory_mb, duckdb_threads, flush_interval_ms, flush_batch_threshold, max_concurrent_flushes, max_queued_changes
 -- 14. Verify sync_groups.config column has the override
 SELECT config FROM duckpipe.sync_groups WHERE name = 'default';
              config              
