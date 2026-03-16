@@ -23,8 +23,8 @@ pub(crate) fn default_true() -> bool {
 pub struct MetricsCache {
     /// Per-table: (mapping_id, queued_changes, memory_bytes, flush_count, flush_duration_ms)
     pub tables: Vec<(i32, i64, i64, i64, i64)>,
-    /// Group: (total_queued_changes, is_backpressured)
-    pub group: (i64, bool),
+    /// Group: (total_queued_changes, is_backpressured, active_flushes)
+    pub group: (i64, bool, usize),
 }
 
 /// Shared state for the HTTP API server.

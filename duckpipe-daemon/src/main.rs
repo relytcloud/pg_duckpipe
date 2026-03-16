@@ -300,7 +300,7 @@ async fn run_sync_loop(
                             {
                                 let mut cache = state.metrics_cache.lock().await;
                                 cache.tables = coordinator.table_combined_metrics();
-                                cache.group = (coordinator.total_queued(), coordinator.is_backpressured());
+                                cache.group = (coordinator.total_queued(), coordinator.is_backpressured(), coordinator.active_flush_count());
                             }
 
                             if !any_work {

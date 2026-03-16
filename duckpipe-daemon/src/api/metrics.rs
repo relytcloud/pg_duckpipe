@@ -18,7 +18,7 @@ use super::{pg_connect, AppState};
 ///                 "queued_changes", "duckdb_memory_bytes", "flush_count",
 ///                 "flush_duration_ms", "consecutive_failures",
 ///                 "snapshot_duration_ms", "snapshot_rows", "applied_lsn" }],
-///   "groups": [{ "name", "total_queued_changes", "is_backpressured" }]
+///   "groups": [{ "name", "total_queued_changes", "is_backpressured", "active_flushes" }]
 /// }
 /// ```
 pub async fn get_metrics(
@@ -80,6 +80,7 @@ pub async fn get_metrics(
         "name": group_name,
         "total_queued_changes": cache.group.0,
         "is_backpressured": cache.group.1,
+        "active_flushes": cache.group.2,
     })];
 
     Ok(Json(json!({

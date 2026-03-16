@@ -1565,7 +1565,8 @@ fn status() -> TableIterator<
 CREATE FUNCTION duckpipe.worker_status() RETURNS TABLE(
     sync_group TEXT,
     total_queued_changes BIGINT,
-    is_backpressured BOOLEAN
+    is_backpressured BOOLEAN,
+    active_flushes INT
 )
 AS 'MODULE_PATHNAME', '@FUNCTION_NAME@'
 LANGUAGE C STRICT;
@@ -1576,6 +1577,7 @@ fn worker_status() -> TableIterator<
         name!(sync_group, String),
         name!(total_queued_changes, i64),
         name!(is_backpressured, bool),
+        name!(active_flushes, i32),
     ),
 > {
     // Read group metrics from SHM keyed by group_id
@@ -1595,10 +1597,15 @@ fn worker_status() -> TableIterator<
                 let group_id: i32 = row.get::<i32>(1).unwrap().unwrap_or(0);
                 let sync_group: String = row.get::<String>(2).unwrap().unwrap_or_default();
 
-                let (total_queued_changes, is_backpressured) =
-                    shm_map.get(&group_id).copied().unwrap_or((0, false));
+                let (total_queued_changes, is_backpressured, active_flushes) =
+                    shm_map.get(&group_id).copied().unwrap_or((0, false, 0));
 
-                rows.push((sync_group, total_queued_changes, is_backpressured));
+                rows.push((
+                    sync_group,
+                    total_queued_changes,
+                    is_backpressured,
+                    active_flushes,
+                ));
             }
         }
     });
@@ -1682,14 +1689,17 @@ fn metrics() -> String {
                 let group_id: i32 = row.get::<i32>(1).unwrap().unwrap_or(0);
                 let name: String = row.get::<String>(2).unwrap().unwrap_or_default();
 
-                let (total_queued_changes, is_backpressured) =
-                    shm_group_map.get(&group_id).copied().unwrap_or((0, false));
+                let (total_queued_changes, is_backpressured, active_flushes) = shm_group_map
+                    .get(&group_id)
+                    .copied()
+                    .unwrap_or((0, false, 0));
 
                 group_entries.push(format!(
-                    "{{\"name\":{},\"total_queued_changes\":{},\"is_backpressured\":{}}}",
+                    "{{\"name\":{},\"total_queued_changes\":{},\"is_backpressured\":{},\"active_flushes\":{}}}",
                     json_str(&name),
                     total_queued_changes,
                     is_backpressured,
+                    active_flushes,
                 ));
             }
         }

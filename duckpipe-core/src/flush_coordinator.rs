@@ -90,14 +90,23 @@ pub enum FlushThreadResult {
 /// causing peak memory spikes (each gets `flush_memory_mb`) and DuckLake commit lock
 /// contention. FlushGate ensures only N threads flush at once while the rest continue
 /// buffering in low-memory mode.
-pub struct FlushGate {
+struct FlushGate {
     inner: Mutex<FlushGateInner>,
+    /// Notified when a flush slot is released, waking threads in `acquire_blocking`.
+    slot_available: Condvar,
 }
 
 struct FlushGateInner {
     active: usize,
     max_concurrent: usize,
 }
+
+/// After this many consecutive non-blocking denials, the flush thread switches to
+/// a blocking acquire. This prevents unbounded buffering when a thread is consistently
+/// outcompeted for slots. With exponential retry speedup (interval halved each denial),
+/// 4 retries cover flush_interval * (1 + 1/2 + 1/4 + 1/8) ≈ 1.9x flush_interval
+/// before blocking.
+const MAX_GATE_RETRIES: u32 = 4;
 
 impl FlushGate {
     fn new(max_concurrent: usize) -> Self {
@@ -106,6 +115,7 @@ impl FlushGate {
                 active: 0,
                 max_concurrent,
             }),
+            slot_available: Condvar::new(),
         }
     }
 
@@ -121,10 +131,39 @@ impl FlushGate {
         }
     }
 
-    /// Release a flush slot after flush completes.
-    fn release(&self) {
+    /// Blocking acquire with timeout. Waits on the condvar until a slot opens
+    /// or the timeout expires. Returns true if a slot was acquired.
+    fn acquire_blocking(&self, timeout: Duration) -> bool {
         let mut inner = self.inner.lock().unwrap();
-        inner.active = inner.active.saturating_sub(1);
+        let deadline = Instant::now() + timeout;
+        loop {
+            if inner.active < inner.max_concurrent {
+                inner.active += 1;
+                return true;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            let (guard, wait_result) = self.slot_available.wait_timeout(inner, remaining).unwrap();
+            inner = guard;
+            if wait_result.timed_out() && inner.active >= inner.max_concurrent {
+                return false;
+            }
+        }
+    }
+
+    /// Release a flush slot after flush completes. Notifies one waiting thread.
+    fn release(&self) {
+        {
+            let mut inner = self.inner.lock().unwrap();
+            debug_assert!(
+                inner.active > 0,
+                "FlushGate::release without matching acquire"
+            );
+            inner.active -= 1;
+        }
+        self.slot_available.notify_one();
     }
 
     /// Dynamically update the max concurrent flushes (for runtime GUC changes).
@@ -790,18 +829,22 @@ fn flush_thread_main(
     let mut next_seq: i32 = 0; // monotonic counter for _seq across appends
     let mut last_flush = Instant::now();
     let flush_interval = Duration::from_millis(flush_interval_ms);
+    let mut gate_denials: u32 = 0; // consecutive gate denials — drives retry speedup
 
     loop {
-        // Calculate remaining time until next time-based flush
+        // Calculate remaining time until next time-based flush.
+        // When gate_denials > 0, halve the effective interval each denial so the
+        // thread retries the gate more aggressively (exponential speedup).
+        let effective_interval = flush_interval / (1u32 << gate_denials.min(MAX_GATE_RETRIES));
         let elapsed = last_flush.elapsed();
         let wait_timeout = if buffered_count == 0 {
             // No buffered changes — wait for full interval
             flush_interval
-        } else if elapsed >= flush_interval {
+        } else if elapsed >= effective_interval {
             // Already past interval — don't wait
             Duration::ZERO
         } else {
-            flush_interval - elapsed
+            effective_interval - elapsed
         };
 
         // Lock shared queue, drain new changes and check signals
@@ -971,32 +1014,53 @@ fn flush_thread_main(
             // Batch threshold reached
             true
         } else {
-            // Time threshold reached
-            last_flush.elapsed() >= flush_interval
+            // Time threshold reached (uses effective_interval when gate_denials > 0)
+            last_flush.elapsed() >= effective_interval
         };
 
         if should_flush && buffered_count > 0 {
-            // Gate: drain requests bypass the gate (TRUNCATE must flush immediately),
-            // normal flushes must acquire a slot. If the gate is full, skip flushing
-            // and continue buffering — the thread will retry next iteration.
+            // Gate logic with escalating urgency:
+            //   - drain_requested: bypass gate entirely (TRUNCATE must flush now)
+            //   - gate_denials < MAX_GATE_RETRIES: non-blocking try_acquire, halved
+            //     retry interval on each denial (exponential speedup)
+            //   - gate_denials >= MAX_GATE_RETRIES: blocking acquire with timeout
+            //     to guarantee progress and prevent unbounded buffering
             let gate_acquired = if drain_requested {
                 false // drain bypasses gate; don't acquire a slot
+            } else if gate_denials >= MAX_GATE_RETRIES {
+                // Too many denials — block until a slot opens to prevent starvation.
+                tracing::debug!(
+                    "pg_duckpipe: flush gate: blocking acquire for {} (after {} denials)",
+                    buffered_meta
+                        .as_ref()
+                        .map_or("?", |m| m.target_key.as_str()),
+                    gate_denials,
+                );
+                if flush_gate.acquire_blocking(flush_interval) {
+                    true
+                } else {
+                    // Timed out even on blocking acquire — all slots stuck.
+                    // Reset denials and retry from scratch next iteration.
+                    gate_denials = 0;
+                    continue;
+                }
             } else if flush_gate.try_acquire() {
                 true
             } else {
+                gate_denials += 1;
                 tracing::debug!(
-                    "pg_duckpipe: flush gate full, deferring flush for {}",
+                    "pg_duckpipe: flush gate full, deferring flush for {} (denial {}/{})",
                     buffered_meta
                         .as_ref()
-                        .map_or("?", |m| m.target_key.as_str())
+                        .map_or("?", |m| m.target_key.as_str()),
+                    gate_denials,
+                    MAX_GATE_RETRIES,
                 );
-                // Signal drain_complete if a drain was requested (shouldn't happen
-                // in this branch, but defensive)
-                if drain_requested {
-                    signal_drain_complete(&drain_complete, &control);
-                }
                 continue;
             };
+
+            // Successfully acquired or drain-bypass — reset denial counter
+            gate_denials = 0;
 
             if let Some(meta) = buffered_meta.as_ref() {
                 do_flush_buffer(

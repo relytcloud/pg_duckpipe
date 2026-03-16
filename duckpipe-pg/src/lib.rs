@@ -35,6 +35,7 @@ pub struct GroupMetricsSlot {
     pub group_id: i32, // 0 = unused slot
     pub total_queued_changes: i64,
     pub is_backpressured: i32, // 0/1
+    pub active_flushes: i32,
 }
 
 #[derive(Copy, Clone)]
@@ -58,6 +59,7 @@ impl Default for SharedMetrics {
                 group_id: 0,
                 total_queued_changes: 0,
                 is_backpressured: 0,
+                active_flushes: 0,
             }; MAX_METRICS_GROUPS],
         }
     }
@@ -82,22 +84,23 @@ fn shmem_available() -> bool {
 
 /// Write all metrics to shared memory in a single lock acquisition.
 ///
-/// `group`: `(group_id, total_queued_changes, is_backpressured)`
+/// `group`: `(group_id, total_queued_changes, is_backpressured, active_flushes)`
 /// `tables`: `Vec<(mapping_id, queued_changes, duckdb_memory_bytes, flush_count, flush_duration_ms)>`
-pub fn write_shmem_metrics(group: (i32, i64, bool), tables: &[(i32, i64, i64, i64, i64)]) {
+pub fn write_shmem_metrics(group: (i32, i64, bool, i32), tables: &[(i32, i64, i64, i64, i64)]) {
     if !shmem_available() {
         return;
     }
     let mut shm = METRICS_SHM.exclusive();
 
     // Group metrics
-    let (group_id, total_queued, backpressured) = group;
+    let (group_id, total_queued, backpressured, active_flushes) = group;
     let bp = if backpressured { 1 } else { 0 };
     let mut found_group = false;
     for slot in shm.groups.iter_mut() {
         if slot.group_id == group_id {
             slot.total_queued_changes = total_queued;
             slot.is_backpressured = bp;
+            slot.active_flushes = active_flushes;
             found_group = true;
             break;
         }
@@ -106,6 +109,7 @@ pub fn write_shmem_metrics(group: (i32, i64, bool), tables: &[(i32, i64, i64, i6
                 group_id,
                 total_queued_changes: total_queued,
                 is_backpressured: bp,
+                active_flushes,
             };
             found_group = true;
             break;
@@ -181,6 +185,7 @@ pub fn clear_shmem_group_slot(group_id: i32) {
                 group_id: 0,
                 total_queued_changes: 0,
                 is_backpressured: 0,
+                active_flushes: 0,
             };
             return;
         }
@@ -217,7 +222,7 @@ pub fn read_shmem_table_metrics() -> std::collections::HashMap<i32, (i64, i64, i
 
 /// Read all active group metrics slots from shared memory as a HashMap.
 /// Returns an empty map when SHM is not available (extension not in shared_preload_libraries).
-pub fn read_shmem_group_metrics() -> std::collections::HashMap<i32, (i64, bool)> {
+pub fn read_shmem_group_metrics() -> std::collections::HashMap<i32, (i64, bool, i32)> {
     if !shmem_available() {
         pgrx::notice!(
             "pg_duckpipe: shared-memory metrics unavailable \
@@ -232,7 +237,11 @@ pub fn read_shmem_group_metrics() -> std::collections::HashMap<i32, (i64, bool)>
         .map(|s| {
             (
                 s.group_id,
-                (s.total_queued_changes, s.is_backpressured != 0),
+                (
+                    s.total_queued_changes,
+                    s.is_backpressured != 0,
+                    s.active_flushes,
+                ),
             )
         })
         .collect()
