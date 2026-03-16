@@ -212,6 +212,44 @@ The bench container outputs a live dashboard every 5 seconds:
 | `Queued` | Pending changes | Large buildup means flush is slower than ingest |
 | `Backpressure` | WAL consumer paused | If stuck on "Yes", flush threads are blocked |
 | `errs` | Per-table error count | Non-zero outside chaos events |
+| Container CPU % | Per-container CPU usage | Sustained 100%+ on single-core hosts |
+| Container RSS | Per-container memory | Daemon RSS exceeding `duckdb_flush_memory_mb` + overhead |
+| Host `available` memory | Free memory on host | Approaching zero means OOM risk |
+
+### Reporting to the user
+
+While the test is running, **collect and report an aggregated metrics table to the user every 5 minutes**. Use these commands to gather data:
+
+```bash
+# Pipeline metrics (from bench dashboard)
+docker compose -f <compose-file> logs --tail=30 bench
+
+# System resources (per-container CPU% and RSS)
+docker stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}"
+
+# Host memory
+free -h
+```
+
+Present a cumulative table like this each time:
+
+| Metric | 5 min | 10 min | 15 min | ... |
+|--------|-------|--------|--------|-----|
+| DuckDB memory | | | | |
+| Avg flush duration | | | | |
+| Flush rate (/s) | | | | |
+| WAL lag | | | | |
+| Peak lag | | | | |
+| Total rows synced | | | | |
+| Sysbench TPS | | | | |
+| Daemon CPU % | | | | |
+| Daemon RSS | | | | |
+| DB CPU % | | | | |
+| DB RSS | | | | |
+| Host available mem | | | | |
+| Errors | | | | |
+
+This lets the user spot trends (memory growth, flush degradation, CPU saturation) without waiting for the final report.
 
 ---
 
