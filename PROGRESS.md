@@ -58,6 +58,7 @@
 - [x] Snapshot detection delay up to `poll_interval` — LISTEN/NOTIFY wakeup: `add_table()`, `resync_table()`, `enable_group()` fire `NOTIFY duckpipe_wakeup_{group}`; bgworker LISTENs and wakes immediately
 - [ ] Snapshot producers block WAL consumer — snapshot CSV producers (`run_csv_producer`) do sync file I/O (`fs::File::write_all`) and byte-by-byte quote tracking on the single-threaded tokio runtime, blocking the WAL consumer and all other async tasks during those windows; move producers to `spawn_blocking` or a dedicated thread so snapshots never interfere with WAL streaming
 - [ ] Flush thread pool — 1 OS thread + 1 tokio runtime + 1 DuckDB connection per table; need fixed-size pool for 50+ tables
+- [ ] Byte-based flush threshold — replace row-count `flush_batch_threshold` with `flush_buffer_size_mb`; estimate change byte size during `append_to_buffer()` (sum of `Value` sizes), track cumulative bytes per table, trigger flush when `buffered_bytes >= threshold`; uses `avg_row_bytes` from metrics for capacity planning
 - [ ] Batch compaction tuning — reduce Parquet file proliferation under sustained small-batch writes
 - [ ] Inline data flush
 - [ ] Parquet-over-PG write throughput — ~10k rows/sec cap; bottleneck for large catch-up batches
@@ -70,7 +71,7 @@
 - [x] Daemon REST API — expose monitoring/control endpoints (status, health, metrics) from the standalone daemon binary so operators can integrate with orchestration and alerting without a PG connection
 - [x] Dedicated bgworker per group — one worker per sync group for full isolation (own FlushCoordinator, SnapshotManager, SlotState)
 - [x] Per-group NOTIFY channels (`duckpipe_wakeup_{group}`) — avoid thundering herd wakeups; per-group bgworker spawns its own LISTEN channel
-- [ ] Per-group config (`sync_groups.config JSONB`) — persistent per-group settings accessible from both bgworker and daemon modes; SQL API `set_group_config(group, key, value)` / `get_group_config(group)`; initial keys: `duckdb_memory_limit` (default '256MB'), `duckdb_threads` (default 1); future: migrate `flush_interval_ms`, `flush_batch_threshold`, `max_queued_changes` from GUCs; NULL/absent keys fall back to global defaults
+- [ ] Per-group config (`sync_groups.config JSONB`) — persistent per-group settings accessible from both bgworker and daemon modes; SQL API `set_group_config(group, key, value)` / `get_group_config(group)`; initial keys: `duckdb_buffer_memory_mb` (default 16), `duckdb_flush_memory_mb` (default 512), `duckdb_threads` (default 1); these are currently global GUCs pending migration; future: migrate `flush_interval_ms`, `flush_batch_threshold`, `max_queued_changes` from GUCs; NULL/absent keys fall back to global defaults
 - [ ] Staged storage between WAL and DuckLake — persist changes into a durable intermediate delta/staging layer, then merge/rewrite into DuckLake in larger maintenance-friendly jobs so CDC durability is decoupled from DuckLake file proliferation
 - [x] `conninfo` column in sync_groups for remote PG support — group-level conninfo routes WAL replication, snapshots, and catalog queries to a remote PG while metadata and DuckLake targets stay local. `create_group(conninfo=>...)` creates slot+publication on remote, `add_table()` introspects remote pg_catalog for explicit DDL, `remove_table()`/`drop_group()` clean up remote objects. Shared `connstr` module extracted to `duckpipe-core/src/connstr.rs`.
 - [ ] Schema DDL sync (ALTER TABLE ADD/DROP COLUMN propagation)
@@ -82,6 +83,7 @@
 - [x] Daemon HTTP `GET /metrics` endpoint — returns JSON merging FlushCoordinator in-memory metrics with PG persisted data; same shape as PG `duckpipe.metrics()` function
 - [ ] Replication lag in `status()` — compute `pg_current_wal_lsn() - applied_lsn` as `lag_bytes`; needs special handling for remote groups (lag is relative to remote WAL tip, not local)
 - [ ] Prometheus text rendering — expose metrics as Prometheus-compatible text format via external tools (postgres_exporter, JSON exporter) or native endpoint
+- [ ] Per-table `avg_row_bytes` metric — track cumulative bytes and row count during `append_to_buffer()`, expose `avg_row_bytes` in `status()` / `metrics()` for capacity planning and byte-based flush threshold
 - [ ] `applied_lsn` stays NULL during SNAPSHOT/CATCHUP — should be set to `snapshot_lsn` after snapshot completes
 - [x] `worker_state` not updated during snapshot processing — resolved: observability metrics moved to SHM, updated every cycle regardless of snapshot state
 - [x] Flush runtime stats for fixed-interval scraping — `flush_count` and `flush_duration_ms` now tracked in SHM and exposed via `status()` and `metrics()`
@@ -93,6 +95,6 @@
 - [x] Missing index on `table_mappings.group_id` — FK column has no index; nearly every hot-path query filters by `group_id` (state checks, flush lookups, retry scans); also slows FK constraint checks on `sync_groups` DELETE
 - [x] Snapshot failures have no retry backoff — risk of thrash on repeated failures; fixed via exponential backoff
 - [ ] Graceful handling of DuckLake schema drift (target table altered outside duckpipe)
-- [ ] Unbounded DuckDB memory — no `memory_limit` set per FlushWorker; N tables × default limit (~80% RAM each) is theoretically unbounded; depends on per-group config (`duckdb_memory_limit`)
+- [x] Unbounded DuckDB memory — two-phase memory limits via `duckdb_buffer_memory_mb` (default 16 MB, caps in-memory buffer per table) and `duckdb_flush_memory_mb` (default 512 MB, caps DuckDB instance during flush); currently global GUCs (PG) / CLI args (daemon); per-group config migration pending
 - [ ] Connection pooling for flush thread PG metadata updates
 - [ ] Regression tests for crash / error cases
