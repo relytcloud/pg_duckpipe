@@ -27,6 +27,7 @@ pg_duckpipe implements a **decoupled producer-consumer architecture**. A single 
 |----------|-----|
 | Non-blocking WAL consumption | Flush threads run independently; WAL consumer just pushes to queues |
 | Bounded memory | Backpressure pauses WAL consumer when queues exceed threshold |
+| Controlled flush parallelism | `FlushGate` limits concurrent flushes to `max_concurrent_flushes` (default 4); ticket-based FIFO ensures fairness |
 | Sub-second latency | Flush threads self-trigger on time (interval) or size (batch threshold) |
 | Crash safety | Slot never advances past durably flushed data (`confirmed_lsn = min(applied_lsn)`) |
 | Parallel snapshots | Multiple tables snapshot concurrently via `tokio::spawn`; DuckDB loads run on separate threads (see [known limitation](#32-parallel-snapshots)) |
@@ -107,6 +108,30 @@ A slow table doesn't block other flush threads directly — each drains its own 
 - **Batch threshold**: accumulated changes reach `flush_batch_threshold`
 - **Time interval**: `flush_interval_ms` has elapsed since last flush
 
+#### FlushGate: Controlling Concurrent Flushes
+
+While each table has its own flush thread, allowing all of them to `flush_buffer()` simultaneously would cause memory spikes (each gets `duckdb_flush_memory_mb` during flush) and DuckLake commit lock contention. The `FlushGate` is a **ticket-based FIFO semaphore** that limits concurrent flush operations to `max_concurrent_flushes` (default 4):
+
+```
+100 flush threads, max_concurrent_flushes = 4:
+
+  Thread A  ──[buffering]──▶ takes ticket #0 ──▶ [FLUSHING] ──▶ release ──▶ [buffering]──▶
+  Thread B  ──[buffering]──▶ takes ticket #1 ──▶ [FLUSHING] ──▶ release ──▶ [buffering]──▶
+  Thread C  ──[buffering]──▶ takes ticket #2 ──▶ [FLUSHING] ──▶ release ──▶
+  Thread D  ──[buffering]──▶ takes ticket #3 ──▶ [FLUSHING] ──▶
+  Thread E  ──[buffering]──▶ takes ticket #4 ──▶ [waiting...] ──▶ (served when A releases)
+  Thread F  ──[buffering]──▶ takes ticket #5 ──▶ [waiting...] ──▶ (served after E)
+  ...
+```
+
+Key properties:
+- **FIFO fairness**: threads acquire tickets in arrival order; `now_serving` counter ensures strict ordering — no starvation
+- **Adaptive timeout**: the gate timeout is the median of the last 64 flush durations (floor 1s); falls back to `flush_interval` until enough data is collected — threads wait proportionally to how long flushes actually take
+- **Timeout forfeit**: if a thread waits past the timeout for a slot, it forfeits its ticket (advances `now_serving`) so the queue doesn't block, and retries next iteration
+- **Drain bypass**: TRUNCATE and shutdown bypass the gate entirely — correctness takes priority
+- **Low-memory buffering**: threads waiting for a slot continue accumulating changes in their DuckDB buffer at `duckdb_buffer_memory_mb` (default 16 MB), which can spill to disk
+- **Runtime adjustable**: `duckpipe.max_concurrent_flushes` is a SIGHUP GUC; the worker calls `set_max_concurrent_flushes()` each cycle
+
 ### 3.2 Parallel Snapshots
 
 When multiple tables are added simultaneously, their initial snapshots (`COPY TO STDOUT` from PG → load into DuckDB) run as independent `tokio::spawn` tasks, executing concurrently:
@@ -139,7 +164,7 @@ During a snapshot, the table's flush thread is **paused** — it accumulates WAL
 
 ![Communication Map](img/2-communication.png)
 
-The WAL consumer pushes decoded changes into per-table queues (`Mutex<Vec<Change>>` + `Condvar`) with a brief lock; each flush thread blocks on its condvar until notified, then drains up to `batch_threshold` changes and releases the lock. Flush threads report results (applied LSN or error) back to the main loop via `std::sync::mpsc` channels polled with non-blocking `try_recv`. Snapshot completion follows the same mpsc pattern. A `tokio::sync::Notify` lets the LISTEN/NOTIFY task instantly wake the main loop when `add_table`, `resync`, or `enable` fires.
+The WAL consumer pushes decoded changes into per-table queues (`Mutex<Vec<Change>>` + `Condvar`) with a brief lock; each flush thread blocks on its condvar until notified, then drains up to `batch_threshold` changes and releases the lock. Before flushing, threads acquire a `FlushGate` slot (`Mutex` + `Condvar`, ticket-based FIFO) that limits concurrent flushes. Flush threads report results (applied LSN or error) back to the main loop via `std::sync::mpsc` channels polled with non-blocking `try_recv`. Snapshot completion follows the same mpsc pattern. A `tokio::sync::Notify` lets the LISTEN/NOTIFY task instantly wake the main loop when `add_table`, `resync`, or `enable` fires.
 
 ---
 
@@ -166,9 +191,10 @@ pub fn is_backpressured(&self) -> bool {
 
 ### 5.3 Impact on Parallelism
 
-- **When not backpressured**: WAL consumer runs at full speed, all flush threads process independently — maximum parallelism.
+- **When not backpressured**: WAL consumer runs at full speed, all flush threads process independently — maximum parallelism (up to `max_concurrent_flushes` concurrent flushes).
 - **When backpressured**: WAL consumer skips its polling round (all tables stall together), but flush threads continue draining their queues. Once enough changes are flushed, backpressure clears and WAL consumption resumes.
 - **Snapshot tables are immune**: their buffered changes don't count toward the backpressure threshold, so adding a new table via `add_table()` won't degrade throughput for existing tables.
+- **FlushGate complements backpressure**: backpressure limits the *producer* (WAL consumer) based on total queue depth; FlushGate limits the *consumers* (flush threads) based on concurrent flush operations. Together they bound both memory from queued changes and memory from active DuckDB flush sessions.
 
 ---
 

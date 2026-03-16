@@ -18,6 +18,27 @@ use std::time::{Duration, Instant};
 use crate::duckdb_flush::FlushWorker;
 use crate::flush_worker;
 use crate::metadata::ERRORED_THRESHOLD;
+
+/// In-memory group-level metrics from FlushCoordinator.
+#[derive(Clone, Copy, Default)]
+pub struct GroupMetrics {
+    pub group_id: i32,
+    pub total_queued_changes: i64,
+    pub is_backpressured: bool,
+    pub active_flushes: i32,
+    pub gate_wait_avg_ms: i64,
+    pub gate_timeouts: i64,
+}
+
+/// In-memory per-table metrics from FlushCoordinator.
+#[derive(Clone, Copy, Default)]
+pub struct TableMetrics {
+    pub mapping_id: i32,
+    pub queued_changes: i64,
+    pub duckdb_memory_bytes: i64,
+    pub flush_count: i64,
+    pub flush_duration_ms: i64,
+}
 use crate::types::Change;
 
 /// Cloneable table schema info used by the flush thread for DuckDB buffer operations.
@@ -84,6 +105,179 @@ pub enum FlushThreadResult {
     },
 }
 
+/// Ticket-based FIFO semaphore limiting concurrent flush operations.
+///
+/// With 100+ tables syncing, all flush threads can execute `flush_buffer()` concurrently,
+/// causing peak memory spikes (each gets `flush_memory_mb`) and DuckLake commit lock
+/// contention. FlushGate ensures only N threads flush at once while the rest continue
+/// buffering in low-memory mode.
+///
+/// Fairness: threads acquire tickets in arrival order. Only the thread whose ticket
+/// equals `now_serving` can acquire a slot — strict FIFO, no starvation possible.
+/// On timeout, the thread forfeits its ticket (advances `now_serving`) so the queue
+/// doesn't block.
+struct FlushGate {
+    inner: Mutex<FlushGateInner>,
+    turn: Condvar,
+    /// Fallback timeout used until enough flush durations are recorded.
+    default_timeout: Duration,
+}
+
+/// Number of recent flush durations to keep for median calculation.
+const FLUSH_DURATION_RING_SIZE: usize = 64;
+
+/// Minimum acquire timeout to avoid churn when flushes are very fast.
+const MIN_GATE_TIMEOUT: Duration = Duration::from_secs(1);
+
+struct FlushGateInner {
+    active: usize,
+    max_concurrent: usize,
+    next_ticket: u64,
+    now_serving: u64,
+    /// Ring buffer of recent flush durations (milliseconds) for adaptive timeout.
+    duration_ring: [u64; FLUSH_DURATION_RING_SIZE],
+    duration_count: usize, // total recorded (may exceed ring size)
+    duration_write: usize, // next write index (wraps around)
+    /// Cumulative wait time in milliseconds across all acquire() calls.
+    total_wait_ms: u64,
+    /// Number of successful acquire() calls.
+    acquire_count: u64,
+    /// Number of timed-out (failed) acquire() calls.
+    timeout_count: u64,
+}
+
+impl FlushGate {
+    fn new(max_concurrent: usize, default_timeout: Duration) -> Self {
+        FlushGate {
+            inner: Mutex::new(FlushGateInner {
+                active: 0,
+                max_concurrent,
+                next_ticket: 0,
+                now_serving: 0,
+                duration_ring: [0; FLUSH_DURATION_RING_SIZE],
+                duration_count: 0,
+                duration_write: 0,
+                total_wait_ms: 0,
+                acquire_count: 0,
+                timeout_count: 0,
+            }),
+            turn: Condvar::new(),
+            default_timeout,
+        }
+    }
+
+    /// Take a ticket and wait until it's our turn AND a slot is available.
+    /// Timeout is adaptive: median of recent flush durations, or the default
+    /// timeout until enough data is collected.
+    /// Returns true if a slot was acquired, false on timeout.
+    fn acquire(&self) -> bool {
+        let start = Instant::now();
+        let mut inner = self.inner.lock().unwrap();
+        let timeout = Self::median_duration(&inner).unwrap_or(self.default_timeout);
+        let my_ticket = inner.next_ticket;
+        inner.next_ticket += 1;
+
+        let deadline = start + timeout;
+        loop {
+            if my_ticket == inner.now_serving && inner.active < inner.max_concurrent {
+                inner.active += 1;
+                inner.now_serving += 1;
+                inner.total_wait_ms += start.elapsed().as_millis() as u64;
+                inner.acquire_count += 1;
+                return true;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                // Timed out: if it's our turn, skip our ticket so we don't
+                // block everyone behind us.
+                inner.total_wait_ms += start.elapsed().as_millis() as u64;
+                inner.timeout_count += 1;
+                if my_ticket == inner.now_serving {
+                    inner.now_serving += 1;
+                    drop(inner);
+                    self.turn.notify_all();
+                }
+                return false;
+            }
+            let (guard, _) = self.turn.wait_timeout(inner, remaining).unwrap();
+            inner = guard;
+        }
+    }
+
+    /// Release a flush slot and record the flush duration for adaptive timeout.
+    /// Wakes all waiters so the next-in-line thread can check its turn.
+    fn release(&self, flush_duration: Duration) {
+        {
+            let mut inner = self.inner.lock().unwrap();
+            debug_assert!(
+                inner.active > 0,
+                "FlushGate::release without matching acquire"
+            );
+            inner.active -= 1;
+
+            // Record flush duration into ring buffer
+            let idx = inner.duration_write;
+            inner.duration_ring[idx] = flush_duration.as_millis() as u64;
+            inner.duration_write = (idx + 1) % FLUSH_DURATION_RING_SIZE;
+            inner.duration_count += 1;
+        }
+        self.turn.notify_all();
+    }
+
+    /// Dynamically update the max concurrent flushes (for runtime GUC changes).
+    /// Wakes waiters in case more slots are now available.
+    fn set_max(&self, n: usize) {
+        {
+            let mut inner = self.inner.lock().unwrap();
+            inner.max_concurrent = n;
+        }
+        self.turn.notify_all();
+    }
+
+    /// Compute the median flush duration from the ring buffer (called with lock held).
+    fn median_duration(inner: &FlushGateInner) -> Option<Duration> {
+        let n = inner.duration_count.min(FLUSH_DURATION_RING_SIZE);
+        if n == 0 {
+            return None;
+        }
+        let mut sorted = [0u64; FLUSH_DURATION_RING_SIZE];
+        sorted[..n].copy_from_slice(&inner.duration_ring[..n]);
+        sorted[..n].sort_unstable();
+        let median_ms = sorted[n / 2];
+        Some(Duration::from_millis(median_ms).max(MIN_GATE_TIMEOUT))
+    }
+
+    /// Current number of active flushes.
+    fn active_count(&self) -> usize {
+        let inner = self.inner.lock().unwrap();
+        inner.active
+    }
+
+    /// Gate statistics for monitoring.
+    fn stats(&self) -> GateStats {
+        let inner = self.inner.lock().unwrap();
+        let total_calls = inner.acquire_count + inner.timeout_count;
+        let avg_wait_ms = if total_calls > 0 {
+            (inner.total_wait_ms / total_calls) as i64
+        } else {
+            0
+        };
+        GateStats {
+            avg_wait_ms,
+            timeout_count: inner.timeout_count as i64,
+        }
+    }
+}
+
+/// Gate-level metrics returned by [`FlushGate::stats`].
+#[derive(Clone, Copy, Default)]
+pub struct GateStats {
+    /// Mean wait time in ms across all acquire() calls (success + timeout).
+    pub avg_wait_ms: i64,
+    /// Number of timed-out acquire() calls.
+    pub timeout_count: i64,
+}
+
 /// Shared backpressure state between producer (WAL consumer) and flush threads.
 struct BackpressureState {
     /// Total number of in-flight changes (shared queues + local accumulators).
@@ -133,6 +327,8 @@ pub struct FlushCoordinator {
     buffer_memory_mb: i32,
     /// DuckDB memory limit in MB during flush/compaction.
     flush_memory_mb: i32,
+    /// Global-per-group semaphore limiting concurrent flush operations.
+    flush_gate: Arc<FlushGate>,
 }
 
 impl FlushCoordinator {
@@ -146,6 +342,7 @@ impl FlushCoordinator {
         max_queued_changes: i32,
         buffer_memory_mb: i32,
         flush_memory_mb: i32,
+        max_concurrent_flushes: i32,
     ) -> Self {
         let (tx, rx) = mpsc::channel();
         FlushCoordinator {
@@ -169,7 +366,26 @@ impl FlushCoordinator {
             target_to_mapping: HashMap::new(),
             buffer_memory_mb,
             flush_memory_mb,
+            flush_gate: Arc::new(FlushGate::new(
+                max_concurrent_flushes as usize,
+                Duration::from_millis(flush_interval_ms as u64),
+            )),
         }
+    }
+
+    /// Update the maximum concurrent flushes (for runtime GUC changes).
+    pub fn set_max_concurrent_flushes(&self, n: i32) {
+        self.flush_gate.set_max(n as usize);
+    }
+
+    /// Current number of active flush operations.
+    pub fn active_flush_count(&self) -> usize {
+        self.flush_gate.active_count()
+    }
+
+    /// Gate statistics for monitoring.
+    pub fn gate_stats(&self) -> GateStats {
+        self.flush_gate.stats()
     }
 
     /// Ensure a queue + flush thread exists for the given target table.
@@ -257,6 +473,7 @@ impl FlushCoordinator {
         let ducklake_schema = self.ducklake_schema.clone();
         let group_name = self.group_name.clone();
         let bp = Arc::clone(&self.backpressure);
+        let fg = Arc::clone(&self.flush_gate);
         let batch_threshold = self.flush_batch_threshold;
         let interval_ms = self.flush_interval_ms;
         let buffer_memory_mb = self.buffer_memory_mb;
@@ -275,6 +492,7 @@ impl FlushCoordinator {
                     &ducklake_schema,
                     &group_name,
                     bp,
+                    fg,
                     batch_threshold,
                     interval_ms,
                     buffer_memory_mb,
@@ -366,25 +584,24 @@ impl FlushCoordinator {
     }
 
     /// Return all per-table metrics combined in a single pass.
-    ///
-    /// Returns `(mapping_id, queued_changes, memory_bytes, flush_count, flush_duration_ms)`.
-    /// Eliminates the need for callers to call `table_pending_counts()`,
-    /// `table_memory_bytes()`, and `table_flush_metrics()` separately and join by mapping_id.
-    pub fn table_combined_metrics(&self) -> Vec<(i32, i64, i64, i64, i64)> {
+    pub fn table_combined_metrics(&self) -> Vec<TableMetrics> {
         self.threads
             .values()
             .map(|entry| {
                 let shared = entry.queue_handle.inner.lock().unwrap().changes.len() as i64;
                 let local = entry.pending_local.load(Ordering::Relaxed);
                 let mid = entry.mapping_id;
-                let mem = self.per_table_memory.get(&mid).copied().unwrap_or(0);
-                let fc = self.per_table_flush_count.get(&mid).copied().unwrap_or(0);
-                let fd = self
-                    .per_table_flush_duration
-                    .get(&mid)
-                    .copied()
-                    .unwrap_or(0);
-                (mid, shared + local, mem, fc, fd)
+                TableMetrics {
+                    mapping_id: mid,
+                    queued_changes: shared + local,
+                    duckdb_memory_bytes: self.per_table_memory.get(&mid).copied().unwrap_or(0),
+                    flush_count: self.per_table_flush_count.get(&mid).copied().unwrap_or(0),
+                    flush_duration_ms: self
+                        .per_table_flush_duration
+                        .get(&mid)
+                        .copied()
+                        .unwrap_or(0),
+                }
             })
             .collect()
     }
@@ -697,6 +914,7 @@ fn flush_thread_main(
     ducklake_schema: &str,
     group_name: &str,
     backpressure: Arc<BackpressureState>,
+    flush_gate: Arc<FlushGate>,
     batch_threshold: usize,
     flush_interval_ms: u64,
     buffer_memory_mb: i32,
@@ -903,6 +1121,20 @@ fn flush_thread_main(
         };
 
         if should_flush && buffered_count > 0 {
+            // Gate: ticket-based FIFO to guarantee fairness.
+            //   - drain_requested: bypass gate entirely (TRUNCATE must flush now)
+            //   - otherwise: acquire() blocks until our ticket is served or timeout
+            let gate_acquired = if drain_requested {
+                false // drain bypasses gate; don't acquire a slot
+            } else if flush_gate.acquire() {
+                true
+            } else {
+                // Timed out — continue to next iteration (will re-check queue & retry).
+                continue;
+            };
+
+            let flush_start = Instant::now();
+
             if let Some(meta) = buffered_meta.as_ref() {
                 do_flush_buffer(
                     &mut worker,
@@ -915,6 +1147,11 @@ fn flush_thread_main(
                     &rt,
                 );
             }
+
+            if gate_acquired {
+                flush_gate.release(flush_start.elapsed());
+            }
+
             backpressure
                 .total_queued
                 .fetch_sub(buffered_count, Ordering::Relaxed);

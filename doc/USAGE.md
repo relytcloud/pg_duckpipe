@@ -189,6 +189,7 @@ All parameters require `ALTER SYSTEM SET` + `SELECT pg_reload_conf()` (SIGHUP-le
 | `duckpipe.flush_interval` | `1000` | 100–60000 ms | Time-based flush trigger interval |
 | `duckpipe.flush_batch_threshold` | `10000` | 100–1000000 | Queue size that triggers immediate flush |
 | `duckpipe.max_queued_changes` | `500000` | 1000–10000000 | Backpressure threshold (pauses WAL consumer) |
+| `duckpipe.max_concurrent_flushes` | `4` | 1–1000 | Max concurrent flush operations per group |
 | `duckpipe.debug_log` | `off` | — | Emit critical-path timing logs |
 | `duckpipe.data_inlining_row_limit` | `0` | 0–1000000 | DuckLake data inlining row limit |
 
@@ -203,6 +204,10 @@ SELECT pg_reload_conf();
 -- Higher throughput: batch more before flushing
 ALTER SYSTEM SET duckpipe.flush_interval = 5000;
 ALTER SYSTEM SET duckpipe.flush_batch_threshold = 100000;
+SELECT pg_reload_conf();
+
+-- Limit flush parallelism (reduces peak memory with many tables)
+ALTER SYSTEM SET duckpipe.max_concurrent_flushes = 2;
 SELECT pg_reload_conf();
 
 -- Pause sync without stopping the worker

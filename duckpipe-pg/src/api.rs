@@ -1535,8 +1535,10 @@ fn status() -> TableIterator<
                 let mapping_id: i32 = row.get::<i32>(14).unwrap().unwrap_or(0);
 
                 // Read queued_changes from SHM
-                let (queued_changes, _, _, _) =
-                    shm_map.get(&mapping_id).copied().unwrap_or((0, 0, 0, 0));
+                let queued_changes = shm_map
+                    .get(&mapping_id)
+                    .map(|m| m.queued_changes)
+                    .unwrap_or(0);
 
                 rows.push((
                     sync_group,
@@ -1565,7 +1567,10 @@ fn status() -> TableIterator<
 CREATE FUNCTION duckpipe.worker_status() RETURNS TABLE(
     sync_group TEXT,
     total_queued_changes BIGINT,
-    is_backpressured BOOLEAN
+    is_backpressured BOOLEAN,
+    active_flushes INT,
+    gate_wait_avg_ms BIGINT,
+    gate_timeouts BIGINT
 )
 AS 'MODULE_PATHNAME', '@FUNCTION_NAME@'
 LANGUAGE C STRICT;
@@ -1576,6 +1581,9 @@ fn worker_status() -> TableIterator<
         name!(sync_group, String),
         name!(total_queued_changes, i64),
         name!(is_backpressured, bool),
+        name!(active_flushes, i32),
+        name!(gate_wait_avg_ms, i64),
+        name!(gate_timeouts, i64),
     ),
 > {
     // Read group metrics from SHM keyed by group_id
@@ -1595,10 +1603,16 @@ fn worker_status() -> TableIterator<
                 let group_id: i32 = row.get::<i32>(1).unwrap().unwrap_or(0);
                 let sync_group: String = row.get::<String>(2).unwrap().unwrap_or_default();
 
-                let (total_queued_changes, is_backpressured) =
-                    shm_map.get(&group_id).copied().unwrap_or((0, false));
+                let gm = shm_map.get(&group_id).copied().unwrap_or_default();
 
-                rows.push((sync_group, total_queued_changes, is_backpressured));
+                rows.push((
+                    sync_group,
+                    gm.total_queued_changes,
+                    gm.is_backpressured,
+                    gm.active_flushes,
+                    gm.gate_wait_avg_ms,
+                    gm.gate_timeouts,
+                ));
             }
         }
     });
@@ -1644,11 +1658,7 @@ fn metrics() -> String {
                 let applied_lsn: Option<String> = row.get(8).unwrap();
                 let mapping_id: i32 = row.get::<i32>(9).unwrap().unwrap_or(0);
 
-                let (queued_changes, duckdb_memory_bytes, flush_count, flush_duration_ms) =
-                    shm_table_map
-                        .get(&mapping_id)
-                        .copied()
-                        .unwrap_or((0, 0, 0, 0));
+                let tm = shm_table_map.get(&mapping_id).copied().unwrap_or_default();
 
                 table_entries.push(format!(
                     "{{\"group\":{},\"source_table\":{},\"state\":{},\"rows_synced\":{},\
@@ -1659,11 +1669,11 @@ fn metrics() -> String {
                     json_str(&source_table),
                     json_str(&state),
                     rows_synced,
-                    queued_changes,
-                    duckdb_memory_bytes,
+                    tm.queued_changes,
+                    tm.duckdb_memory_bytes,
                     consecutive_failures,
-                    flush_count,
-                    flush_duration_ms,
+                    tm.flush_count,
+                    tm.flush_duration_ms,
                     json_opt_i64(snapshot_duration_ms),
                     json_opt_i64(snapshot_rows),
                     json_opt_str(applied_lsn.as_deref()),
@@ -1682,14 +1692,17 @@ fn metrics() -> String {
                 let group_id: i32 = row.get::<i32>(1).unwrap().unwrap_or(0);
                 let name: String = row.get::<String>(2).unwrap().unwrap_or_default();
 
-                let (total_queued_changes, is_backpressured) =
-                    shm_group_map.get(&group_id).copied().unwrap_or((0, false));
+                let gm = shm_group_map.get(&group_id).copied().unwrap_or_default();
 
                 group_entries.push(format!(
-                    "{{\"name\":{},\"total_queued_changes\":{},\"is_backpressured\":{}}}",
+                    "{{\"name\":{},\"total_queued_changes\":{},\"is_backpressured\":{},\"active_flushes\":{},\
+                     \"gate_wait_avg_ms\":{},\"gate_timeouts\":{}}}",
                     json_str(&name),
-                    total_queued_changes,
-                    is_backpressured,
+                    gm.total_queued_changes,
+                    gm.is_backpressured,
+                    gm.active_flushes,
+                    gm.gate_wait_avg_ms,
+                    gm.gate_timeouts,
                 ));
             }
         }

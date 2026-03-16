@@ -4,6 +4,7 @@ use std::sync::Arc;
 use axum::extract::State;
 use axum::response::IntoResponse;
 use axum::Json;
+use duckpipe_core::flush_coordinator::TableMetrics;
 use serde_json::{json, Value};
 
 use super::error::ApiError;
@@ -18,7 +19,7 @@ use super::{pg_connect, AppState};
 ///                 "queued_changes", "duckdb_memory_bytes", "flush_count",
 ///                 "flush_duration_ms", "consecutive_failures",
 ///                 "snapshot_duration_ms", "snapshot_rows", "applied_lsn" }],
-///   "groups": [{ "name", "total_queued_changes", "is_backpressured" }]
+///   "groups": [{ "name", "total_queued_changes", "is_backpressured", "active_flushes" }]
 /// }
 /// ```
 pub async fn get_metrics(
@@ -28,10 +29,10 @@ pub async fn get_metrics(
 
     // Read cached in-memory metrics from the sync loop
     let cache = state.metrics_cache.lock().await.clone();
-    let shm_table_map: HashMap<i32, (i64, i64, i64, i64)> = cache
+    let table_map: HashMap<i32, TableMetrics> = cache
         .tables
         .into_iter()
-        .map(|(id, q, m, fc, fd)| (id, (q, m, fc, fd)))
+        .map(|t| (t.mapping_id, t))
         .collect();
 
     // Query PG for persisted metrics
@@ -54,21 +55,18 @@ pub async fn get_metrics(
         .iter()
         .map(|r| {
             let mapping_id: i32 = r.get("id");
-            let (queued, mem, fc, fd) = shm_table_map
-                .get(&mapping_id)
-                .copied()
-                .unwrap_or((0, 0, 0, 0));
+            let tm = table_map.get(&mapping_id).copied().unwrap_or_default();
 
             json!({
                 "group": r.get::<_, String>("name"),
                 "source_table": r.get::<_, String>("source_table"),
                 "state": r.get::<_, String>("state"),
                 "rows_synced": r.get::<_, i64>("rows_synced"),
-                "queued_changes": queued,
-                "duckdb_memory_bytes": mem,
+                "queued_changes": tm.queued_changes,
+                "duckdb_memory_bytes": tm.duckdb_memory_bytes,
                 "consecutive_failures": r.get::<_, i32>("consecutive_failures"),
-                "flush_count": fc,
-                "flush_duration_ms": fd,
+                "flush_count": tm.flush_count,
+                "flush_duration_ms": tm.flush_duration_ms,
                 "snapshot_duration_ms": r.get::<_, Option<i64>>("snapshot_duration_ms"),
                 "snapshot_rows": r.get::<_, Option<i64>>("snapshot_rows"),
                 "applied_lsn": r.get::<_, Option<String>>("applied_lsn"),
@@ -76,10 +74,14 @@ pub async fn get_metrics(
         })
         .collect();
 
+    let gm = &cache.group;
     let groups: Vec<Value> = vec![json!({
         "name": group_name,
-        "total_queued_changes": cache.group.0,
-        "is_backpressured": cache.group.1,
+        "total_queued_changes": gm.total_queued_changes,
+        "is_backpressured": gm.is_backpressured,
+        "active_flushes": gm.active_flushes,
+        "gate_wait_avg_ms": gm.gate_wait_avg_ms,
+        "gate_timeouts": gm.gate_timeouts,
     })];
 
     Ok(Json(json!({

@@ -13,7 +13,8 @@ use duckpipe_core::snapshot_manager::SnapshotManager;
 
 use crate::{
     BATCH_SIZE_PER_GROUP, DEBUG_LOG, DUCKDB_BUFFER_MEMORY_MB, DUCKDB_FLUSH_MEMORY_MB, ENABLED,
-    FLUSH_BATCH_THRESHOLD, FLUSH_INTERVAL, MAX_QUEUED_CHANGES, POLL_INTERVAL,
+    FLUSH_BATCH_THRESHOLD, FLUSH_INTERVAL, MAX_CONCURRENT_FLUSHES, MAX_QUEUED_CHANGES,
+    POLL_INTERVAL,
 };
 
 /// Check if shutdown has been requested.
@@ -35,6 +36,7 @@ fn read_config(connstr: &str, duckdb_pg_connstr: &str) -> ServiceConfig {
         duckdb_buffer_memory_mb: DUCKDB_BUFFER_MEMORY_MB.get(),
         duckdb_flush_memory_mb: DUCKDB_FLUSH_MEMORY_MB.get(),
         max_queued_changes: MAX_QUEUED_CHANGES.get(),
+        max_concurrent_flushes: MAX_CONCURRENT_FLUSHES.get(),
     }
 }
 
@@ -196,6 +198,7 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
         config.max_queued_changes,
         config.duckdb_buffer_memory_mb,
         config.duckdb_flush_memory_mb,
+        config.max_concurrent_flushes,
     );
     let mut snapshot_manager = SnapshotManager::new();
 
@@ -280,6 +283,7 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
                     }
 
                     let config = read_config(&connstr, &duckdb_pg_connstr);
+                    coord.set_max_concurrent_flushes(config.max_concurrent_flushes);
 
                     match service::run_group_sync_cycle(
                         &config,
@@ -293,8 +297,16 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
                     {
                         Ok(any_work) => {
                             // Write all metrics to SHM in a single lock acquisition
+                            let gs = coord.gate_stats();
                             crate::write_shmem_metrics(
-                                (group_id, coord.total_queued(), coord.is_backpressured()),
+                                &crate::GroupMetrics {
+                                    group_id,
+                                    total_queued_changes: coord.total_queued(),
+                                    is_backpressured: coord.is_backpressured(),
+                                    active_flushes: coord.active_flush_count() as i32,
+                                    gate_wait_avg_ms: gs.avg_wait_ms,
+                                    gate_timeouts: gs.timeout_count,
+                                },
                                 &coord.table_combined_metrics(),
                             );
 

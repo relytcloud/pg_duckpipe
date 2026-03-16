@@ -35,6 +35,9 @@ pub struct GroupMetricsSlot {
     pub group_id: i32, // 0 = unused slot
     pub total_queued_changes: i64,
     pub is_backpressured: i32, // 0/1
+    pub active_flushes: i32,
+    pub gate_wait_avg_ms: i64,
+    pub gate_timeouts: i64,
 }
 
 #[derive(Copy, Clone)]
@@ -58,6 +61,9 @@ impl Default for SharedMetrics {
                 group_id: 0,
                 total_queued_changes: 0,
                 is_backpressured: 0,
+                active_flushes: 0,
+                gate_wait_avg_ms: 0,
+                gate_timeouts: 0,
             }; MAX_METRICS_GROUPS],
         }
     }
@@ -80,52 +86,55 @@ fn shmem_available() -> bool {
     SHM_AVAILABLE.load(Ordering::Relaxed)
 }
 
+pub use duckpipe_core::flush_coordinator::{GroupMetrics, TableMetrics};
+
 /// Write all metrics to shared memory in a single lock acquisition.
-///
-/// `group`: `(group_id, total_queued_changes, is_backpressured)`
-/// `tables`: `Vec<(mapping_id, queued_changes, duckdb_memory_bytes, flush_count, flush_duration_ms)>`
-pub fn write_shmem_metrics(group: (i32, i64, bool), tables: &[(i32, i64, i64, i64, i64)]) {
+pub fn write_shmem_metrics(group: &GroupMetrics, tables: &[TableMetrics]) {
     if !shmem_available() {
         return;
     }
     let mut shm = METRICS_SHM.exclusive();
 
     // Group metrics
-    let (group_id, total_queued, backpressured) = group;
-    let bp = if backpressured { 1 } else { 0 };
+    let bp = if group.is_backpressured { 1 } else { 0 };
     let mut found_group = false;
     for slot in shm.groups.iter_mut() {
-        if slot.group_id == group_id {
-            slot.total_queued_changes = total_queued;
+        if slot.group_id == group.group_id {
+            slot.total_queued_changes = group.total_queued_changes;
             slot.is_backpressured = bp;
+            slot.active_flushes = group.active_flushes;
+            slot.gate_wait_avg_ms = group.gate_wait_avg_ms;
+            slot.gate_timeouts = group.gate_timeouts;
             found_group = true;
             break;
         }
         if slot.group_id == 0 {
             *slot = GroupMetricsSlot {
-                group_id,
-                total_queued_changes: total_queued,
+                group_id: group.group_id,
+                total_queued_changes: group.total_queued_changes,
                 is_backpressured: bp,
+                active_flushes: group.active_flushes,
+                gate_wait_avg_ms: group.gate_wait_avg_ms,
+                gate_timeouts: group.gate_timeouts,
             };
             found_group = true;
             break;
         }
     }
     if !found_group {
-        tracing::warn!("duckpipe: SHM group slots full ({MAX_METRICS_GROUPS}), metrics for group_id={group_id} dropped");
+        tracing::warn!("duckpipe: SHM group slots full ({MAX_METRICS_GROUPS}), metrics for group_id={} dropped", group.group_id);
     }
 
     // Per-table metrics
-    for &(mapping_id, queued_changes, duckdb_memory_bytes, flush_count, flush_duration_ms) in tables
-    {
+    for t in tables {
         let mut free_idx: Option<usize> = None;
         let mut found = false;
         for (i, slot) in shm.tables.iter_mut().enumerate() {
-            if slot.mapping_id == mapping_id {
-                slot.queued_changes = queued_changes;
-                slot.duckdb_memory_bytes = duckdb_memory_bytes;
-                slot.flush_count = flush_count;
-                slot.flush_duration_ms = flush_duration_ms;
+            if slot.mapping_id == t.mapping_id {
+                slot.queued_changes = t.queued_changes;
+                slot.duckdb_memory_bytes = t.duckdb_memory_bytes;
+                slot.flush_count = t.flush_count;
+                slot.flush_duration_ms = t.flush_duration_ms;
                 found = true;
                 break;
             }
@@ -136,14 +145,14 @@ pub fn write_shmem_metrics(group: (i32, i64, bool), tables: &[(i32, i64, i64, i6
         if !found {
             if let Some(idx) = free_idx {
                 shm.tables[idx] = TableMetricsSlot {
-                    mapping_id,
-                    queued_changes,
-                    duckdb_memory_bytes,
-                    flush_count,
-                    flush_duration_ms,
+                    mapping_id: t.mapping_id,
+                    queued_changes: t.queued_changes,
+                    duckdb_memory_bytes: t.duckdb_memory_bytes,
+                    flush_count: t.flush_count,
+                    flush_duration_ms: t.flush_duration_ms,
                 };
             } else {
-                tracing::warn!("duckpipe: SHM table slots full ({MAX_METRICS_TABLES}), metrics for mapping_id={mapping_id} dropped");
+                tracing::warn!("duckpipe: SHM table slots full ({MAX_METRICS_TABLES}), metrics for mapping_id={} dropped", t.mapping_id);
             }
         }
     }
@@ -181,6 +190,9 @@ pub fn clear_shmem_group_slot(group_id: i32) {
                 group_id: 0,
                 total_queued_changes: 0,
                 is_backpressured: 0,
+                active_flushes: 0,
+                gate_wait_avg_ms: 0,
+                gate_timeouts: 0,
             };
             return;
         }
@@ -189,7 +201,7 @@ pub fn clear_shmem_group_slot(group_id: i32) {
 
 /// Read all active table metrics slots from shared memory as a HashMap.
 /// Returns an empty map when SHM is not available (extension not in shared_preload_libraries).
-pub fn read_shmem_table_metrics() -> std::collections::HashMap<i32, (i64, i64, i64, i64)> {
+pub fn read_shmem_table_metrics() -> std::collections::HashMap<i32, TableMetrics> {
     if !shmem_available() {
         pgrx::notice!(
             "pg_duckpipe: shared-memory metrics unavailable \
@@ -204,20 +216,20 @@ pub fn read_shmem_table_metrics() -> std::collections::HashMap<i32, (i64, i64, i
         .map(|s| {
             (
                 s.mapping_id,
-                (
-                    s.queued_changes,
-                    s.duckdb_memory_bytes,
-                    s.flush_count,
-                    s.flush_duration_ms,
-                ),
+                TableMetrics {
+                    mapping_id: s.mapping_id,
+                    queued_changes: s.queued_changes,
+                    duckdb_memory_bytes: s.duckdb_memory_bytes,
+                    flush_count: s.flush_count,
+                    flush_duration_ms: s.flush_duration_ms,
+                },
             )
         })
         .collect()
 }
 
-/// Read all active group metrics slots from shared memory as a HashMap.
-/// Returns an empty map when SHM is not available (extension not in shared_preload_libraries).
-pub fn read_shmem_group_metrics() -> std::collections::HashMap<i32, (i64, bool)> {
+/// Read all active group metrics slots from shared memory as a HashMap keyed by group_id.
+pub fn read_shmem_group_metrics() -> std::collections::HashMap<i32, GroupMetrics> {
     if !shmem_available() {
         pgrx::notice!(
             "pg_duckpipe: shared-memory metrics unavailable \
@@ -232,7 +244,14 @@ pub fn read_shmem_group_metrics() -> std::collections::HashMap<i32, (i64, bool)>
         .map(|s| {
             (
                 s.group_id,
-                (s.total_queued_changes, s.is_backpressured != 0),
+                GroupMetrics {
+                    group_id: s.group_id,
+                    total_queued_changes: s.total_queued_changes,
+                    is_backpressured: s.is_backpressured != 0,
+                    active_flushes: s.active_flushes,
+                    gate_wait_avg_ms: s.gate_wait_avg_ms,
+                    gate_timeouts: s.gate_timeouts,
+                },
             )
         })
         .collect()
@@ -252,6 +271,7 @@ pub(crate) static FLUSH_BATCH_THRESHOLD: GucSetting<i32> = GucSetting::<i32>::ne
 pub(crate) static MAX_QUEUED_CHANGES: GucSetting<i32> = GucSetting::<i32>::new(500000);
 pub(crate) static DUCKDB_BUFFER_MEMORY_MB: GucSetting<i32> = GucSetting::<i32>::new(16);
 pub(crate) static DUCKDB_FLUSH_MEMORY_MB: GucSetting<i32> = GucSetting::<i32>::new(512);
+pub(crate) static MAX_CONCURRENT_FLUSHES: GucSetting<i32> = GucSetting::<i32>::new(4);
 
 #[pg_guard]
 extern "C-unwind" fn _PG_init() {
@@ -373,6 +393,17 @@ extern "C-unwind" fn _PG_init() {
         &DUCKDB_FLUSH_MEMORY_MB,
         16,
         65536,
+        GucContext::Sighup,
+        GucFlags::empty(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"duckpipe.max_concurrent_flushes",
+        c"Maximum concurrent flush operations per sync group",
+        c"Maximum concurrent flush operations per sync group",
+        &MAX_CONCURRENT_FLUSHES,
+        1,
+        1000,
         GucContext::Sighup,
         GucFlags::empty(),
     );
