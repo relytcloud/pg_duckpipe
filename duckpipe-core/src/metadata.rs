@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use tokio_postgres::Client;
 
-use crate::types::{format_lsn, parse_lsn, GroupMode, SyncGroup, TableMapping};
+use crate::types::{format_lsn, parse_lsn, GroupConfig, GroupMode, SyncGroup, TableMapping};
 
 /// Maximum consecutive failures before transitioning to ERRORED with backoff.
 pub const ERRORED_THRESHOLD: i32 = 3;
@@ -37,7 +37,7 @@ impl<'a> MetadataClient<'a> {
         let rows = self
             .client
             .query(
-                "SELECT id, name, publication, slot_name, confirmed_lsn::text, enabled, conninfo, mode \
+                "SELECT id, name, publication, slot_name, confirmed_lsn::text, enabled, conninfo, mode, config::text \
                  FROM duckpipe.sync_groups WHERE name = $1",
                 &[&name],
             )
@@ -58,6 +58,10 @@ impl<'a> MetadataClient<'a> {
         let conninfo: Option<String> = row.get(6);
         let mode_str: String = row.get(7);
         let mode: GroupMode = mode_str.parse().unwrap_or(GroupMode::BgWorker);
+        let config_str: Option<String> = row.get(8);
+        let config = config_str
+            .and_then(|s| GroupConfig::from_json_str(&s).ok())
+            .unwrap_or_default();
 
         if !enabled {
             return Ok(None);
@@ -72,6 +76,7 @@ impl<'a> MetadataClient<'a> {
             confirmed_lsn,
             conninfo,
             mode,
+            config,
         }))
     }
 
@@ -80,7 +85,7 @@ impl<'a> MetadataClient<'a> {
         let rows = self
             .client
             .query(
-                "SELECT id, name, publication, slot_name, confirmed_lsn::text, conninfo, mode \
+                "SELECT id, name, publication, slot_name, confirmed_lsn::text, conninfo, mode, config::text \
                  FROM duckpipe.sync_groups WHERE enabled = true",
                 &[],
             )
@@ -98,6 +103,10 @@ impl<'a> MetadataClient<'a> {
                 let conninfo: Option<String> = row.get(5);
                 let mode_str: String = row.get(6);
                 let mode: GroupMode = mode_str.parse().unwrap_or(GroupMode::BgWorker);
+                let config_str: Option<String> = row.get(7);
+                let config = config_str
+                    .and_then(|s| GroupConfig::from_json_str(&s).ok())
+                    .unwrap_or_default();
                 SyncGroup {
                     id,
                     name,
@@ -107,6 +116,7 @@ impl<'a> MetadataClient<'a> {
                     confirmed_lsn,
                     conninfo,
                     mode,
+                    config,
                 }
             })
             .collect())
@@ -679,6 +689,25 @@ impl<'a> MetadataClient<'a> {
                 (id, (enabled, state))
             })
             .collect())
+    }
+
+    /// Read all rows from duckpipe.global_config and return as GroupConfig.
+    pub async fn get_global_config(&self) -> Result<GroupConfig, tokio_postgres::Error> {
+        let rows = self
+            .client
+            .query("SELECT key, value FROM duckpipe.global_config", &[])
+            .await?;
+
+        let kv: Vec<(String, String)> = rows
+            .iter()
+            .map(|row| {
+                let key: String = row.get(0);
+                let value: String = row.get(1);
+                (key, value)
+            })
+            .collect();
+
+        Ok(GroupConfig::from_kv_rows(&kv))
     }
 
     /// Check if a replication slot exists.

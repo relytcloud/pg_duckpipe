@@ -829,6 +829,8 @@ dependencies = [
  "futures-util",
  "pgwire-replication",
  "rustls",
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tokio-postgres",

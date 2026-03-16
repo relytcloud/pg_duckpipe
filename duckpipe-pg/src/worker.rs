@@ -10,12 +10,9 @@ use duckpipe_core::flush_coordinator::FlushCoordinator;
 use duckpipe_core::listen;
 use duckpipe_core::service::{self, ServiceConfig, SlotConnectParams, SlotState};
 use duckpipe_core::snapshot_manager::SnapshotManager;
+use duckpipe_core::types::{GroupConfig, ResolvedConfig};
 
-use crate::{
-    BATCH_SIZE_PER_GROUP, DEBUG_LOG, DUCKDB_BUFFER_MEMORY_MB, DUCKDB_FLUSH_MEMORY_MB, ENABLED,
-    FLUSH_BATCH_THRESHOLD, FLUSH_INTERVAL, MAX_CONCURRENT_FLUSHES, MAX_QUEUED_CHANGES,
-    POLL_INTERVAL,
-};
+use crate::{BATCH_SIZE_PER_GROUP, DEBUG_LOG, ENABLED, MAX_CONCURRENT_FLUSHES, POLL_INTERVAL};
 
 /// Check if shutdown has been requested.
 fn should_shutdown() -> bool {
@@ -31,12 +28,52 @@ fn read_config(connstr: &str, duckdb_pg_connstr: &str) -> ServiceConfig {
         connstr: connstr.to_string(),
         duckdb_pg_connstr: duckdb_pg_connstr.to_string(),
         ducklake_schema: "ducklake".to_string(),
-        flush_interval_ms: FLUSH_INTERVAL.get(),
-        flush_batch_threshold: FLUSH_BATCH_THRESHOLD.get(),
-        duckdb_buffer_memory_mb: DUCKDB_BUFFER_MEMORY_MB.get(),
-        duckdb_flush_memory_mb: DUCKDB_FLUSH_MEMORY_MB.get(),
-        max_queued_changes: MAX_QUEUED_CHANGES.get(),
         max_concurrent_flushes: MAX_CONCURRENT_FLUSHES.get(),
+    }
+}
+
+/// Read global_config and per-group config from SPI, resolve into ResolvedConfig.
+fn read_resolved_config(group_name: &str) -> ResolvedConfig {
+    unsafe {
+        pg_sys::StartTransactionCommand();
+        pg_sys::PushActiveSnapshot(pg_sys::GetTransactionSnapshot());
+        let resolved = Spi::connect(|client| {
+            // Read global config
+            let global_result = client
+                .select("SELECT key, value FROM duckpipe.global_config", None, &[])
+                .unwrap();
+            let mut kv_rows: Vec<(String, String)> = Vec::new();
+            for row in global_result {
+                let key: String = row.get::<String>(1).unwrap().unwrap_or_default();
+                let value: String = row.get::<String>(2).unwrap().unwrap_or_default();
+                kv_rows.push((key, value));
+            }
+            let global = GroupConfig::from_kv_rows(&kv_rows);
+
+            // Read per-group config
+            let args = [DatumWithOid::new(
+                group_name,
+                PgBuiltInOids::TEXTOID.value(),
+            )];
+            let group_result = client
+                .select(
+                    "SELECT config::text FROM duckpipe.sync_groups WHERE name = $1",
+                    Some(1),
+                    &args,
+                )
+                .unwrap();
+            let mut group_config = GroupConfig::default();
+            for row in group_result {
+                if let Some(config_str) = row.get::<String>(1).unwrap() {
+                    group_config = GroupConfig::from_json_str(&config_str).unwrap_or_default();
+                }
+            }
+
+            ResolvedConfig::resolve(&global, &group_config)
+        });
+        pg_sys::PopActiveSnapshot();
+        pg_sys::CommitTransactionCommand();
+        resolved
     }
 }
 
@@ -188,17 +225,13 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
     };
 
     // Create persistent flush coordinator (survives across cycles, cleared on panic)
-    let config = read_config(&connstr, &duckdb_pg_connstr);
+    let resolved_config = read_resolved_config(&group_name);
     let mut coordinator = FlushCoordinator::new(
         connstr.clone(),
         "ducklake".to_string(),
         group_name.clone(),
-        config.flush_batch_threshold,
-        config.flush_interval_ms,
-        config.max_queued_changes,
-        config.duckdb_buffer_memory_mb,
-        config.duckdb_flush_memory_mb,
-        config.max_concurrent_flushes,
+        resolved_config,
+        MAX_CONCURRENT_FLUSHES.get(),
     );
     let mut snapshot_manager = SnapshotManager::new();
 

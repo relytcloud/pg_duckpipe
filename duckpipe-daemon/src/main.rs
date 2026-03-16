@@ -21,6 +21,7 @@ use duckpipe_core::connstr::to_slot_connect_params;
 use duckpipe_core::flush_coordinator::FlushCoordinator;
 use duckpipe_core::service::{self, ServiceConfig, SlotState};
 use duckpipe_core::snapshot_manager::SnapshotManager;
+use duckpipe_core::types::{GroupConfig, ResolvedConfig};
 
 /// DuckPipe — standalone CDC sync daemon for PostgreSQL → DuckLake.
 #[derive(Parser, Debug)]
@@ -46,26 +47,6 @@ struct Args {
     /// Enable debug timing logs.
     #[arg(long, default_value_t = false)]
     debug: bool,
-
-    /// Flush interval in milliseconds (min 100, default 5000).
-    #[arg(long, default_value_t = 5000, value_parser = clap::value_parser!(i32).range(100..))]
-    flush_interval: i32,
-
-    /// Number of queued changes that triggers an immediate flush (min 100, default 10000).
-    #[arg(long, default_value_t = 10000, value_parser = clap::value_parser!(i32).range(100..=1000000))]
-    flush_batch_threshold: i32,
-
-    /// Maximum total queued changes before backpressure pauses WAL consumption (min 1000, default 500000).
-    #[arg(long, default_value_t = 500000, value_parser = clap::value_parser!(i32).range(1000..=10000000))]
-    max_queued_changes: i32,
-
-    /// DuckDB memory limit in MB during buffer accumulation (1-4096, default 16).
-    #[arg(long, default_value_t = 16, value_parser = clap::value_parser!(i32).range(1..=4096))]
-    duckdb_buffer_memory_mb: i32,
-
-    /// DuckDB memory limit in MB during flush/compaction (16-65536, default 512).
-    #[arg(long, default_value_t = 512, value_parser = clap::value_parser!(i32).range(16..=65536))]
-    duckdb_flush_memory_mb: i32,
 
     /// Maximum concurrent flush operations per sync group (1-1000, default 4).
     #[arg(long, default_value_t = 4, value_parser = clap::value_parser!(i32).range(1..=1000))]
@@ -113,11 +94,6 @@ async fn main() {
         connstr: connstr.clone(),
         duckdb_pg_connstr: connstr.clone(),
         ducklake_schema: args.ducklake_schema.clone(),
-        flush_interval_ms: args.flush_interval,
-        flush_batch_threshold: args.flush_batch_threshold,
-        duckdb_buffer_memory_mb: args.duckdb_buffer_memory_mb,
-        duckdb_flush_memory_mb: args.duckdb_flush_memory_mb,
-        max_queued_changes: args.max_queued_changes,
         max_concurrent_flushes: args.max_concurrent_flushes,
     };
 
@@ -227,6 +203,66 @@ async fn pre_bind_group(state: &Arc<api::AppState>, group_name: &str) -> Result<
     Ok(())
 }
 
+/// Read global_config and per-group config from PG, resolve into ResolvedConfig.
+async fn read_resolved_config(connstr: &str, group_name: &str) -> ResolvedConfig {
+    let connect_result =
+        duckpipe_core::connstr::pg_connect_with_app_name(connstr, "duckpipe-daemon-config").await;
+    let (client, conn_handle) = match connect_result {
+        Ok(c) => c,
+        Err(e) => {
+            error!("Failed to read config from PG: {}", e);
+            return ResolvedConfig::default();
+        }
+    };
+
+    // Read global config
+    let global = match client
+        .query("SELECT key, value FROM duckpipe.global_config", &[])
+        .await
+    {
+        Ok(rows) => {
+            let kv: Vec<(String, String)> = rows
+                .iter()
+                .map(|r| (r.get::<_, String>(0), r.get::<_, String>(1)))
+                .collect();
+            GroupConfig::from_kv_rows(&kv)
+        }
+        Err(e) => {
+            error!("Failed to read global_config: {}", e);
+            GroupConfig::default()
+        }
+    };
+
+    // Read per-group config
+    let group_config = match client
+        .query(
+            "SELECT config::text FROM duckpipe.sync_groups WHERE name = $1",
+            &[&group_name],
+        )
+        .await
+    {
+        Ok(rows) => {
+            if let Some(row) = rows.first() {
+                let config_str: Option<String> = row.get(0);
+                config_str
+                    .and_then(|s| GroupConfig::from_json_str(&s).ok())
+                    .unwrap_or_default()
+            } else {
+                GroupConfig::default()
+            }
+        }
+        Err(e) => {
+            error!("Failed to read group config: {}", e);
+            GroupConfig::default()
+        }
+    };
+
+    drop(client);
+    let _ = conn_handle.await;
+
+    ResolvedConfig::resolve(&global, &group_config)
+}
+
 /// Main sync loop — waits for group binding if unbound, then runs the sync cycle.
 /// Uses an outer loop (not recursion) so unbind/rebind cycles don't grow the stack.
 async fn run_sync_loop(
@@ -252,15 +288,12 @@ async fn run_sync_loop(
 
         let group_name = state.group.read().await.clone().unwrap();
 
+        let resolved_config = read_resolved_config(&config.connstr, &group_name).await;
         let mut coordinator = FlushCoordinator::new(
             config.connstr.clone(),
             config.ducklake_schema.clone(),
             group_name.clone(),
-            config.flush_batch_threshold,
-            config.flush_interval_ms,
-            config.max_queued_changes,
-            config.duckdb_buffer_memory_mb,
-            config.duckdb_flush_memory_mb,
+            resolved_config,
             config.max_concurrent_flushes,
         );
         let mut snapshot_manager = SnapshotManager::new();

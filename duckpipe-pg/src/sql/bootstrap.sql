@@ -10,6 +10,7 @@ CREATE TABLE duckpipe.sync_groups (
     conninfo        TEXT,
     enabled         BOOLEAN DEFAULT true,
     mode            TEXT NOT NULL DEFAULT 'bgworker' CHECK (mode IN ('bgworker', 'daemon')),
+    config          JSONB NOT NULL DEFAULT '{}'::jsonb,
     confirmed_lsn   pg_lsn,
     last_sync_at    TIMESTAMPTZ,
     created_at      TIMESTAMPTZ DEFAULT NOW()
@@ -50,6 +51,19 @@ CREATE TABLE duckpipe.worker_state (
     is_backpressured     BOOLEAN DEFAULT false,
     updated_at           TIMESTAMPTZ
 );
+
+-- Global config (key-value rows, seeded with defaults)
+CREATE TABLE duckpipe.global_config (
+    key    TEXT PRIMARY KEY,
+    value  TEXT NOT NULL
+);
+INSERT INTO duckpipe.global_config VALUES
+    ('duckdb_buffer_memory_mb', '16'),
+    ('duckdb_flush_memory_mb', '512'),
+    ('duckdb_threads', '1'),
+    ('flush_interval_ms', '1000'),
+    ('flush_batch_threshold', '10000'),
+    ('max_queued_changes', '500000');
 
 -- Default sync group
 INSERT INTO duckpipe.sync_groups (name, publication, slot_name)

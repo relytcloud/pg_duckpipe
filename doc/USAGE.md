@@ -177,34 +177,62 @@ SELECT source_table, target_table, sync_group, enabled, rows_synced
 FROM duckpipe.tables();
 ```
 
-## Configuration (GUCs)
+## Configuration
 
-All parameters require `ALTER SYSTEM SET` + `SELECT pg_reload_conf()` (SIGHUP-level), except `data_inlining_row_limit` which is session-level.
+### GUCs (PostgreSQL parameters)
+
+These parameters require `ALTER SYSTEM SET` + `SELECT pg_reload_conf()` (SIGHUP-level), except `data_inlining_row_limit` which is session-level.
 
 | Parameter | Default | Range | Description |
 |-----------|---------|-------|-------------|
 | `duckpipe.enabled` | `on` | — | Enable/disable the background worker |
 | `duckpipe.poll_interval` | `1000` | 100–3600000 ms | Interval between WAL poll cycles |
 | `duckpipe.batch_size_per_group` | `100000` | 100–10000000 | Max WAL messages per group per cycle |
-| `duckpipe.flush_interval` | `1000` | 100–60000 ms | Time-based flush trigger interval |
-| `duckpipe.flush_batch_threshold` | `10000` | 100–1000000 | Queue size that triggers immediate flush |
-| `duckpipe.max_queued_changes` | `500000` | 1000–10000000 | Backpressure threshold (pauses WAL consumer) |
 | `duckpipe.max_concurrent_flushes` | `4` | 1–1000 | Max concurrent flush operations per group |
 | `duckpipe.debug_log` | `off` | — | Emit critical-path timing logs |
 | `duckpipe.data_inlining_row_limit` | `0` | 0–1000000 | DuckLake data inlining row limit |
 
+### Per-Group Config (config table)
+
+DuckDB resource limits and flush tuning are managed via the `duckpipe.global_config` table and per-group JSONB overrides on `sync_groups.config`. Resolution order: **hardcoded defaults ← global_config rows ← per-group JSONB**.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `duckdb_buffer_memory_mb` | int | `16` | DuckDB memory limit (MB) during buffer accumulation (low, allows spill to disk) |
+| `duckdb_flush_memory_mb` | int | `512` | DuckDB memory limit (MB) during flush/compaction (high, for DuckLake writes) |
+| `duckdb_threads` | int | `1` | DuckDB `SET threads` per FlushWorker |
+| `flush_interval_ms` | int | `1000` | Time-based flush trigger (ms) |
+| `flush_batch_threshold` | int | `10000` | Queue-size flush trigger |
+| `max_queued_changes` | int | `500000` | Backpressure threshold |
+
+#### Config API
+
+```sql
+-- Read/write global config
+SELECT duckpipe.get_config();                                   -- all keys as JSON
+SELECT duckpipe.get_config('duckdb_buffer_memory_mb');          -- single key
+SELECT duckpipe.set_config('duckdb_buffer_memory_mb', '32');
+
+-- Read/write per-group config (resolved: defaults ← global ← group)
+SELECT duckpipe.get_group_config('default');               -- resolved JSON
+SELECT duckpipe.get_group_config('default', 'duckdb_threads');
+SELECT duckpipe.set_group_config('default', 'duckdb_threads', '4');
+```
+
 ### Tuning Examples
 
 ```sql
--- Lower latency: flush more frequently
-ALTER SYSTEM SET duckpipe.flush_interval = 200;
-ALTER SYSTEM SET duckpipe.flush_batch_threshold = 1000;
-SELECT pg_reload_conf();
+-- Lower latency: flush more frequently (global)
+SELECT duckpipe.set_config('flush_interval_ms', '200');
+SELECT duckpipe.set_config('flush_batch_threshold', '1000');
 
--- Higher throughput: batch more before flushing
-ALTER SYSTEM SET duckpipe.flush_interval = 5000;
-ALTER SYSTEM SET duckpipe.flush_batch_threshold = 100000;
-SELECT pg_reload_conf();
+-- Higher throughput for a specific group
+SELECT duckpipe.set_group_config('analytics', 'flush_interval_ms', '5000');
+SELECT duckpipe.set_group_config('analytics', 'flush_batch_threshold', '100000');
+
+-- Give a heavy group more DuckDB resources
+SELECT duckpipe.set_group_config('analytics', 'duckdb_flush_memory_mb', '2048');
+SELECT duckpipe.set_group_config('analytics', 'duckdb_threads', '4');
 
 -- Limit flush parallelism (reduces peak memory with many tables)
 ALTER SYSTEM SET duckpipe.max_concurrent_flushes = 2;

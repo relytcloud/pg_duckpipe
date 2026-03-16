@@ -6,6 +6,7 @@ test: api
 test: monitoring
 test: metrics
 test: sync_group_mode
+test: group_config
 # Streaming CDC tests (require background worker)
 test: streaming
 test: snapshot_updates
