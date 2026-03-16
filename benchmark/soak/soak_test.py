@@ -34,6 +34,7 @@ from lib import (
     get_worker_status,
     get_wal_slot_size_bytes,
     get_benchmark_rows_synced,
+    get_metrics_json,
     wait_for_db_ready,
     verify_table_consistency_full,
 )
@@ -114,6 +115,13 @@ class SoakState:
         self.peak_lag_bytes = 0
         self.lag_samples = []
         self.table_statuses = []
+
+        # SHM metrics (from duckpipe.metrics())
+        self.total_duckdb_memory_bytes = 0
+        self.total_flush_count = 0
+        self.prev_flush_count = 0
+        self.flush_rate = 0.0  # flushes/s
+        self.avg_flush_duration_ms = 0
 
         # Consistency
         self.consistency_checks = []
@@ -212,6 +220,19 @@ def monitor_loop(state, db_params, args, csv_writer, csv_file):
             # Table statuses
             table_statuses = get_full_status(db_params)
 
+            # SHM metrics via duckpipe.metrics() JSON (memory, flush stats)
+            total_mem = 0
+            total_flushes = 0
+            flush_durations = []
+            metrics_data = get_metrics_json(db_params)
+            if metrics_data and 'tables' in metrics_data:
+                for t in metrics_data['tables']:
+                    total_mem += t.get('duckdb_memory_bytes', 0)
+                    total_flushes += t.get('flush_count', 0)
+                    fd = t.get('flush_duration_ms', 0)
+                    if fd > 0:
+                        flush_durations.append(fd)
+
             # Compute sync rate
             with state.lock:
                 delta = total_rows - state.prev_rows_synced
@@ -225,6 +246,16 @@ def monitor_loop(state, db_params, args, csv_writer, csv_file):
                 state.slot_retained_wal_bytes = slot_wal
                 state.total_rows_synced = total_rows
                 state.table_statuses = table_statuses
+
+                # SHM metrics
+                state.total_duckdb_memory_bytes = total_mem
+                flush_delta = total_flushes - state.prev_flush_count
+                state.flush_rate = flush_delta / poll_interval if poll_interval > 0 else 0
+                state.prev_flush_count = total_flushes
+                state.total_flush_count = total_flushes
+                state.avg_flush_duration_ms = (
+                    sum(flush_durations) / len(flush_durations) if flush_durations else 0
+                )
 
                 if wal_lag > state.peak_lag_bytes:
                     state.peak_lag_bytes = wal_lag
@@ -266,6 +297,11 @@ def monitor_loop(state, db_params, args, csv_writer, csv_file):
                 'queued_changes': queued,
                 'is_backpressured': bp,
                 'slot_retained_wal_bytes': slot_wal,
+                'duckdb_memory_bytes': total_mem,
+                'duckdb_memory_mb': f"{total_mem / 1048576:.1f}",
+                'flush_count': total_flushes,
+                'flush_rate_s': f"{state.flush_rate:.1f}",
+                'avg_flush_duration_ms': f"{state.avg_flush_duration_ms:.0f}",
                 'tables_streaming': streaming,
                 'tables_errored': errored,
                 'tables_snapshot': snapshot,
@@ -474,6 +510,12 @@ def render_display(state, args):
     peak_mb = state.peak_lag_bytes / 1048576
     avg_lag_mb = (sum(state.lag_samples) / len(state.lag_samples) / 1048576) if state.lag_samples else 0
     lines.append(f"  Peak lag: {peak_mb:.1f} MB   Avg lag: {avg_lag_mb:.1f} MB")
+    mem_mb = state.total_duckdb_memory_bytes / 1048576
+    lines.append(
+        f"  DuckDB mem: {mem_mb:.1f} MB   "
+        f"Flushes: {state.total_flush_count:,} ({state.flush_rate:.1f}/s)   "
+        f"Avg flush: {state.avg_flush_duration_ms:.0f} ms"
+    )
     lines.append("")
 
     # Consistency
@@ -672,6 +714,8 @@ def main():
         'timestamp', 'elapsed_s', 'sysbench_tps', 'total_rows_synced',
         'rows_synced_delta', 'sync_rate_rows_s', 'wal_lag_bytes', 'wal_lag_mb',
         'queued_changes', 'is_backpressured', 'slot_retained_wal_bytes',
+        'duckdb_memory_bytes', 'duckdb_memory_mb', 'flush_count',
+        'flush_rate_s', 'avg_flush_duration_ms',
         'tables_streaming', 'tables_errored', 'tables_snapshot', 'tables_catchup',
         'max_consecutive_failures', 'consistency_check_result', 'event',
     ]
@@ -777,6 +821,8 @@ def main():
     print(f"  Total Rows   : {state.total_rows_synced:,}")
     print(f"  Avg Sync Rate: {state.avg_sync_rate:,.0f} rows/s")
     print(f"  Peak Lag     : {state.peak_lag_bytes / 1048576:.1f} MB")
+    print(f"  DuckDB Memory: {state.total_duckdb_memory_bytes / 1048576:.1f} MB")
+    print(f"  Total Flushes: {state.total_flush_count:,}")
     with state.lock:
         total_checks = len(state.consistency_checks)
         passed_checks = sum(1 for _, r, _ in state.consistency_checks if r == "PASS")

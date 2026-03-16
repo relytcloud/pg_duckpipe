@@ -1,0 +1,92 @@
+# Soak test DB image: pgducklake + pg_duckpipe built from source.
+# Does NOT modify shared_preload_libraries in postgresql.conf.sample
+# to avoid the initdb "access method ducklake does not exist" issue.
+# Use docker-compose `command` to set shared_preload_libraries at runtime.
+ARG PG_VERSION=18
+
+###############################################################################
+### BUILDER — compile pg_duckpipe
+###############################################################################
+FROM pgducklake/pgducklake:${PG_VERSION}-main AS builder
+ARG PG_VERSION
+
+USER root
+
+RUN apt-get update -qq && \
+    apt-get install -y \
+        postgresql-server-dev-${PG_VERSION} \
+        build-essential \
+        clang \
+        libclang-dev \
+        pkg-config \
+        cmake \
+        ninja-build \
+        curl \
+        ca-certificates \
+        libssl-dev \
+        jq && \
+    rm -rf /var/lib/apt/lists/*
+
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+    sh -s -- -y --no-modify-path --default-toolchain stable --profile minimal
+
+RUN cargo install --locked cargo-pgrx --version 0.16.1
+
+WORKDIR /build
+COPY . .
+
+RUN cargo pgrx init --pg${PG_VERSION} /usr/lib/postgresql/${PG_VERSION}/bin/pg_config
+
+ENV DUCKDB_LIB_DIR=/usr/lib/postgresql/${PG_VERSION}/lib \
+    LD_LIBRARY_PATH=/usr/lib/postgresql/${PG_VERSION}/lib
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/build/target \
+    cargo pgrx install \
+        --package pg_duckpipe \
+        --pg-config /usr/lib/postgresql/${PG_VERSION}/bin/pg_config \
+        --release
+
+###############################################################################
+### OUTPUT — pgducklake base + pg_duckpipe extension files only
+###############################################################################
+FROM pgducklake/pgducklake:${PG_VERSION}-main AS output
+ARG PG_VERSION
+
+USER root
+
+# Copy pg_duckpipe shared library and extension files
+COPY --from=builder \
+    /usr/lib/postgresql/${PG_VERSION}/lib/pg_duckpipe.so \
+    /usr/lib/postgresql/${PG_VERSION}/lib/
+
+COPY --from=builder \
+    /usr/share/postgresql/${PG_VERSION}/extension/pg_duckpipe.control \
+    /usr/share/postgresql/${PG_VERSION}/extension/pg_duckpipe--1.0.0.sql \
+    /usr/share/postgresql/${PG_VERSION}/extension/
+
+# Make libduckdb.so findable
+RUN echo "/usr/lib/postgresql/${PG_VERSION}/lib" > /etc/ld.so.conf.d/duckdb.conf && \
+    /sbin/ldconfig
+
+# Pre-install DuckDB extensions
+COPY docker/fetch-ducklake-ext.sh /usr/local/bin/fetch-ducklake-ext.sh
+RUN apt-get update -qq && apt-get install -y --no-install-recommends curl && \
+    /usr/local/bin/fetch-ducklake-ext.sh && \
+    chown -R postgres:postgres /var/lib/postgresql/.duckdb && \
+    apt-get remove -y curl && apt-get autoremove -y && \
+    rm -rf /var/lib/apt/lists/*
+
+# Init scripts for creating extensions
+COPY docker/init.d/ /docker-entrypoint-initdb.d/
+RUN chmod +x /docker-entrypoint-initdb.d/Z02-localhost-trust.sh
+
+# NOTE: We intentionally do NOT modify postgresql.conf.sample here.
+# shared_preload_libraries is set via docker-compose `command` override
+# to avoid the initdb chicken-and-egg problem with pg_ducklake access method.
+
+USER postgres

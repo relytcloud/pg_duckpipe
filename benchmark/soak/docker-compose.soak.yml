@@ -1,7 +1,12 @@
 services:
   db:
-    image: ${DB_IMAGE:-pgducklake/pgduckpipe:18-main}
+    build:
+      context: ../..
+      dockerfile: benchmark/soak/Dockerfile.db
     platform: linux/amd64
+    command: >-
+      -c shared_preload_libraries=pg_duckdb,pg_ducklake,pg_duckpipe
+      -c wal_level=logical
     ports:
       - "${PORT:-5432}:5432"
     environment:
@@ -9,6 +14,7 @@ services:
       POSTGRES_PASSWORD: ${PASSWORD:-duckdb}
     volumes:
       - soak_pgdata:/var/lib/postgresql
+    restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 2s
