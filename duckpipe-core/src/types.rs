@@ -1,3 +1,214 @@
+use serde::{Deserialize, Serialize};
+
+/// Known config keys with their validation rules.
+const VALID_CONFIG_KEYS: &[(&str, &str)] = &[
+    ("duckdb_buffer_memory_mb", "int"),
+    ("duckdb_flush_memory_mb", "int"),
+    ("duckdb_threads", "int"),
+    ("flush_interval_ms", "int"),
+    ("flush_batch_threshold", "int"),
+    ("max_concurrent_flushes", "int"),
+    ("max_queued_changes", "int"),
+];
+
+/// Partial config — Option fields. Used for per-group overrides in JSONB.
+/// Also used to represent global_config rows (populated from key-value table).
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct GroupConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duckdb_buffer_memory_mb: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duckdb_flush_memory_mb: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duckdb_threads: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flush_interval_ms: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flush_batch_threshold: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_concurrent_flushes: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_queued_changes: Option<i32>,
+}
+
+impl GroupConfig {
+    pub fn from_json_str(s: &str) -> Result<Self, String> {
+        serde_json::from_str(s).map_err(|e| format!("invalid config JSON: {}", e))
+    }
+
+    pub fn to_json_string(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|_| "{}".to_string())
+    }
+
+    /// Build a GroupConfig from key-value rows (e.g., from the global_config table).
+    pub fn from_kv_rows(rows: &[(String, String)]) -> Self {
+        let mut config = GroupConfig::default();
+        for (key, value) in rows {
+            let _ = config.set_key(key, value);
+        }
+        config
+    }
+
+    /// Set a single key. Returns Err if the key is unknown or the value is invalid.
+    pub fn set_key(&mut self, key: &str, value: &str) -> Result<(), String> {
+        Self::validate_key(key, value)?;
+        match key {
+            "duckdb_buffer_memory_mb" => {
+                self.duckdb_buffer_memory_mb = Some(value.parse::<i32>().unwrap())
+            }
+            "duckdb_flush_memory_mb" => {
+                self.duckdb_flush_memory_mb = Some(value.parse::<i32>().unwrap())
+            }
+            "duckdb_threads" => self.duckdb_threads = Some(value.parse::<i32>().unwrap()),
+            "flush_interval_ms" => self.flush_interval_ms = Some(value.parse::<i32>().unwrap()),
+            "flush_batch_threshold" => {
+                self.flush_batch_threshold = Some(value.parse::<i32>().unwrap())
+            }
+            "max_concurrent_flushes" => {
+                self.max_concurrent_flushes = Some(value.parse::<i32>().unwrap())
+            }
+            "max_queued_changes" => self.max_queued_changes = Some(value.parse::<i32>().unwrap()),
+            _ => return Err(format!("unknown config key: '{}'", key)),
+        }
+        Ok(())
+    }
+
+    /// Get a single key's value as a string. Returns None if unset or unknown.
+    pub fn get_key(&self, key: &str) -> Option<String> {
+        match key {
+            "duckdb_buffer_memory_mb" => self.duckdb_buffer_memory_mb.map(|v| v.to_string()),
+            "duckdb_flush_memory_mb" => self.duckdb_flush_memory_mb.map(|v| v.to_string()),
+            "duckdb_threads" => self.duckdb_threads.map(|v| v.to_string()),
+            "flush_interval_ms" => self.flush_interval_ms.map(|v| v.to_string()),
+            "flush_batch_threshold" => self.flush_batch_threshold.map(|v| v.to_string()),
+            "max_concurrent_flushes" => self.max_concurrent_flushes.map(|v| v.to_string()),
+            "max_queued_changes" => self.max_queued_changes.map(|v| v.to_string()),
+            _ => None,
+        }
+    }
+
+    /// Validate a key-value pair. Returns Ok(()) if valid, Err with message if not.
+    pub fn validate_key(key: &str, value: &str) -> Result<(), String> {
+        let entry = VALID_CONFIG_KEYS
+            .iter()
+            .find(|(k, _)| *k == key)
+            .ok_or_else(|| {
+                format!(
+                    "unknown config key: '{}'. Valid keys: {}",
+                    key,
+                    VALID_CONFIG_KEYS
+                        .iter()
+                        .map(|(k, _)| *k)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })?;
+        match entry.1 {
+            "int" => {
+                let v = value
+                    .parse::<i32>()
+                    .map_err(|_| format!("'{}' must be an integer, got '{}'", key, value))?;
+                if v <= 0 {
+                    return Err(format!("'{}' must be positive, got {}", key, v));
+                }
+            }
+            // No "string" type keys any more — all config keys are "int"
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+/// Fully resolved config — no Options. All values guaranteed present.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedConfig {
+    pub duckdb_buffer_memory_mb: i32,
+    pub duckdb_flush_memory_mb: i32,
+    pub duckdb_threads: i32,
+    pub flush_interval_ms: i32,
+    pub flush_batch_threshold: i32,
+    pub max_concurrent_flushes: i32,
+    pub max_queued_changes: i32,
+}
+
+impl Default for ResolvedConfig {
+    fn default() -> Self {
+        ResolvedConfig {
+            duckdb_buffer_memory_mb: 16,
+            duckdb_flush_memory_mb: 512,
+            duckdb_threads: 1,
+            flush_interval_ms: 5000,
+            flush_batch_threshold: 50000,
+            max_concurrent_flushes: 4,
+            max_queued_changes: 500000,
+        }
+    }
+}
+
+impl ResolvedConfig {
+    /// Convert to a GroupConfig with all fields set (for JSON serialization).
+    pub fn to_group_config(&self) -> GroupConfig {
+        GroupConfig {
+            duckdb_buffer_memory_mb: Some(self.duckdb_buffer_memory_mb),
+            duckdb_flush_memory_mb: Some(self.duckdb_flush_memory_mb),
+            duckdb_threads: Some(self.duckdb_threads),
+            flush_interval_ms: Some(self.flush_interval_ms),
+            flush_batch_threshold: Some(self.flush_batch_threshold),
+            max_concurrent_flushes: Some(self.max_concurrent_flushes),
+            max_queued_changes: Some(self.max_queued_changes),
+        }
+    }
+
+    /// Get a single key's value as a string.
+    pub fn get_key(&self, key: &str) -> Option<String> {
+        match key {
+            "duckdb_buffer_memory_mb" => Some(self.duckdb_buffer_memory_mb.to_string()),
+            "duckdb_flush_memory_mb" => Some(self.duckdb_flush_memory_mb.to_string()),
+            "duckdb_threads" => Some(self.duckdb_threads.to_string()),
+            "flush_interval_ms" => Some(self.flush_interval_ms.to_string()),
+            "flush_batch_threshold" => Some(self.flush_batch_threshold.to_string()),
+            "max_concurrent_flushes" => Some(self.max_concurrent_flushes.to_string()),
+            "max_queued_changes" => Some(self.max_queued_changes.to_string()),
+            _ => None,
+        }
+    }
+
+    /// Resolve: hardcoded defaults ← global config ← per-group config.
+    pub fn resolve(global: &GroupConfig, group: &GroupConfig) -> Self {
+        let defaults = ResolvedConfig::default();
+        ResolvedConfig {
+            duckdb_buffer_memory_mb: group
+                .duckdb_buffer_memory_mb
+                .or(global.duckdb_buffer_memory_mb)
+                .unwrap_or(defaults.duckdb_buffer_memory_mb),
+            duckdb_flush_memory_mb: group
+                .duckdb_flush_memory_mb
+                .or(global.duckdb_flush_memory_mb)
+                .unwrap_or(defaults.duckdb_flush_memory_mb),
+            duckdb_threads: group
+                .duckdb_threads
+                .or(global.duckdb_threads)
+                .unwrap_or(defaults.duckdb_threads),
+            flush_interval_ms: group
+                .flush_interval_ms
+                .or(global.flush_interval_ms)
+                .unwrap_or(defaults.flush_interval_ms),
+            flush_batch_threshold: group
+                .flush_batch_threshold
+                .or(global.flush_batch_threshold)
+                .unwrap_or(defaults.flush_batch_threshold),
+            max_concurrent_flushes: group
+                .max_concurrent_flushes
+                .or(global.max_concurrent_flushes)
+                .unwrap_or(defaults.max_concurrent_flushes),
+            max_queued_changes: group
+                .max_queued_changes
+                .or(global.max_queued_changes)
+                .unwrap_or(defaults.max_queued_changes),
+        }
+    }
+}
+
 /// Column value with type information.
 /// Parsed from pgoutput text representation using the RELATION message's type_oid.
 /// Unrecognized types fall back to Text(String), which DuckDB auto-casts.
@@ -114,6 +325,8 @@ pub struct SyncGroup {
     /// Remote PG connection string (NULL = local group).
     pub conninfo: Option<String>,
     pub mode: GroupMode,
+    /// Per-group config overrides (from sync_groups.config JSONB column).
+    pub config: GroupConfig,
 }
 
 /// Table mapping metadata

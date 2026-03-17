@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use duckdb::{Config, Connection};
 
-use crate::types::{fixed_bytes_for_oid, Change, ChangeType, Value};
+use crate::types::{fixed_bytes_for_oid, Change, ChangeType, ResolvedConfig, Value};
 
 /// Push a Value into a row Vec for the DuckDB Appender.
 /// Text values are auto-cast by DuckDB to the buffer table's declared column type.
@@ -217,20 +217,29 @@ pub struct FlushWorker {
 impl FlushWorker {
     /// Create a new FlushWorker with a fresh DuckDB connection.
     /// Performs setup: open in-memory DB, INSTALL+LOAD ducklake, ATTACH to PG.
-    /// The initial memory limit is set to `buffer_memory_mb` (low, for 100+ concurrent tables).
-    /// During `flush_buffer()`, it's raised to `flush_memory_mb` (high, for compaction + DuckLake writes).
-    /// The worker is dropped after each flush cycle to release memory back to the OS.
+    /// The initial memory limit is set to `duckdb_buffer_memory_mb` (low, for 100+ concurrent tables).
+    /// During `flush_buffer()`, it's raised to `duckdb_flush_memory_mb` (high, for compaction + DuckLake writes).
     pub fn new(
         pg_connstr: &str,
         ducklake_schema: &str,
-        buffer_memory_mb: i32,
-        flush_memory_mb: i32,
+        resolved_config: &ResolvedConfig,
     ) -> Result<Self, String> {
         let config = Config::default()
             .allow_unsigned_extensions()
             .map_err(|e| format!("duckdb config: {}", e))?;
         let db = Connection::open_in_memory_with_flags(config)
             .map_err(|e| format!("duckdb open: {}", e))?;
+
+        let buffer_memory_limit = format!("{}MB", resolved_config.duckdb_buffer_memory_mb);
+        let flush_memory_limit = format!("{}MB", resolved_config.duckdb_flush_memory_mb);
+
+        // Apply per-group DuckDB resource limits: buffer-phase memory (low) + threads
+        let resource_sql = format!(
+            "SET memory_limit = '{}'; SET threads = {};",
+            buffer_memory_limit, resolved_config.duckdb_threads
+        );
+        db.execute_batch(&resource_sql)
+            .map_err(|e| format!("duckdb set resources: {}", e))?;
 
         db.execute_batch("INSTALL ducklake; LOAD ducklake;")
             .map_err(|e| format!("duckdb install ducklake: {}", e))?;
@@ -249,13 +258,6 @@ impl FlushWorker {
              SET ducklake_max_retry_count = 10;",
         )
         .map_err(|e| format!("duckdb set retry: {}", e))?;
-
-        let buffer_memory_limit = format!("{}MB", buffer_memory_mb);
-        let flush_memory_limit = format!("{}MB", flush_memory_mb);
-
-        // Set initial memory limit to buffer phase (low limit for spilling)
-        db.execute_batch(&format!("SET memory_limit = '{}'", buffer_memory_limit))
-            .map_err(|e| format!("duckdb set memory_limit: {}", e))?;
 
         Ok(FlushWorker {
             db,

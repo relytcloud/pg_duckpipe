@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 use crate::duckdb_flush::FlushWorker;
 use crate::flush_worker;
 use crate::metadata::ERRORED_THRESHOLD;
+use crate::types::{Change, ResolvedConfig};
 
 /// In-memory group-level metrics from FlushCoordinator.
 #[derive(Clone, Copy, Default)]
@@ -40,7 +41,6 @@ pub struct TableMetrics {
     pub flush_duration_ms: i64,
     pub avg_row_bytes: i64,
 }
-use crate::types::Change;
 
 /// Cloneable table schema info used by the flush thread for DuckDB buffer operations.
 #[derive(Clone, Debug)]
@@ -305,8 +305,7 @@ pub struct FlushCoordinator {
     result_tx: mpsc::Sender<FlushThreadResult>,
     result_rx: mpsc::Receiver<FlushThreadResult>,
     backpressure: Arc<BackpressureState>,
-    flush_batch_threshold: usize,
-    flush_interval_ms: u64,
+    resolved_config: ResolvedConfig,
     /// In-memory per-table applied (flushed) LSN, updated from flush thread results via mpsc.
     ///
     /// Used to compute `flushed_lsn` for `StandbyStatusUpdate` and PG `confirmed_lsn`
@@ -329,10 +328,6 @@ pub struct FlushCoordinator {
     /// Cache: target_key → mapping_id.  Populated in `ensure_queue`, used in
     /// `get_min_applied_lsn_in_coordinator` to avoid O(n) mutex locks per call.
     target_to_mapping: HashMap<String, i32>,
-    /// DuckDB memory limit in MB during buffer accumulation.
-    buffer_memory_mb: i32,
-    /// DuckDB memory limit in MB during flush/compaction.
-    flush_memory_mb: i32,
     /// Global-per-group semaphore limiting concurrent flush operations.
     flush_gate: Arc<FlushGate>,
 }
@@ -343,14 +338,11 @@ impl FlushCoordinator {
         pg_connstr: String,
         ducklake_schema: String,
         group_name: String,
-        flush_batch_threshold: i32,
-        flush_interval_ms: i32,
-        max_queued_changes: i32,
-        buffer_memory_mb: i32,
-        flush_memory_mb: i32,
-        max_concurrent_flushes: i32,
+        resolved_config: ResolvedConfig,
     ) -> Self {
         let (tx, rx) = mpsc::channel();
+        let max_queued = resolved_config.max_queued_changes as i64;
+        let max_concurrent = resolved_config.max_concurrent_flushes as usize;
         FlushCoordinator {
             pg_connstr,
             ducklake_schema,
@@ -361,22 +353,16 @@ impl FlushCoordinator {
             backpressure: Arc::new(BackpressureState {
                 total_queued: AtomicI64::new(0),
                 snapshot_queued: AtomicI64::new(0),
-                max_queued: max_queued_changes as i64,
+                max_queued,
             }),
-            flush_batch_threshold: flush_batch_threshold as usize,
-            flush_interval_ms: flush_interval_ms as u64,
+            resolved_config,
             per_table_lsn: HashMap::new(),
             per_table_memory: HashMap::new(),
             per_table_flush_count: HashMap::new(),
             per_table_flush_duration: HashMap::new(),
             per_table_avg_row_bytes: HashMap::new(),
             target_to_mapping: HashMap::new(),
-            buffer_memory_mb,
-            flush_memory_mb,
-            flush_gate: Arc::new(FlushGate::new(
-                max_concurrent_flushes as usize,
-                Duration::from_millis(flush_interval_ms as u64),
-            )),
+            flush_gate: Arc::new(FlushGate::new(max_concurrent, Duration::from_millis(5000))),
         }
     }
 
@@ -482,10 +468,9 @@ impl FlushCoordinator {
         let group_name = self.group_name.clone();
         let bp = Arc::clone(&self.backpressure);
         let fg = Arc::clone(&self.flush_gate);
-        let batch_threshold = self.flush_batch_threshold;
-        let interval_ms = self.flush_interval_ms;
-        let buffer_memory_mb = self.buffer_memory_mb;
-        let flush_memory_mb = self.flush_memory_mb;
+        let batch_threshold = self.resolved_config.flush_batch_threshold as usize;
+        let interval_ms = self.resolved_config.flush_interval_ms as u64;
+        let resolved_config = self.resolved_config.clone();
 
         let join_handle = std::thread::Builder::new()
             .name(format!("duckpipe-flush-{}", target_key))
@@ -503,8 +488,7 @@ impl FlushCoordinator {
                     fg,
                     batch_threshold,
                     interval_ms,
-                    buffer_memory_mb,
-                    flush_memory_mb,
+                    resolved_config,
                 );
             })
             .expect("failed to spawn flush thread");
@@ -942,8 +926,7 @@ fn flush_thread_main(
     flush_gate: Arc<FlushGate>,
     batch_threshold: usize,
     flush_interval_ms: u64,
-    buffer_memory_mb: i32,
-    flush_memory_mb: i32,
+    resolved_config: ResolvedConfig,
 ) {
     // Each flush thread owns its own tokio runtime for async PG metadata updates.
     // This avoids deadlock with the main thread's current_thread runtime, since
@@ -1045,12 +1028,7 @@ fn flush_thread_main(
 
                 // Ensure FlushWorker exists before appending
                 if worker.is_none() {
-                    match FlushWorker::new(
-                        pg_connstr,
-                        ducklake_schema,
-                        buffer_memory_mb,
-                        flush_memory_mb,
-                    ) {
+                    match FlushWorker::new(pg_connstr, ducklake_schema, &resolved_config) {
                         Ok(w) => worker = Some(w),
                         Err(e) => {
                             let error_msg = format!("failed to create FlushWorker: {}", e);

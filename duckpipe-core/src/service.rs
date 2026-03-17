@@ -33,18 +33,6 @@ pub struct ServiceConfig {
     pub duckdb_pg_connstr: String,
     /// DuckLake metadata schema name (e.g., "ducklake")
     pub ducklake_schema: String,
-    /// Flush interval in ms for self-triggered flush (default 5000)
-    pub flush_interval_ms: i32,
-    /// Number of queued changes that triggers an immediate flush (default 10000)
-    pub flush_batch_threshold: i32,
-    /// DuckDB memory limit in MB during buffer accumulation (default 16)
-    pub duckdb_buffer_memory_mb: i32,
-    /// DuckDB memory limit in MB during flush/compaction (default 512)
-    pub duckdb_flush_memory_mb: i32,
-    /// Maximum total queued changes before backpressure pauses WAL consumption (default 500000)
-    pub max_queued_changes: i32,
-    /// Maximum concurrent flush operations per group (default 4)
-    pub max_concurrent_flushes: i32,
 }
 
 /// How often the per-slot relation cache refreshes `enabled` (and `state`) from PG.

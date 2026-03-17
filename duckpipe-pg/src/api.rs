@@ -2,6 +2,7 @@ use pgrx::datum::{DatumWithOid, TimestampWithTimeZone};
 use pgrx::prelude::*;
 
 use duckpipe_core::listen;
+use duckpipe_core::types::{GroupConfig, ResolvedConfig};
 
 use crate::DATA_INLINING_ROW_LIMIT;
 
@@ -1936,4 +1937,224 @@ fn terminate_group_worker(group_name: &str) {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Config API functions
+// ---------------------------------------------------------------------------
+
+/// Set a global config key-value pair (UPSERT into duckpipe.global_config).
+#[pg_extern(sql = "
+CREATE FUNCTION duckpipe.set_config(
+    key TEXT,
+    value TEXT
+) RETURNS void
+AS 'MODULE_PATHNAME', '@FUNCTION_NAME@'
+LANGUAGE C STRICT;
+")]
+fn set_config(key: &str, value: &str) {
+    // Validate key and value
+    if let Err(e) = GroupConfig::validate_key(key, value) {
+        error!("{}", e);
+    }
+
+    log!("pg_duckpipe: set_config('{}', '{}')", key, value);
+
+    Spi::connect_mut(|client| {
+        let args = unsafe {
+            [
+                DatumWithOid::new(key, PgBuiltInOids::TEXTOID.value()),
+                DatumWithOid::new(value, PgBuiltInOids::TEXTOID.value()),
+            ]
+        };
+        client
+            .update(
+                "INSERT INTO duckpipe.global_config (key, value) VALUES ($1, $2)
+                 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+                None,
+                &args,
+            )
+            .unwrap();
+    });
+}
+
+/// Get a global config value. If key is NULL, returns all config as JSON.
+#[pg_extern(sql = "
+CREATE FUNCTION duckpipe.get_config(
+    key TEXT DEFAULT NULL
+) RETURNS TEXT
+AS 'MODULE_PATHNAME', '@FUNCTION_NAME@'
+LANGUAGE C;
+")]
+fn get_config(key: default!(Option<&str>, "NULL")) -> Option<String> {
+    Spi::connect(|client| {
+        match key {
+            Some(k) => {
+                // Return single key value
+                let args = unsafe { [DatumWithOid::new(k, PgBuiltInOids::TEXTOID.value())] };
+                let result = client
+                    .select(
+                        "SELECT value FROM duckpipe.global_config WHERE key = $1",
+                        Some(1),
+                        &args,
+                    )
+                    .unwrap();
+                for row in result {
+                    return row.get::<String>(1).unwrap();
+                }
+                None
+            }
+            None => {
+                // Return all as JSON
+                let result = client
+                    .select("SELECT key, value FROM duckpipe.global_config", None, &[])
+                    .unwrap();
+                let mut kv_rows: Vec<(String, String)> = Vec::new();
+                for row in result {
+                    let k: String = row.get::<String>(1).unwrap().unwrap_or_default();
+                    let v: String = row.get::<String>(2).unwrap().unwrap_or_default();
+                    kv_rows.push((k, v));
+                }
+                let config = GroupConfig::from_kv_rows(&kv_rows);
+                Some(config.to_json_string())
+            }
+        }
+    })
+}
+
+/// Set a per-group config key-value override.
+#[pg_extern(sql = "
+CREATE FUNCTION duckpipe.set_group_config(
+    group_name TEXT,
+    key TEXT,
+    value TEXT
+) RETURNS void
+AS 'MODULE_PATHNAME', '@FUNCTION_NAME@'
+LANGUAGE C STRICT;
+")]
+fn set_group_config(group_name: &str, key: &str, value: &str) {
+    // Validate key and value
+    if let Err(e) = GroupConfig::validate_key(key, value) {
+        error!("{}", e);
+    }
+
+    log!(
+        "pg_duckpipe: set_group_config('{}', '{}', '{}')",
+        group_name,
+        key,
+        value
+    );
+
+    Spi::connect_mut(|client| {
+        // Lock the row to prevent concurrent read-modify-write race
+        let args = unsafe {
+            [DatumWithOid::new(
+                group_name,
+                PgBuiltInOids::TEXTOID.value(),
+            )]
+        };
+        let result = client
+            .update(
+                "SELECT config::text FROM duckpipe.sync_groups WHERE name = $1 FOR UPDATE",
+                Some(1),
+                &args,
+            )
+            .unwrap();
+        let mut found = false;
+        let mut config = GroupConfig::default();
+        for row in result {
+            found = true;
+            if let Some(config_str) = row.get::<String>(1).unwrap() {
+                config = GroupConfig::from_json_str(&config_str).unwrap_or_default();
+            }
+        }
+        if !found {
+            error!("sync group '{}' does not exist", group_name);
+        }
+
+        // Set the key in the config
+        config.set_key(key, value).unwrap();
+        let config_json = config.to_json_string();
+
+        let update_args = unsafe {
+            [
+                DatumWithOid::new(config_json.as_str(), PgBuiltInOids::TEXTOID.value()),
+                DatumWithOid::new(group_name, PgBuiltInOids::TEXTOID.value()),
+            ]
+        };
+        client
+            .update(
+                "UPDATE duckpipe.sync_groups SET config = $1::jsonb WHERE name = $2",
+                None,
+                &update_args,
+            )
+            .unwrap();
+    });
+}
+
+/// Get a per-group config value (resolved: hardcoded defaults <- global <- group).
+/// If key is NULL, returns fully resolved config as JSON.
+#[pg_extern(sql = "
+CREATE FUNCTION duckpipe.get_group_config(
+    group_name TEXT,
+    key TEXT DEFAULT NULL
+) RETURNS TEXT
+AS 'MODULE_PATHNAME', '@FUNCTION_NAME@'
+LANGUAGE C;
+")]
+fn get_group_config(group_name: &str, key: default!(Option<&str>, "NULL")) -> Option<String> {
+    Spi::connect(|client| {
+        // Read global config
+        let global_result = client
+            .select("SELECT key, value FROM duckpipe.global_config", None, &[])
+            .unwrap();
+        let mut kv_rows: Vec<(String, String)> = Vec::new();
+        for row in global_result {
+            let k: String = row.get::<String>(1).unwrap().unwrap_or_default();
+            let v: String = row.get::<String>(2).unwrap().unwrap_or_default();
+            kv_rows.push((k, v));
+        }
+        let global = GroupConfig::from_kv_rows(&kv_rows);
+
+        // Read per-group config
+        let args = unsafe {
+            [DatumWithOid::new(
+                group_name,
+                PgBuiltInOids::TEXTOID.value(),
+            )]
+        };
+        let result = client
+            .select(
+                "SELECT config::text FROM duckpipe.sync_groups WHERE name = $1",
+                Some(1),
+                &args,
+            )
+            .unwrap();
+        let mut found = false;
+        let mut group_config = GroupConfig::default();
+        for row in result {
+            found = true;
+            if let Some(config_str) = row.get::<String>(1).unwrap() {
+                group_config = GroupConfig::from_json_str(&config_str).unwrap_or_default();
+            }
+        }
+        if !found {
+            error!("sync group '{}' does not exist", group_name);
+        }
+
+        let resolved = ResolvedConfig::resolve(&global, &group_config);
+
+        match key {
+            Some(k) => match resolved.get_key(k) {
+                Some(v) => Some(v),
+                None => {
+                    error!(
+                        "unknown config key: '{}'. Valid keys: duckdb_buffer_memory_mb, duckdb_flush_memory_mb, duckdb_threads, flush_interval_ms, flush_batch_threshold, max_concurrent_flushes, max_queued_changes",
+                        k
+                    );
+                }
+            },
+            None => Some(resolved.to_group_config().to_json_string()),
+        }
+    })
 }

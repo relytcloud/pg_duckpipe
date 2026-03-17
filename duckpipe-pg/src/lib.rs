@@ -272,12 +272,6 @@ pub(crate) static BATCH_SIZE_PER_GROUP: GucSetting<i32> = GucSetting::<i32>::new
 pub(crate) static ENABLED: GucSetting<bool> = GucSetting::<bool>::new(true);
 pub(crate) static DEBUG_LOG: GucSetting<bool> = GucSetting::<bool>::new(false);
 pub(crate) static DATA_INLINING_ROW_LIMIT: GucSetting<i32> = GucSetting::<i32>::new(0);
-pub(crate) static FLUSH_INTERVAL: GucSetting<i32> = GucSetting::<i32>::new(5000);
-pub(crate) static FLUSH_BATCH_THRESHOLD: GucSetting<i32> = GucSetting::<i32>::new(10000);
-pub(crate) static MAX_QUEUED_CHANGES: GucSetting<i32> = GucSetting::<i32>::new(500000);
-pub(crate) static DUCKDB_BUFFER_MEMORY_MB: GucSetting<i32> = GucSetting::<i32>::new(16);
-pub(crate) static DUCKDB_FLUSH_MEMORY_MB: GucSetting<i32> = GucSetting::<i32>::new(512);
-pub(crate) static MAX_CONCURRENT_FLUSHES: GucSetting<i32> = GucSetting::<i32>::new(4);
 
 #[pg_guard]
 extern "C-unwind" fn _PG_init() {
@@ -345,72 +339,6 @@ extern "C-unwind" fn _PG_init() {
         0,
         1000000,
         GucContext::Userset,
-        GucFlags::empty(),
-    );
-
-    GucRegistry::define_int_guc(
-        c"duckpipe.flush_interval",
-        c"Flush interval in milliseconds for self-triggered flush",
-        c"Flush interval in milliseconds for self-triggered flush",
-        &FLUSH_INTERVAL,
-        100,
-        i32::MAX,
-        GucContext::Sighup,
-        GucFlags::UNIT_MS,
-    );
-
-    GucRegistry::define_int_guc(
-        c"duckpipe.flush_batch_threshold",
-        c"Number of queued changes that triggers an immediate flush",
-        c"Number of queued changes that triggers an immediate flush",
-        &FLUSH_BATCH_THRESHOLD,
-        100,
-        1000000,
-        GucContext::Sighup,
-        GucFlags::empty(),
-    );
-
-    GucRegistry::define_int_guc(
-        c"duckpipe.max_queued_changes",
-        c"Maximum total queued changes before backpressure pauses WAL consumption",
-        c"Maximum total queued changes before backpressure pauses WAL consumption",
-        &MAX_QUEUED_CHANGES,
-        1000,
-        10000000,
-        GucContext::Sighup,
-        GucFlags::empty(),
-    );
-
-    GucRegistry::define_int_guc(
-        c"duckpipe.duckdb_buffer_memory_mb",
-        c"DuckDB memory limit in MB during buffer accumulation (low limit for spilling)",
-        c"DuckDB memory limit in MB during buffer accumulation (low limit for spilling)",
-        &DUCKDB_BUFFER_MEMORY_MB,
-        1,
-        4096,
-        GucContext::Sighup,
-        GucFlags::empty(),
-    );
-
-    GucRegistry::define_int_guc(
-        c"duckpipe.duckdb_flush_memory_mb",
-        c"DuckDB memory limit in MB during flush/compaction (high limit for performance)",
-        c"DuckDB memory limit in MB during flush/compaction (high limit for performance)",
-        &DUCKDB_FLUSH_MEMORY_MB,
-        16,
-        65536,
-        GucContext::Sighup,
-        GucFlags::empty(),
-    );
-
-    GucRegistry::define_int_guc(
-        c"duckpipe.max_concurrent_flushes",
-        c"Maximum concurrent flush operations per sync group",
-        c"Maximum concurrent flush operations per sync group",
-        &MAX_CONCURRENT_FLUSHES,
-        1,
-        1000,
-        GucContext::Sighup,
         GucFlags::empty(),
     );
 }

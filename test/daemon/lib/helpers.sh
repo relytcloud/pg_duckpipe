@@ -90,6 +90,10 @@ pg_install_extensions() {
     # Switch the default group to daemon mode so add_table() won't auto-start
     # the PG bgworker (the daemon binary manages replication instead).
     run_sql "UPDATE duckpipe.sync_groups SET mode = 'daemon' WHERE name = 'default';"
+
+    # Set fast flush config for E2E tests (defaults are tuned for production, not testing)
+    run_sql "SELECT duckpipe.set_config('flush_interval_ms', '200');"
+    run_sql "SELECT duckpipe.set_config('flush_batch_threshold', '100');"
 }
 
 pg_stop_instance() {
@@ -110,8 +114,6 @@ _daemon_launch() {
     "$DUCKPIPE_BIN" \
         --connstr "$connstr" \
         --poll-interval 200 \
-        --flush-interval 200 \
-        --flush-batch-threshold 100 \
         "$@" \
         >"$DAEMON_LOG" 2>&1 &
     DAEMON_PID=$!
