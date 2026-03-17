@@ -195,6 +195,8 @@ pub struct FlushWorker {
     cached_pk_cols: Option<Vec<String>>,
     /// Cached from `ensure_buffer()` — quoted all column identifiers.
     cached_all_cols: Option<Vec<String>>,
+    /// Cached from `ensure_buffer()` — sum of fixed_bytes_for_oid across all columns.
+    cached_fixed_row_bytes: usize,
     /// True while this worker may encounter duplicate PKs between the lake and an
     /// incoming pure-insert batch (e.g., during WAL replay after initial snapshot
     /// or after a resync).  The DELETE step is always run while this flag is set.
@@ -265,6 +267,7 @@ impl FlushWorker {
             cached_all_cols: None,
             may_have_conflicts: true,
             flush_memory_limit,
+            cached_fixed_row_bytes: 0,
         })
     }
 
@@ -280,6 +283,7 @@ impl FlushWorker {
         target_key: &str,
         attnames: &[String],
         key_attrs: &[usize],
+        atttypes: &[u32],
     ) -> Result<(), String> {
         if self.buffer_exists {
             return Ok(());
@@ -332,6 +336,7 @@ impl FlushWorker {
 
         self.buffer_exists = true;
         self.has_non_inserts = false;
+        self.cached_fixed_row_bytes = atttypes.iter().map(|&oid| fixed_bytes_for_oid(oid)).sum();
         Ok(())
     }
 
@@ -354,7 +359,7 @@ impl FlushWorker {
             return Ok((seq_start, 0));
         }
 
-        self.ensure_buffer(target_key, attnames, key_attrs)?;
+        self.ensure_buffer(target_key, attnames, key_attrs, atttypes)?;
 
         // Track non-inserts (short-circuits if already true)
         if !self.has_non_inserts {
@@ -374,7 +379,7 @@ impl FlushWorker {
 
         let ncols = attnames.len();
         let mut seq = seq_start;
-        let fixed_row_bytes: usize = atttypes.iter().map(|&oid| fixed_bytes_for_oid(oid)).sum();
+        let fixed_row_bytes = self.cached_fixed_row_bytes;
         let mut var_total: usize = 0;
 
         {
