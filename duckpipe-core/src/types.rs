@@ -134,17 +134,18 @@ pub struct TableMapping {
 
 /// Fixed byte size for a column type OID. Returns 0 for variable-length types (text, jsonb, etc).
 pub fn fixed_bytes_for_oid(oid: u32) -> usize {
+    // Only list types that parse_text_value() decodes into fixed Value variants.
+    // Types decoded as Value::Text (date, timestamp, uuid, etc.) are sized via
+    // Value::var_bytes() instead — listing them here would double-count.
     match oid {
-        16 => 1,          // bool
-        21 => 2,          // int2
-        23 => 4,          // int4
-        20 => 8,          // int8
-        700 => 4,         // float4
-        701 => 8,         // float8
-        26 => 4,          // oid
-        1082 => 4,        // date
-        1114 | 1184 => 8, // timestamp / timestamptz
-        _ => 0,           // text, varchar, jsonb, etc — variable
+        16 => 1,  // bool
+        21 => 2,  // int2
+        23 => 4,  // int4
+        20 => 8,  // int8
+        700 => 4, // float4
+        701 => 8, // float8
+        26 => 4,  // oid (parsed as int4)
+        _ => 0,   // text, varchar, jsonb, date, timestamp, uuid, etc — variable
     }
 }
 
