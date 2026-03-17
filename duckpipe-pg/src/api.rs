@@ -1664,6 +1664,7 @@ fn metrics() -> String {
                     "{{\"group\":{},\"source_table\":{},\"state\":{},\"rows_synced\":{},\
                      \"queued_changes\":{},\"duckdb_memory_bytes\":{},\
                      \"consecutive_failures\":{},\"flush_count\":{},\"flush_duration_ms\":{},\
+                     \"avg_row_bytes\":{},\
                      \"snapshot_duration_ms\":{},\"snapshot_rows\":{},\"applied_lsn\":{}}}",
                     json_str(&group_name),
                     json_str(&source_table),
@@ -1674,6 +1675,7 @@ fn metrics() -> String {
                     consecutive_failures,
                     tm.flush_count,
                     tm.flush_duration_ms,
+                    tm.avg_row_bytes,
                     json_opt_i64(snapshot_duration_ms),
                     json_opt_i64(snapshot_rows),
                     json_opt_str(applied_lsn.as_deref()),

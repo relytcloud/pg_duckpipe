@@ -74,6 +74,7 @@
 - [ ] Per-group config (`sync_groups.config JSONB`) — persistent per-group settings accessible from both bgworker and daemon modes; SQL API `set_group_config(group, key, value)` / `get_group_config(group)`; initial keys: `duckdb_buffer_memory_mb` (default 16), `duckdb_flush_memory_mb` (default 512), `duckdb_threads` (default 1); these are currently global GUCs pending migration; future: migrate `flush_interval_ms`, `flush_batch_threshold`, `max_queued_changes` from GUCs; NULL/absent keys fall back to global defaults
 - [ ] Staged storage between WAL and DuckLake — persist changes into a durable intermediate delta/staging layer, then merge/rewrite into DuckLake in larger maintenance-friendly jobs so CDC durability is decoupled from DuckLake file proliferation
 - [x] `conninfo` column in sync_groups for remote PG support — group-level conninfo routes WAL replication, snapshots, and catalog queries to a remote PG while metadata and DuckLake targets stay local. `create_group(conninfo=>...)` creates slot+publication on remote, `add_table()` introspects remote pg_catalog for explicit DDL, `remove_table()`/`drop_group()` clean up remote objects. Shared `connstr` module extracted to `duckpipe-core/src/connstr.rs`.
+- [ ] Explicit `Value` variants for more PG types — currently only bool, int2/4/8, float4/8 are parsed into typed variants; all other types (date, timestamp, timestamptz, uuid, numeric, interval, etc.) fall through to `Value::Text` in `parse_text_value()`. Adding dedicated variants enables accurate `fixed_bytes_for_oid` sizing, avoids text-encoding overhead in the DuckDB Appender path, and opens the door to type-specific optimizations
 - [ ] Schema DDL sync (ALTER TABLE ADD/DROP COLUMN propagation)
 - [ ] Sync tables with no PK (ensure e2e EOS)
 - [ ] CI: `cargo chef` pattern for cached Rust dependency compilation
@@ -83,7 +84,7 @@
 - [x] Daemon HTTP `GET /metrics` endpoint — returns JSON merging FlushCoordinator in-memory metrics with PG persisted data; same shape as PG `duckpipe.metrics()` function
 - [ ] Replication lag in `status()` — compute `pg_current_wal_lsn() - applied_lsn` as `lag_bytes`; needs special handling for remote groups (lag is relative to remote WAL tip, not local)
 - [ ] Prometheus text rendering — expose metrics as Prometheus-compatible text format via external tools (postgres_exporter, JSON exporter) or native endpoint
-- [ ] Per-table `avg_row_bytes` metric — track cumulative bytes and row count during `append_to_buffer()`, expose `avg_row_bytes` in `status()` / `metrics()` for capacity planning and byte-based flush threshold
+- [x] Per-table `avg_row_bytes` metric — track cumulative bytes and row count during `append_to_buffer()`, expose `avg_row_bytes` in `status()` / `metrics()` for capacity planning and byte-based flush threshold
 - [ ] `applied_lsn` stays NULL during SNAPSHOT/CATCHUP — should be set to `snapshot_lsn` after snapshot completes
 - [x] `worker_state` not updated during snapshot processing — resolved: observability metrics moved to SHM, updated every cycle regardless of snapshot state
 - [x] Flush runtime stats for fixed-interval scraping — `flush_count` and `flush_duration_ms` now tracked in SHM and exposed via `status()` and `metrics()`

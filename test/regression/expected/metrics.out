@@ -37,13 +37,14 @@ SELECT
   (t->>'consecutive_failures')::int AS consecutive_failures,
   (t->>'flush_count')::bigint AS flush_count,
   (t->>'flush_duration_ms')::bigint AS flush_duration_ms,
+  (t->>'avg_row_bytes')::bigint AS avg_row_bytes,
   (t->>'snapshot_duration_ms') IS NOT NULL AS has_snapshot_duration_key,
   (t->>'snapshot_rows') IS NOT NULL AS has_snapshot_rows_key,
   (t->>'applied_lsn') IS NOT NULL AS has_applied_lsn_key
 FROM jsonb_array_elements((duckpipe.metrics()::jsonb)->'tables') AS t;
- group_name |    source_table     |   state   | rows_synced | queued_changes | duckdb_memory_bytes | consecutive_failures | flush_count | flush_duration_ms | has_snapshot_duration_key | has_snapshot_rows_key | has_applied_lsn_key 
-------------+---------------------+-----------+-------------+----------------+---------------------+----------------------+-------------+-------------------+---------------------------+-----------------------+---------------------
- default    | public.metrics_test | STREAMING |           0 |              0 |                   0 |                    0 |           0 |                 0 | f                         | f                     | f
+ group_name |    source_table     |   state   | rows_synced | queued_changes | duckdb_memory_bytes | consecutive_failures | flush_count | flush_duration_ms | avg_row_bytes | has_snapshot_duration_key | has_snapshot_rows_key | has_applied_lsn_key 
+------------+---------------------+-----------+-------------+----------------+---------------------+----------------------+-------------+-------------------+---------------+---------------------------+-----------------------+---------------------
+ default    | public.metrics_test | STREAMING |           0 |              0 |                   0 |                    0 |           0 |                 0 |             0 | f                         | f                     | f
 (1 row)
 
 -- Verify the group entry has expected fields

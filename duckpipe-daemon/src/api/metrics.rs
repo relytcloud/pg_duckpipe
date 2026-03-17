@@ -67,6 +67,7 @@ pub async fn get_metrics(
                 "consecutive_failures": r.get::<_, i32>("consecutive_failures"),
                 "flush_count": tm.flush_count,
                 "flush_duration_ms": tm.flush_duration_ms,
+                "avg_row_bytes": tm.avg_row_bytes,
                 "snapshot_duration_ms": r.get::<_, Option<i64>>("snapshot_duration_ms"),
                 "snapshot_rows": r.get::<_, Option<i64>>("snapshot_rows"),
                 "applied_lsn": r.get::<_, Option<String>>("applied_lsn"),

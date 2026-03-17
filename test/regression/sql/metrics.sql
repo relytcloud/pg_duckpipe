@@ -20,6 +20,7 @@ SELECT
   (t->>'consecutive_failures')::int AS consecutive_failures,
   (t->>'flush_count')::bigint AS flush_count,
   (t->>'flush_duration_ms')::bigint AS flush_duration_ms,
+  (t->>'avg_row_bytes')::bigint AS avg_row_bytes,
   (t->>'snapshot_duration_ms') IS NOT NULL AS has_snapshot_duration_key,
   (t->>'snapshot_rows') IS NOT NULL AS has_snapshot_rows_key,
   (t->>'applied_lsn') IS NOT NULL AS has_applied_lsn_key
