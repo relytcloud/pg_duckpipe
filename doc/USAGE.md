@@ -65,6 +65,23 @@ SELECT duckpipe.disable_group('analytics');
 SELECT duckpipe.drop_group('analytics');
 ```
 
+### Fan-In Streaming
+
+Multiple source tables can sync into a single DuckLake target, with automatic source tagging and full DML isolation:
+
+```sql
+-- First source — adds normally
+SELECT duckpipe.add_table('public.orders_us', 'public.orders_ducklake');
+
+-- Second source — requires fan_in => true
+SELECT duckpipe.add_table('public.orders_eu', 'public.orders_ducklake', 'default', true, true);
+
+-- Query with source provenance
+SELECT id, product, _duckpipe_source FROM orders_ducklake;
+```
+
+See **[Fan-In Streaming](FAN_IN.md)** for use cases, cross-group fan-in, monitoring, and operational details.
+
 ### Remote Sync
 
 Sync tables from a remote PostgreSQL instance by providing a `conninfo` connection string:
