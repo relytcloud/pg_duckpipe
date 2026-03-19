@@ -89,7 +89,7 @@ All operations are scoped to the originating source:
 - **DELETE** on `orders_eu` only removes rows tagged `default/public.orders_eu`
 - **TRUNCATE** on `orders_us` translates to `DELETE ... WHERE _duckpipe_source = 'default/public.orders_us'` — other sources are untouched
 
-**Performance note:** fan-in targets are slower to write than single-source targets because each flush must clear old rows before inserting new ones to keep sources isolated. For write-heavy workloads, increase `flush_batch_threshold` so each flush processes more rows at once, reducing the overhead per row.
+**Performance:** fan-in does not degrade write performance compared to single-source sync. The heaviest operations (dedup, delete, update) are scoped to each source independently, so adding more sources does not increase the work per flush.
 
 ## Monitoring and Operations
 
