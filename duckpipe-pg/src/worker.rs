@@ -427,4 +427,28 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
 
     coordinator.shutdown();
     log!("pg_duckpipe [{}] worker shutting down", group_name);
+
+    // On Linux, DuckDB's C++ static destructors (registered via __cxa_atexit by
+    // libduckdb.so, pg_duckdb.so, and the ducklake extension) cause a double-free
+    // crash when proc_exit() → exit() runs the atexit handlers.
+    //
+    // Register an atexit handler that calls _exit() to terminate the process
+    // before the C++ destructors fire.  Since atexit handlers are LIFO and we
+    // register AFTER DuckDB's shared libraries loaded their destructors (during
+    // shared_preload_libraries), our handler runs FIRST — pre-empting the
+    // destructors.  All PG cleanup (proc_exit_prepare, shmem_exit) completes
+    // normally before exit() invokes atexit handlers, so this is safe.
+    #[cfg(target_os = "linux")]
+    unsafe {
+        unsafe extern "C" fn force_exit() {
+            extern "C" {
+                fn _exit(status: i32) -> !;
+            }
+            _exit(0);
+        }
+        extern "C" {
+            fn atexit(func: unsafe extern "C" fn()) -> i32;
+        }
+        atexit(force_exit);
+    }
 }

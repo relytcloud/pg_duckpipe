@@ -58,6 +58,7 @@ CREATE TABLE duckpipe.global_config (
     value  TEXT NOT NULL
 );
 INSERT INTO duckpipe.global_config VALUES
+    ('drain_poll_ms', '100'),
     ('duckdb_buffer_memory_mb', '16'),
     ('duckdb_flush_memory_mb', '512'),
     ('duckdb_threads', '1'),

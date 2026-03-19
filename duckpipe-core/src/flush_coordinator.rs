@@ -343,6 +343,7 @@ impl FlushCoordinator {
         let (tx, rx) = mpsc::channel();
         let max_queued = resolved_config.max_queued_changes as i64;
         let max_concurrent = resolved_config.max_concurrent_flushes as usize;
+        let flush_interval = Duration::from_millis(resolved_config.flush_interval_ms as u64);
         FlushCoordinator {
             pg_connstr,
             ducklake_schema,
@@ -362,7 +363,7 @@ impl FlushCoordinator {
             per_table_flush_duration: HashMap::new(),
             per_table_avg_row_bytes: HashMap::new(),
             target_to_mapping: HashMap::new(),
-            flush_gate: Arc::new(FlushGate::new(max_concurrent, Duration::from_millis(5000))),
+            flush_gate: Arc::new(FlushGate::new(max_concurrent, flush_interval)),
         }
     }
 
@@ -508,6 +509,9 @@ impl FlushCoordinator {
 
     /// Push a change into the shared queue for the given target table.
     /// The target queue must have been created via `ensure_queue()`.
+    ///
+    /// The flush thread wakes on its own via `drain_poll_ms` condvar timeout,
+    /// so no explicit notification is needed after pushing changes.
     pub fn push_change(&self, target_key: &str, change: Change) {
         if let Some(entry) = self.threads.get(target_key) {
             let mut guard = entry.queue_handle.inner.lock().unwrap();
@@ -523,7 +527,6 @@ impl FlushCoordinator {
                     .snapshot_queued
                     .fetch_add(1, Ordering::Relaxed);
             }
-            entry.queue_handle.condvar.notify_one();
         }
     }
 
@@ -944,18 +947,22 @@ fn flush_thread_main(
     let mut next_seq: i32 = 0; // monotonic counter for _seq across appends
     let mut last_flush = Instant::now();
     let flush_interval = Duration::from_millis(flush_interval_ms);
+    let drain_poll = Duration::from_millis(resolved_config.drain_poll_ms as u64);
 
     loop {
-        // Calculate remaining time until next time-based flush
+        // Calculate wait_timeout: how long the condvar blocks before waking.
+        // drain_poll controls how frequently the thread checks for new data (cheap).
+        // flush_interval controls how often data is written to DuckLake (expensive).
         let elapsed = last_flush.elapsed();
-        let wait_timeout = if buffered_count == 0 {
-            // No buffered changes — wait for full interval
-            flush_interval
-        } else if elapsed >= flush_interval {
-            // Already past interval — don't wait
+        let wait_timeout = if buffered_count > 0 && elapsed >= flush_interval {
+            // Time to flush — don't wait
             Duration::ZERO
+        } else if buffered_count > 0 {
+            // Data buffered but not yet time to flush — drain fast, flush on time
+            drain_poll.min(flush_interval - elapsed)
         } else {
-            flush_interval - elapsed
+            // Idle: just check for new data at the drain poll rate
+            drain_poll
         };
 
         // Lock shared queue, drain new changes and check signals
