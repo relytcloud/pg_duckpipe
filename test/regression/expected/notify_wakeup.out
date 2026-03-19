@@ -90,10 +90,10 @@ SELECT pg_sleep(8);
 -- Verify data was copied (proves the worker woke up and processed the
 -- snapshot within 8s, which would be impossible with 30s poll_interval).
 SELECT * FROM public.notify_src_ducklake ORDER BY id;
- id | val 
-----+-----
-  1 | one
-  2 | two
+ id | val |     _duckpipe_source      
+----+-----+---------------------------
+  1 | one | default/public.notify_src
+  2 | two | default/public.notify_src
 (2 rows)
 
 -- Cleanup: restore poll_interval before stopping.

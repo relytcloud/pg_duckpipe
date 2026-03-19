@@ -87,11 +87,12 @@ SELECT column_name, data_type
 FROM information_schema.columns
 WHERE table_schema = 'public' AND table_name = 't_remote_ducklake'
 ORDER BY ordinal_position;
- column_name | data_type 
--------------+-----------
- id          | integer
- val         | text
-(2 rows)
+   column_name    | data_type 
+------------------+-----------
+ id               | integer
+ val              | text
+ _duckpipe_source | text
+(3 rows)
 
 -- Verify mapping exists with remote source OID
 SELECT source_schema, source_table, target_table, state,
@@ -121,10 +122,10 @@ SELECT pg_sleep(3);
 
 -- Verify data synced
 SELECT * FROM public.t_remote_ducklake ORDER BY id;
- id |  val  
-----+-------
-  1 | alpha
-  2 | beta
+ id |  val  |      _duckpipe_source       
+----+-------+-----------------------------
+  1 | alpha | remote_test/public.t_remote
+  2 | beta  | remote_test/public.t_remote
 (2 rows)
 
 -- Cleanup: stop worker first to avoid concurrent commit issues

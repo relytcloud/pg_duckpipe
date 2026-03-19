@@ -76,6 +76,7 @@ pub async fn process_snapshot_task(
     timing: bool,
     task_id: i32,
     group_name: &str,
+    source_label: String,
 ) -> Result<(u64, u64, u64), String> {
     let table_start = Instant::now();
 
@@ -162,6 +163,7 @@ pub async fn process_snapshot_task(
         let consumer_target_schema = target_schema.to_string();
         let consumer_target_table = target_table.to_string();
         let consumer_timing = timing;
+        let consumer_source_label = source_label.clone();
 
         let consumer_handle = tokio::task::spawn_blocking(move || {
             run_duckdb_consumer(
@@ -171,6 +173,7 @@ pub async fn process_snapshot_task(
                 &consumer_target_schema,
                 &consumer_target_table,
                 consumer_timing,
+                &consumer_source_label,
             )
         });
 
@@ -373,6 +376,7 @@ fn run_duckdb_consumer(
     target_schema: &str,
     target_table: &str,
     timing: bool,
+    source_label: &str,
 ) -> Result<u64, String> {
     let t_start = if timing { Some(Instant::now()) } else { None };
 
@@ -459,11 +463,24 @@ fn run_duckdb_consumer(
         ));
     }
 
-    let quoted_cols: Vec<String> = col_names
+    // Separate source data columns from the _duckpipe_source system column.
+    // CSV data from COPY only contains source columns; _duckpipe_source is added by duckpipe.
+    let source_col_names: Vec<&String> = col_names
+        .iter()
+        .filter(|n| n.to_lowercase() != "_duckpipe_source")
+        .collect();
+    let quoted_source_cols: Vec<String> = source_col_names
         .iter()
         .map(|n| format!("\"{}\"", n.replace('"', "\"\"")))
         .collect();
-    let cols_list = quoted_cols.join(", ");
+    let source_cols_list = quoted_source_cols.join(", ");
+
+    // Full column list including _duckpipe_source for INSERT
+    let quoted_all_cols: Vec<String> = col_names
+        .iter()
+        .map(|n| format!("\"{}\"", n.replace('"', "\"\"")))
+        .collect();
+    let all_cols_list = quoted_all_cols.join(", ");
 
     let target_ref = format!(
         "lake.\"{}\".\"{}\"",
@@ -475,7 +492,12 @@ fn run_duckdb_consumer(
     db.execute_batch("BEGIN")
         .map_err(|e| format!("duckdb begin: {}", e))?;
 
-    let delete_sql = format!("DELETE FROM {}", target_ref);
+    // Scope DELETE by _duckpipe_source (always set)
+    let delete_sql = format!(
+        "DELETE FROM {} WHERE \"_duckpipe_source\" = '{}'",
+        target_ref,
+        source_label.replace('\'', "''")
+    );
     db.execute_batch(&delete_sql).map_err(|e| {
         let _ = db.execute_batch("ROLLBACK");
         format!("duckdb delete: {}", e)
@@ -490,11 +512,14 @@ fn run_duckdb_consumer(
                 chunk_count += 1;
                 let t_chunk = if timing { Some(Instant::now()) } else { None };
 
+                // Build INSERT: source columns from CSV + _duckpipe_source literal
+                let source_value = format!("'{}'", source_label.replace('\'', "''"));
                 let insert_sql = format!(
-                    "INSERT INTO {} ({}) SELECT {} FROM read_csv('{}', header=true, nullstr='__DUCKPIPE_NULL__')",
+                    "INSERT INTO {} ({}) SELECT {}, {} FROM read_csv('{}', header=true, nullstr='__DUCKPIPE_NULL__')",
                     target_ref,
-                    cols_list,
-                    cols_list,
+                    all_cols_list,
+                    source_cols_list,
+                    source_value,
                     path.replace('\'', "''")
                 );
 

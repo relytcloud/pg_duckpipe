@@ -22,10 +22,10 @@ SELECT pg_sleep(2);
 
 -- Verify initial snapshot
 SELECT * FROM public.resync_src_ducklake ORDER BY id;
- id | val 
-----+-----
-  1 | one
-  2 | two
+ id | val |     _duckpipe_source      
+----+-----+---------------------------
+  1 | one | default/public.resync_src
+  2 | two | default/public.resync_src
 (2 rows)
 
 -- Modify source data directly
@@ -52,11 +52,11 @@ SELECT pg_sleep(3);
 
 -- Verify target has current source data
 SELECT * FROM public.resync_src_ducklake ORDER BY id;
- id |  val  
-----+-------
-  1 | one
-  2 | two
-  3 | three
+ id |  val  |     _duckpipe_source      
+----+-------+---------------------------
+  1 | one   | default/public.resync_src
+  2 | two   | default/public.resync_src
+  3 | three | default/public.resync_src
 (3 rows)
 
 SELECT duckpipe.remove_table('public.resync_src', false);

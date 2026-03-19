@@ -28,9 +28,9 @@ SELECT pg_sleep(2);
 
 -- Verify initial sync
 SELECT * FROM public.rename_src_ducklake ORDER BY id;
- id |      val      
-----+---------------
-  1 | before_rename
+ id |      val      |     _duckpipe_source      
+----+---------------+---------------------------
+  1 | before_rename | default/public.rename_src
 (1 row)
 
 -- Verify metadata has original name
@@ -52,10 +52,10 @@ SELECT pg_sleep(3);
 
 -- Verify new data synced to the same target (target name doesn't change)
 SELECT * FROM public.rename_src_ducklake ORDER BY id;
- id |      val      
-----+---------------
-  1 | before_rename
-  2 | after_rename
+ id |      val      |     _duckpipe_source      
+----+---------------+---------------------------
+  1 | before_rename | default/public.rename_src
+  2 | after_rename  | default/public.rename_src
 (2 rows)
 
 -- Verify metadata was updated with new name
@@ -76,9 +76,9 @@ SELECT pg_sleep(2);
 (1 row)
 
 SELECT * FROM public.rename_src_ducklake ORDER BY id;
- id |   val   
-----+---------
-  1 | updated
+ id |   val   |     _duckpipe_source      
+----+---------+---------------------------
+  1 | updated | default/public.rename_src
 (1 row)
 
 -- Cleanup (use new name)

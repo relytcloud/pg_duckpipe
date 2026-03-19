@@ -32,14 +32,16 @@ CREATE TABLE duckpipe.table_mappings (
     queued_changes  BIGINT DEFAULT 0,
     last_sync_at    TIMESTAMPTZ,
     created_at      TIMESTAMPTZ DEFAULT NOW(),
-    source_oid      BIGINT UNIQUE,
+    source_oid      BIGINT,
     error_message   TEXT,
     retry_at        TIMESTAMPTZ,
     consecutive_failures INTEGER DEFAULT 0,
     snapshot_duration_ms BIGINT,
     snapshot_rows        BIGINT,
     duckdb_memory_bytes  BIGINT DEFAULT 0,
-    UNIQUE(source_schema, source_table)
+    source_label    TEXT,
+    UNIQUE(group_id, source_schema, source_table),
+    UNIQUE(group_id, source_oid)
 );
 
 CREATE INDEX ON duckpipe.table_mappings (group_id);

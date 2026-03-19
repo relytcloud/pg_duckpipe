@@ -43,17 +43,17 @@ SELECT pg_sleep(3);
 
 -- Verify both groups synced independently
 SELECT * FROM public.grp_a_t1_ducklake ORDER BY id;
- id |  val  
-----+-------
-  1 | alpha
-  2 | beta
+ id |  val  |    _duckpipe_source     
+----+-------+-------------------------
+  1 | alpha | default/public.grp_a_t1
+  2 | beta  | default/public.grp_a_t1
 (2 rows)
 
 SELECT * FROM public.grp_b_t1_ducklake ORDER BY id;
- id | num 
-----+-----
- 10 | 100
- 20 | 200
+ id | num |    _duckpipe_source     
+----+-----+-------------------------
+ 10 | 100 | group_b/public.grp_b_t1
+ 20 | 200 | group_b/public.grp_b_t1
 (2 rows)
 
 -- UPDATE in group A, DELETE in group B
@@ -66,16 +66,16 @@ SELECT pg_sleep(3);
 (1 row)
 
 SELECT * FROM public.grp_a_t1_ducklake ORDER BY id;
- id |  val  
-----+-------
-  1 | gamma
-  2 | beta
+ id |  val  |    _duckpipe_source     
+----+-------+-------------------------
+  1 | gamma | default/public.grp_a_t1
+  2 | beta  | default/public.grp_a_t1
 (2 rows)
 
 SELECT * FROM public.grp_b_t1_ducklake ORDER BY id;
- id | num 
-----+-----
- 20 | 200
+ id | num |    _duckpipe_source     
+----+-----+-------------------------
+ 20 | 200 | group_b/public.grp_b_t1
 (1 row)
 
 -- Verify each table is in the correct group
@@ -115,11 +115,11 @@ SELECT pg_sleep(3);
 
 -- Group A change should appear, group B should NOT (disabled)
 SELECT * FROM public.grp_a_t1_ducklake ORDER BY id;
- id |  val  
-----+-------
-  1 | gamma
-  2 | beta
-  3 | delta
+ id |  val  |    _duckpipe_source     
+----+-------+-------------------------
+  1 | gamma | default/public.grp_a_t1
+  2 | beta  | default/public.grp_a_t1
+  3 | delta | default/public.grp_a_t1
 (3 rows)
 
 SELECT count(*) AS grp_b_count FROM public.grp_b_t1_ducklake;
@@ -144,10 +144,10 @@ SELECT pg_sleep(3);
 
 -- Group B should now have caught up (WAL was retained by slot)
 SELECT * FROM public.grp_b_t1_ducklake ORDER BY id;
- id | num 
-----+-----
- 20 | 200
- 30 | 300
+ id | num |    _duckpipe_source     
+----+-----+-------------------------
+ 20 | 200 | group_b/public.grp_b_t1
+ 30 | 300 | group_b/public.grp_b_t1
 (2 rows)
 
 -- Cleanup: stop worker first so streaming connections are released

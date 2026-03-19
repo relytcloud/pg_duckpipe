@@ -50,6 +50,7 @@ struct QueueMeta {
     attnames: Vec<String>,
     key_attrs: Vec<usize>,
     atttypes: Vec<u32>,
+    source_label: String,
 }
 
 /// Shared queue data protected by Mutex.
@@ -301,7 +302,7 @@ pub struct FlushCoordinator {
     pg_connstr: String,
     ducklake_schema: String,
     group_name: String,
-    threads: HashMap<String, FlushThreadEntry>,
+    threads: HashMap<i32, FlushThreadEntry>,
     result_tx: mpsc::Sender<FlushThreadResult>,
     result_rx: mpsc::Receiver<FlushThreadResult>,
     backpressure: Arc<BackpressureState>,
@@ -325,9 +326,6 @@ pub struct FlushCoordinator {
     /// Exponential moving average of row bytes per table (alpha=0.3).
     per_table_avg_row_bytes: HashMap<i32, i64>, // mapping_id -> EMA avg_row_bytes
 
-    /// Cache: target_key → mapping_id.  Populated in `ensure_queue`, used in
-    /// `get_min_applied_lsn_in_coordinator` to avoid O(n) mutex locks per call.
-    target_to_mapping: HashMap<String, i32>,
     /// Global-per-group semaphore limiting concurrent flush operations.
     flush_gate: Arc<FlushGate>,
 }
@@ -362,7 +360,6 @@ impl FlushCoordinator {
             per_table_flush_count: HashMap::new(),
             per_table_flush_duration: HashMap::new(),
             per_table_avg_row_bytes: HashMap::new(),
-            target_to_mapping: HashMap::new(),
             flush_gate: Arc::new(FlushGate::new(max_concurrent, flush_interval)),
         }
     }
@@ -401,17 +398,15 @@ impl FlushCoordinator {
         key_attrs: Vec<usize>,
         atttypes: Vec<u32>,
         paused: bool,
+        source_label: String,
     ) {
         // Seed in-memory LSN from the persistent PG value if we haven't seen this table yet.
         // `or_insert` preserves any higher value already tracked from a completed flush.
         self.per_table_lsn
             .entry(mapping_id)
             .or_insert(initial_applied_lsn);
-        // Cache target_key → mapping_id for lock-free lookup in get_min_applied_lsn_in_coordinator.
-        self.target_to_mapping
-            .insert(target_key.to_string(), mapping_id);
         // Check if entry exists and thread is alive
-        let needs_spawn = match self.threads.get(target_key) {
+        let needs_spawn = match self.threads.get(&mapping_id) {
             None => true,
             Some(entry) => match &entry.join_handle {
                 Some(h) => h.is_finished(),
@@ -424,7 +419,7 @@ impl FlushCoordinator {
         }
 
         // If the old thread is finished, join it and remove entry
-        if let Some(mut old) = self.threads.remove(target_key) {
+        if let Some(mut old) = self.threads.remove(&mapping_id) {
             old.control.shutdown.store(true, Ordering::Release);
             old.queue_handle.condvar.notify_one();
             if let Some(h) = old.join_handle.take() {
@@ -438,6 +433,7 @@ impl FlushCoordinator {
             attnames,
             key_attrs,
             atttypes,
+            source_label,
         };
 
         let queue_handle = Arc::new(TableQueueHandle {
@@ -474,7 +470,7 @@ impl FlushCoordinator {
         let resolved_config = self.resolved_config.clone();
 
         let join_handle = std::thread::Builder::new()
-            .name(format!("duckpipe-flush-{}", target_key))
+            .name(format!("duckpipe-flush-{}-m{}", target_key, mapping_id))
             .spawn(move || {
                 flush_thread_main(
                     qh,
@@ -495,7 +491,7 @@ impl FlushCoordinator {
             .expect("failed to spawn flush thread");
 
         self.threads.insert(
-            target_key.to_string(),
+            mapping_id,
             FlushThreadEntry {
                 queue_handle,
                 control,
@@ -512,8 +508,8 @@ impl FlushCoordinator {
     ///
     /// The flush thread wakes on its own via `drain_poll_ms` condvar timeout,
     /// so no explicit notification is needed after pushing changes.
-    pub fn push_change(&self, target_key: &str, change: Change) {
-        if let Some(entry) = self.threads.get(target_key) {
+    pub fn push_change(&self, mapping_id: i32, change: Change) {
+        if let Some(entry) = self.threads.get(&mapping_id) {
             let mut guard = entry.queue_handle.inner.lock().unwrap();
             if change.lsn > guard.last_lsn {
                 guard.last_lsn = change.lsn;
@@ -654,25 +650,25 @@ impl FlushCoordinator {
         }
     }
 
-    /// Remove flush threads, per_table_lsn entries, and target_to_mapping entries
-    /// for tables whose mapping_id is no longer present in PG metadata.
+    /// Remove flush threads and per_table_lsn entries for tables whose mapping_id
+    /// is no longer present in PG metadata.
     ///
     /// Called each cycle with the set of all mapping IDs still in `table_mappings`
     /// (any state). Tables removed via `remove_table()` will not be in this set,
     /// so their stale flush threads are shut down and their frozen per_table_lsn
     /// entries are removed — preventing confirmed_lsn from being held back.
     pub fn prune_removed_tables(&mut self, active_mapping_ids: &HashSet<i32>) {
-        // Find target_keys whose mapping_id is no longer in metadata.
-        let stale_keys: Vec<String> = self
-            .target_to_mapping
-            .iter()
-            .filter(|(_, &id)| !active_mapping_ids.contains(&id))
-            .map(|(key, _)| key.clone())
+        // Find mapping_ids no longer in metadata.
+        let stale_ids: Vec<i32> = self
+            .threads
+            .keys()
+            .filter(|id| !active_mapping_ids.contains(id))
+            .copied()
             .collect();
 
-        for key in &stale_keys {
+        for mapping_id in &stale_ids {
             // Shut down the flush thread and reclaim leaked backpressure counters.
-            if let Some(mut entry) = self.threads.remove(key) {
+            if let Some(mut entry) = self.threads.remove(mapping_id) {
                 // Drain backpressure for any changes still in the shared queue or
                 // local accumulator — push_change() incremented total_queued (and
                 // snapshot_queued if paused) but the thread will never flush them.
@@ -699,13 +695,10 @@ impl FlushCoordinator {
                     let _ = h.join();
                 }
                 tracing::info!(
-                    "pg_duckpipe: pruned stale flush thread for {} (mapping removed)",
-                    key
+                    "pg_duckpipe: pruned stale flush thread for mapping_id={} (mapping removed)",
+                    mapping_id
                 );
             }
-
-            // Remove target_to_mapping entry.
-            self.target_to_mapping.remove(key);
         }
 
         // Final sweep: prune per_table_lsn, per_table_memory, and flush tracking
@@ -726,8 +719,8 @@ impl FlushCoordinator {
 
     /// Per-table synchronous drain: signal one flush thread to drain, wait for completion.
     /// Used for TRUNCATE — must flush pending changes before DELETE.
-    pub fn drain_and_wait_table(&mut self, target_key: &str) {
-        if let Some(entry) = self.threads.get(target_key) {
+    pub fn drain_and_wait_table(&mut self, mapping_id: i32) {
+        if let Some(entry) = self.threads.get(&mapping_id) {
             // Reset drain_complete flag
             {
                 let mut done = entry.drain_complete.0.lock().unwrap();
@@ -751,9 +744,9 @@ impl FlushCoordinator {
     /// Retained for shutdown.
     pub fn drain_and_wait_all(&mut self) -> Vec<FlushThreadResult> {
         // Signal all threads to drain
-        let active_keys: Vec<String> = self.threads.keys().cloned().collect();
+        let active_ids: Vec<i32> = self.threads.keys().copied().collect();
 
-        for key in &active_keys {
+        for key in &active_ids {
             if let Some(entry) = self.threads.get(key) {
                 // Reset drain_complete flag
                 {
@@ -766,8 +759,8 @@ impl FlushCoordinator {
         }
 
         // Wait for each thread to signal drain_complete
-        for key in &active_keys {
-            if let Some(entry) = self.threads.get(key) {
+        for id in &active_ids {
+            if let Some(entry) = self.threads.get(id) {
                 let (lock, cvar) = &*entry.drain_complete;
                 let guard = lock.lock().unwrap();
                 // Wait with timeout to avoid deadlock if thread died
@@ -855,7 +848,6 @@ impl FlushCoordinator {
         self.per_table_flush_count.clear();
         self.per_table_flush_duration.clear();
         self.per_table_avg_row_bytes.clear();
-        self.target_to_mapping.clear();
     }
 
     /// Unpause a table's flush thread after snapshot completion.
@@ -864,8 +856,8 @@ impl FlushCoordinator {
     /// while holding the queue lock. Since `push_change` also holds this lock when
     /// checking `paused` and incrementing `snapshot_queued`, there is no race window
     /// where a concurrent push sees stale `paused=true` after the subtraction.
-    pub fn unpause_table(&self, target_key: &str) {
-        if let Some(entry) = self.threads.get(target_key) {
+    pub fn unpause_table(&self, mapping_id: i32) {
+        if let Some(entry) = self.threads.get(&mapping_id) {
             // Hold queue lock for the entire operation to synchronize with push_change.
             let guard = entry.queue_handle.inner.lock().unwrap();
             let shared = guard.changes.len() as i64;
@@ -1035,7 +1027,12 @@ fn flush_thread_main(
 
                 // Ensure FlushWorker exists before appending
                 if worker.is_none() {
-                    match FlushWorker::new(pg_connstr, ducklake_schema, &resolved_config) {
+                    match FlushWorker::new(
+                        pg_connstr,
+                        ducklake_schema,
+                        &resolved_config,
+                        meta.source_label.clone(),
+                    ) {
                         Ok(w) => worker = Some(w),
                         Err(e) => {
                             let error_msg = format!("failed to create FlushWorker: {}", e);

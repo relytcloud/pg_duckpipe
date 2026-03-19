@@ -21,11 +21,11 @@ SELECT pg_sleep(2);
 (1 row)
 
 SELECT * FROM public.trunc_test_ducklake ORDER BY id;
- id |  val  
-----+-------
-  1 | one
-  2 | two
-  3 | three
+ id |  val  |     _duckpipe_source      
+----+-------+---------------------------
+  1 | one   | default/public.trunc_test
+  2 | two   | default/public.trunc_test
+  3 | three | default/public.trunc_test
 (3 rows)
 
 -- Truncate source table

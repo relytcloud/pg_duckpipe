@@ -109,8 +109,11 @@ fn discover_lake_table_info(
 
     // Build column_types aligned to expected_attnames order.
     // The DuckLake catalog columns should match pgoutput attnames.
+    // Filter out _duckpipe_source — it's a system column managed by duckpipe,
+    // not from pgoutput, so it should not appear in the expected alignment.
     let lake_col_map: std::collections::HashMap<String, String> = col_rows
         .into_iter()
+        .filter(|(name, _)| name.to_lowercase() != "_duckpipe_source")
         .map(|(name, dtype)| (name.to_lowercase(), dtype))
         .collect();
 
@@ -212,6 +215,10 @@ pub struct FlushWorker {
     /// DuckDB memory limit string for the flush phase (e.g. "512MB").
     /// Stored so `flush_buffer()` can raise the limit before compaction.
     flush_memory_limit: String,
+    /// Source label for scoping (e.g. "default/public.orders").
+    /// Injected as a SQL literal into INSERT statements and scopes
+    /// DELETE operations to this label for fan-in isolation.
+    source_label: String,
 }
 
 impl FlushWorker {
@@ -223,6 +230,7 @@ impl FlushWorker {
         pg_connstr: &str,
         ducklake_schema: &str,
         resolved_config: &ResolvedConfig,
+        source_label: String,
     ) -> Result<Self, String> {
         let config = Config::default()
             .allow_unsigned_extensions()
@@ -270,6 +278,7 @@ impl FlushWorker {
             may_have_conflicts: true,
             flush_memory_limit,
             cached_fixed_row_bytes: 0,
+            source_label,
         })
     }
 
@@ -319,7 +328,7 @@ impl FlushWorker {
                 .collect(),
         );
 
-        // Build buffer table schema
+        // Build buffer table schema (no _duckpipe_source — injected as literal at INSERT time)
         let mut buf_cols = Vec::new();
         buf_cols.push("_seq INTEGER".to_string());
         buf_cols.push("_op_type INTEGER".to_string());
@@ -398,6 +407,7 @@ impl FlushWorker {
                     ChangeType::Delete => 2,
                 };
 
+                // +2 = _seq, _op_type
                 let mut row: Vec<Box<dyn duckdb::ToSql>> = Vec::with_capacity(2 + ncols);
                 row.push(Box::new(seq));
                 row.push(Box::new(op_type));
@@ -520,12 +530,18 @@ impl FlushWorker {
             .iter()
             .map(|c| format!("{target_ref}.{c} = compacted.{c}"))
             .collect();
+        // Scope DELETE to only rows from this source (fan-in safe).
+        let source_scope = format!(
+            " AND {target_ref}.\"_duckpipe_source\" = '{}'",
+            self.source_label.replace('\'', "''")
+        );
         let delete_sql = format!(
             "DELETE FROM {target_ref} WHERE EXISTS ( \
                  SELECT 1 FROM compacted WHERE {pk_match} \
-             )",
+             ){source_scope}",
             target_ref = target_ref,
-            pk_match = pk_where.join(" AND ")
+            pk_match = pk_where.join(" AND "),
+            source_scope = source_scope
         );
 
         let t_phase = Instant::now();
@@ -543,13 +559,15 @@ impl FlushWorker {
             self.may_have_conflicts = false;
         }
 
-        // Step 2c: INSERT
+        // Step 2c: INSERT — inject _duckpipe_source as a literal (not stored in buffer)
         let t_phase = Instant::now();
+        let source_literal = format!("'{}'", self.source_label.replace('\'', "''"));
         let insert_sql = format!(
-            "INSERT INTO {target_ref} ({cols}) \
-             SELECT {cols} FROM compacted WHERE _op_type IN (0, 1)",
+            "INSERT INTO {target_ref} ({cols}, \"_duckpipe_source\") \
+             SELECT {cols}, {source_literal} FROM compacted WHERE _op_type IN (0, 1)",
             target_ref = target_ref,
-            cols = all_cols.join(", ")
+            cols = all_cols.join(", "),
+            source_literal = source_literal
         );
         self.db.execute_batch(&insert_sql).map_err(|e| {
             let _ = self.db.execute_batch("ROLLBACK");

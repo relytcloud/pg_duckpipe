@@ -40,10 +40,10 @@ SELECT pg_sleep(3);
 
 -- Verify initial snapshot succeeded
 SELECT * FROM public.snap_err_src_ducklake ORDER BY id;
- id | val 
-----+-----
-  1 | one
-  2 | two
+ id | val |      _duckpipe_source       
+----+-----+-----------------------------
+  1 | one | default/public.snap_err_src
+  2 | two | default/public.snap_err_src
 (2 rows)
 
 -- Step 2: Drop the ducklake target to break future snapshots
@@ -81,6 +81,7 @@ WHERE source_table = 'snap_err_src';
 
 -- Step 5: Fix the problem — recreate the ducklake target
 CREATE TABLE public.snap_err_src_ducklake (LIKE snap_err_src) USING ducklake;
+ALTER TABLE public.snap_err_src_ducklake ADD COLUMN _duckpipe_source text;
 -- Step 6: Force immediate auto-retry by setting retry_at to now
 -- (avoids waiting for the 30s backoff timer)
 UPDATE duckpipe.table_mappings
@@ -113,11 +114,11 @@ SELECT pg_sleep(2);
 (1 row)
 
 SELECT * FROM public.snap_err_src_ducklake ORDER BY id;
- id |  val  
-----+-------
-  1 | one
-  2 | two
-  3 | three
+ id |  val  |      _duckpipe_source       
+----+-------+-----------------------------
+  1 | one   | default/public.snap_err_src
+  2 | two   | default/public.snap_err_src
+  3 | three | default/public.snap_err_src
 (3 rows)
 
 -- Cleanup

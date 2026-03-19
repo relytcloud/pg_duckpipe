@@ -644,21 +644,24 @@ CREATE FUNCTION duckpipe.add_table(
     source_table TEXT,
     target_table TEXT DEFAULT NULL,
     sync_group TEXT DEFAULT 'default',
-    copy_data BOOLEAN DEFAULT true
+    copy_data BOOLEAN DEFAULT true,
+    fan_in BOOLEAN DEFAULT false
 ) RETURNS void
 AS 'MODULE_PATHNAME', '@FUNCTION_NAME@'
 LANGUAGE C;
-REVOKE ALL ON FUNCTION duckpipe.add_table(TEXT, TEXT, TEXT, BOOLEAN) FROM PUBLIC;
+REVOKE ALL ON FUNCTION duckpipe.add_table(TEXT, TEXT, TEXT, BOOLEAN, BOOLEAN) FROM PUBLIC;
 ")]
 fn add_table(
     source_table: &str,
     target_table: Option<&str>,
     sync_group: Option<&str>,
     copy_data: Option<bool>,
+    fan_in: Option<bool>,
 ) {
     let (schema, table) = parse_source_table(source_table);
     let group = sync_group.unwrap_or("default");
     let copy_data = copy_data.unwrap_or(true);
+    let fan_in = fan_in.unwrap_or(false);
 
     let (t_schema, t_table) = if let Some(target) = target_table {
         parse_source_table(target)
@@ -911,12 +914,14 @@ fn add_table(
                 }
             }
         }
-        let col_clauses: Vec<String> = col_defs
+        let mut col_clauses: Vec<String> = col_defs
             .iter()
             .map(|(name, type_str)| {
                 format!("{} {}", quote_ident(name), map_pg_type_for_duckdb(type_str))
             })
             .collect();
+        // Always add _duckpipe_source column for fan-in support
+        col_clauses.push("\"_duckpipe_source\" TEXT".to_string());
         let create_sql = format!(
             "CREATE TABLE IF NOT EXISTS {}.{} ({}) USING ducklake",
             quote_ident(&t_schema),
@@ -926,6 +931,98 @@ fn add_table(
         client
             .update(&create_sql, None, &[])
             .map_err(|e| format!("CREATE TABLE: {}", e))?;
+
+        // Fan-in guard: check if ANY existing mapping targets the same table
+        // (catches both cross-group and same-group fan-in attempts)
+        {
+            let fan_in_args = unsafe {
+                [
+                    DatumWithOid::new(t_schema.as_str(), PgBuiltInOids::TEXTOID.value()),
+                    DatumWithOid::new(t_table.as_str(), PgBuiltInOids::TEXTOID.value()),
+                    DatumWithOid::new(group, PgBuiltInOids::TEXTOID.value()),
+                    DatumWithOid::new(schema.as_str(), PgBuiltInOids::TEXTOID.value()),
+                    DatumWithOid::new(table.as_str(), PgBuiltInOids::TEXTOID.value()),
+                ]
+            };
+            let result = client
+                .select(
+                    "SELECT g.name, m.source_schema, m.source_table FROM duckpipe.table_mappings m \
+                 JOIN duckpipe.sync_groups g ON m.group_id = g.id \
+                 WHERE m.target_schema = $1 AND m.target_table = $2 \
+                 AND NOT (g.name = $3 AND m.source_schema = $4 AND m.source_table = $5) \
+                 LIMIT 1",
+                    Some(1),
+                    &fan_in_args,
+                )
+                .unwrap();
+            let mut existing_group: Option<String> = None;
+            let mut existing_source: Option<String> = None;
+            for r in result {
+                existing_group = r.get::<String>(1).unwrap();
+                let src_schema: Option<String> = r.get::<String>(2).unwrap();
+                let src_table: Option<String> = r.get::<String>(3).unwrap();
+                if let (Some(s), Some(t)) = (src_schema, src_table) {
+                    existing_source = Some(format!("{}.{}", s, t));
+                }
+            }
+            if let Some(ref other_group) = existing_group {
+                if !fan_in {
+                    let source_info = existing_source
+                        .as_deref()
+                        .map(|s| format!(" (source: {})", s))
+                        .unwrap_or_default();
+                    return Err(format!(
+                        "target table {}.{} is already managed by group '{}'{source_info}; \
+                         pass fan_in => true to confirm fan-in streaming",
+                        t_schema, t_table, other_group
+                    ));
+                }
+                // Fan-in schema validation: compare column names and types
+                // Get existing target columns from DuckLake
+                let existing_cols_args = unsafe {
+                    [
+                        DatumWithOid::new(t_schema.as_str(), PgBuiltInOids::TEXTOID.value()),
+                        DatumWithOid::new(t_table.as_str(), PgBuiltInOids::TEXTOID.value()),
+                    ]
+                };
+                let existing_result = client
+                    .select(
+                        "SELECT a.attname::text FROM pg_class c \
+                     JOIN pg_namespace n ON n.oid = c.relnamespace \
+                     JOIN pg_attribute a ON a.attrelid = c.oid \
+                     WHERE n.nspname = $1 AND c.relname = $2 \
+                     AND a.attnum > 0 AND NOT a.attisdropped \
+                     ORDER BY a.attnum",
+                        None,
+                        &existing_cols_args,
+                    )
+                    .unwrap();
+                let mut target_cols: Vec<String> = Vec::new();
+                for r in existing_result {
+                    if let Some(name) = r.get::<String>(1).unwrap() {
+                        if name != "_duckpipe_source" {
+                            target_cols.push(name);
+                        }
+                    }
+                }
+                let source_cols: Vec<&str> = col_defs.iter().map(|(n, _)| n.as_str()).collect();
+                if source_cols.len() != target_cols.len() {
+                    return Err(format!(
+                        "fan-in schema mismatch: source has {} columns but target has {} columns",
+                        source_cols.len(),
+                        target_cols.len()
+                    ));
+                }
+                for (i, (src, tgt)) in source_cols.iter().zip(target_cols.iter()).enumerate() {
+                    if *src != tgt.as_str() {
+                        return Err(format!(
+                            "fan-in schema mismatch at column {}: source has '{}' but target has '{}'",
+                            i + 1, src, tgt
+                        ));
+                    }
+                }
+            }
+        }
 
         // Set data inlining if configured
         let inlining_limit = DATA_INLINING_ROW_LIMIT.get();
@@ -937,8 +1034,9 @@ fn add_table(
             let _ = client.update(&sql, None, &[]);
         }
 
-        // Insert table mapping with source OID
+        // Insert table mapping with source OID and source_label (group/schema.table)
         let initial_state = if copy_data { "SNAPSHOT" } else { "STREAMING" };
+        let source_label = format!("{}/{}.{}", group, schema, table);
         let args = unsafe {
             [
                 DatumWithOid::new(schema.as_str(), PgBuiltInOids::TEXTOID.value()),
@@ -948,13 +1046,14 @@ fn add_table(
                 DatumWithOid::new(initial_state, PgBuiltInOids::TEXTOID.value()),
                 DatumWithOid::new(group, PgBuiltInOids::TEXTOID.value()),
                 DatumWithOid::new(source_oid, PgBuiltInOids::INT8OID.value()),
+                DatumWithOid::new(source_label.as_str(), PgBuiltInOids::TEXTOID.value()),
             ]
         };
         client
             .update(
                 "INSERT INTO duckpipe.table_mappings (group_id, source_schema, source_table, \
-                 target_schema, target_table, state, source_oid) \
-                 SELECT sg.id, $1, $2, $3, $4, $5, $7 \
+                 target_schema, target_table, state, source_oid, source_label) \
+                 SELECT sg.id, $1, $2, $3, $4, $5, $7, $8 \
                  FROM duckpipe.sync_groups sg WHERE sg.name = $6",
                 None,
                 &args,
@@ -998,13 +1097,14 @@ fn add_table(
 #[pg_extern(sql = "
 CREATE FUNCTION duckpipe.remove_table(
     source_table TEXT,
-    drop_target BOOLEAN DEFAULT false
+    drop_target BOOLEAN DEFAULT false,
+    sync_group TEXT DEFAULT NULL
 ) RETURNS void
 AS 'MODULE_PATHNAME', '@FUNCTION_NAME@'
 LANGUAGE C;
-REVOKE ALL ON FUNCTION duckpipe.remove_table(TEXT, BOOLEAN) FROM PUBLIC;
+REVOKE ALL ON FUNCTION duckpipe.remove_table(TEXT, BOOLEAN, TEXT) FROM PUBLIC;
 ")]
-fn remove_table(source_table: &str, drop_target: Option<bool>) {
+fn remove_table(source_table: &str, drop_target: Option<bool>, sync_group: Option<&str>) {
     let (schema, table) = parse_source_table(source_table);
     let drop_target = drop_target.unwrap_or(false);
 
@@ -1018,60 +1118,114 @@ fn remove_table(source_table: &str, drop_target: Option<bool>) {
 
     Spi::connect_mut(|client| {
         // Get publication, target info, conninfo, group name, group id, and mapping id
-        let args = unsafe {
-            [
-                DatumWithOid::new(schema.as_str(), PgBuiltInOids::TEXTOID.value()),
-                DatumWithOid::new(table.as_str(), PgBuiltInOids::TEXTOID.value()),
-            ]
-        };
-        let result = client
-            .select(
+        // When sync_group is specified, filter by it; otherwise check for ambiguity
+        let (query, args_vec): (&str, Vec<DatumWithOid>) = if let Some(sg) = sync_group {
+            let a = unsafe {
+                vec![
+                    DatumWithOid::new(schema.as_str(), PgBuiltInOids::TEXTOID.value()),
+                    DatumWithOid::new(table.as_str(), PgBuiltInOids::TEXTOID.value()),
+                    DatumWithOid::new(sg, PgBuiltInOids::TEXTOID.value()),
+                ]
+            };
+            (
+                "SELECT g.publication, m.target_schema, m.target_table, g.conninfo, g.name, m.id, g.id \
+                 FROM duckpipe.table_mappings m \
+                 JOIN duckpipe.sync_groups g ON m.group_id = g.id \
+                 WHERE m.source_schema = $1 AND m.source_table = $2 AND g.name = $3",
+                a,
+            )
+        } else {
+            let a = unsafe {
+                vec![
+                    DatumWithOid::new(schema.as_str(), PgBuiltInOids::TEXTOID.value()),
+                    DatumWithOid::new(table.as_str(), PgBuiltInOids::TEXTOID.value()),
+                ]
+            };
+            (
                 "SELECT g.publication, m.target_schema, m.target_table, g.conninfo, g.name, m.id, g.id \
                  FROM duckpipe.table_mappings m \
                  JOIN duckpipe.sync_groups g ON m.group_id = g.id \
                  WHERE m.source_schema = $1 AND m.source_table = $2",
-                Some(1),
-                &args,
+                a,
             )
-            .unwrap();
+        };
+        let result = client.select(query, None, &args_vec).unwrap();
 
+        let mut match_count = 0;
+        let mut group_names = Vec::new();
         for r in result {
-            publication = Some(r.get::<String>(1).unwrap().unwrap());
-            t_schema = Some(r.get::<String>(2).unwrap().unwrap());
-            t_table = Some(r.get::<String>(3).unwrap().unwrap());
-            group_conninfo = r.get::<String>(4).unwrap();
-            group_name_for_app = r.get::<String>(5).unwrap().unwrap_or_default();
-            mapping_id = r.get::<i32>(6).unwrap();
-            group_id = r.get::<i32>(7).unwrap();
-            break;
+            match_count += 1;
+            if match_count == 1 {
+                publication = Some(r.get::<String>(1).unwrap().unwrap());
+                t_schema = Some(r.get::<String>(2).unwrap().unwrap());
+                t_table = Some(r.get::<String>(3).unwrap().unwrap());
+                group_conninfo = r.get::<String>(4).unwrap();
+                group_name_for_app = r.get::<String>(5).unwrap().unwrap_or_default();
+                mapping_id = r.get::<i32>(6).unwrap();
+                group_id = r.get::<i32>(7).unwrap();
+            }
+            group_names.push(r.get::<String>(5).unwrap().unwrap_or_default());
         }
 
-        // Drop target if requested
+        if match_count > 1 && sync_group.is_none() {
+            ereport!(
+                ERROR,
+                PgSqlErrorCode::ERRCODE_AMBIGUOUS_PARAMETER,
+                format!(
+                    "ambiguous: table '{}.{}' exists in multiple groups ({}); specify sync_group parameter",
+                    schema, table, group_names.join(", ")
+                )
+            );
+        }
+
+        // Drop target if requested (only if no other mappings point to same target)
         if drop_target {
             if let (Some(ts), Some(tt)) = (&t_schema, &t_table) {
-                let sql = format!(
-                    "DROP TABLE IF EXISTS {}.{}",
-                    quote_ident(ts),
-                    quote_ident(tt)
-                );
-                let _ = client.update(&sql, None, &[]);
+                // Check if other groups also target this table
+                let other_args = unsafe {
+                    [
+                        DatumWithOid::new(ts.as_str(), PgBuiltInOids::TEXTOID.value()),
+                        DatumWithOid::new(tt.as_str(), PgBuiltInOids::TEXTOID.value()),
+                    ]
+                };
+                let other_count: i64 = {
+                    let r = client
+                        .select(
+                            "SELECT count(*)::bigint FROM duckpipe.table_mappings \
+                         WHERE target_schema = $1 AND target_table = $2",
+                            None,
+                            &other_args,
+                        )
+                        .unwrap();
+                    let mut c = 0i64;
+                    for row in r {
+                        c = row.get::<i64>(1).unwrap().unwrap_or(0);
+                    }
+                    c
+                };
+                // Only drop target if this is the last mapping for it
+                if other_count <= 1 {
+                    let sql = format!(
+                        "DROP TABLE IF EXISTS {}.{}",
+                        quote_ident(ts),
+                        quote_ident(tt)
+                    );
+                    let _ = client.update(&sql, None, &[]);
+                }
             }
         }
 
-        // Delete mapping
-        let args = unsafe {
-            [
-                DatumWithOid::new(schema.as_str(), PgBuiltInOids::TEXTOID.value()),
-                DatumWithOid::new(table.as_str(), PgBuiltInOids::TEXTOID.value()),
-            ]
-        };
-        client
-            .update(
-                "DELETE FROM duckpipe.table_mappings WHERE source_schema = $1 AND source_table = $2",
-                None,
-                &args,
-            )
-            .unwrap();
+        // Delete mapping by id (precise, not by source name which could match multiple)
+        if let Some(mid) = mapping_id {
+            let del_args = unsafe { [DatumWithOid::new(mid, PgBuiltInOids::INT4OID.value())] };
+            client
+                .update(
+                    "DELETE FROM duckpipe.table_mappings WHERE id = $1",
+                    None,
+                    &del_args,
+                )
+                .unwrap();
+        }
     });
 
     // Drop from publication (unified local/remote via PgConn)
@@ -1240,47 +1394,72 @@ fn move_table(source_table: &str, new_group: &str) {
 }
 
 #[pg_extern(sql = "
-CREATE FUNCTION duckpipe.resync_table(source_table TEXT) RETURNS void
+CREATE FUNCTION duckpipe.resync_table(
+    source_table TEXT,
+    sync_group TEXT DEFAULT NULL
+) RETURNS void
 AS 'MODULE_PATHNAME', '@FUNCTION_NAME@'
-LANGUAGE C STRICT;
-REVOKE ALL ON FUNCTION duckpipe.resync_table(TEXT) FROM PUBLIC;
+LANGUAGE C;
+REVOKE ALL ON FUNCTION duckpipe.resync_table(TEXT, TEXT) FROM PUBLIC;
 ")]
-fn resync_table(source_table: &str) {
+fn resync_table(source_table: &str, sync_group: Option<&str>) {
     let (schema, table) = parse_source_table(source_table);
 
     Spi::connect_mut(|client| {
-        // Get target table info and group name
-        let args = unsafe {
-            [
-                DatumWithOid::new(schema.as_str(), PgBuiltInOids::TEXTOID.value()),
-                DatumWithOid::new(table.as_str(), PgBuiltInOids::TEXTOID.value()),
-            ]
-        };
-        let result = client
-            .select(
-                "SELECT m.target_schema, m.target_table, g.name \
+        // Get target table info, group name, mapping id, and source_label
+        let (query, args_vec): (&str, Vec<DatumWithOid>) = if let Some(sg) = sync_group {
+            let a = unsafe {
+                vec![
+                    DatumWithOid::new(schema.as_str(), PgBuiltInOids::TEXTOID.value()),
+                    DatumWithOid::new(table.as_str(), PgBuiltInOids::TEXTOID.value()),
+                    DatumWithOid::new(sg, PgBuiltInOids::TEXTOID.value()),
+                ]
+            };
+            (
+                "SELECT m.target_schema, m.target_table, g.name, m.id, m.source_label \
+                 FROM duckpipe.table_mappings m \
+                 JOIN duckpipe.sync_groups g ON m.group_id = g.id \
+                 WHERE m.source_schema = $1 AND m.source_table = $2 AND g.name = $3",
+                a,
+            )
+        } else {
+            let a = unsafe {
+                vec![
+                    DatumWithOid::new(schema.as_str(), PgBuiltInOids::TEXTOID.value()),
+                    DatumWithOid::new(table.as_str(), PgBuiltInOids::TEXTOID.value()),
+                ]
+            };
+            (
+                "SELECT m.target_schema, m.target_table, g.name, m.id, m.source_label \
                  FROM duckpipe.table_mappings m \
                  JOIN duckpipe.sync_groups g ON m.group_id = g.id \
                  WHERE m.source_schema = $1 AND m.source_table = $2",
-                Some(1),
-                &args,
+                a,
             )
-            .unwrap();
+        };
+        let result = client.select(query, None, &args_vec).unwrap();
 
         let mut t_schema = String::new();
         let mut t_table = String::new();
         let mut group_name = String::new();
-        let mut found = false;
+        let mut mapping_id: Option<i32> = None;
+        let mut source_label: Option<String> = None;
+        let mut match_count = 0;
+        let mut group_names = Vec::new();
 
         for r in result {
-            t_schema = r.get::<String>(1).unwrap().unwrap();
-            t_table = r.get::<String>(2).unwrap().unwrap();
-            group_name = r.get::<String>(3).unwrap().unwrap();
-            found = true;
-            break;
+            match_count += 1;
+            if match_count == 1 {
+                t_schema = r.get::<String>(1).unwrap().unwrap();
+                t_table = r.get::<String>(2).unwrap().unwrap();
+                group_name = r.get::<String>(3).unwrap().unwrap();
+                mapping_id = r.get::<i32>(4).unwrap();
+                source_label = r.get::<String>(5).unwrap();
+            }
+            group_names.push(r.get::<String>(3).unwrap().unwrap_or_default());
         }
 
-        if !found {
+        if match_count == 0 {
             ereport!(
                 ERROR,
                 PgSqlErrorCode::ERRCODE_UNDEFINED_OBJECT,
@@ -1288,33 +1467,71 @@ fn resync_table(source_table: &str) {
             );
         }
 
-        // Clear target table
-        let sql = format!(
-            "TRUNCATE TABLE {}.{}",
-            quote_ident(&t_schema),
-            quote_ident(&t_table)
-        );
-        let _ = client.update(&sql, None, &[]);
+        if match_count > 1 && sync_group.is_none() {
+            ereport!(
+                ERROR,
+                PgSqlErrorCode::ERRCODE_AMBIGUOUS_PARAMETER,
+                format!(
+                    "ambiguous: table '{}.{}' exists in multiple groups ({}); specify sync_group parameter",
+                    schema, table, group_names.join(", ")
+                )
+            );
+        }
 
-        // Reset state to SNAPSHOT and clear error info
-        let args = unsafe {
-            [
-                DatumWithOid::new(schema.as_str(), PgBuiltInOids::TEXTOID.value()),
-                DatumWithOid::new(table.as_str(), PgBuiltInOids::TEXTOID.value()),
-            ]
-        };
-        client
-            .update(
-                "UPDATE duckpipe.table_mappings SET state = 'SNAPSHOT', \
-                 rows_synced = 0, last_sync_at = NULL, \
-                 error_message = NULL, applied_lsn = NULL, snapshot_lsn = NULL, \
-                 consecutive_failures = 0, retry_at = NULL, \
-                 snapshot_duration_ms = NULL, snapshot_rows = NULL \
-                 WHERE source_schema = $1 AND source_table = $2",
-                None,
-                &args,
-            )
-            .unwrap();
+        // Clear target table before resync.
+        // When there are multiple sources (fan-in), skip the TRUNCATE here —
+        // the snapshot process will do a source-scoped DELETE via DuckDB connection.
+        // When there's only one source, TRUNCATE is safe and works via SPI.
+        {
+            let target_count_args = unsafe {
+                [
+                    DatumWithOid::new(t_schema.as_str(), PgBuiltInOids::TEXTOID.value()),
+                    DatumWithOid::new(t_table.as_str(), PgBuiltInOids::TEXTOID.value()),
+                ]
+            };
+            let target_source_count: i64 = {
+                let r = client
+                    .select(
+                        "SELECT count(*)::bigint FROM duckpipe.table_mappings \
+                     WHERE target_schema = $1 AND target_table = $2",
+                        None,
+                        &target_count_args,
+                    )
+                    .unwrap();
+                let mut c = 0i64;
+                for row in r {
+                    c = row.get::<i64>(1).unwrap().unwrap_or(0);
+                }
+                c
+            };
+            if target_source_count <= 1 {
+                // Single source — safe to TRUNCATE the whole target
+                let sql = format!(
+                    "TRUNCATE TABLE {}.{}",
+                    quote_ident(&t_schema),
+                    quote_ident(&t_table)
+                );
+                let _ = client.update(&sql, None, &[]);
+            }
+            // Multi-source (fan-in): snapshot process handles source-scoped DELETE
+        }
+
+        // Reset state to SNAPSHOT and clear error info (by mapping id)
+        if let Some(mid) = mapping_id {
+            let reset_args = unsafe { [DatumWithOid::new(mid, PgBuiltInOids::INT4OID.value())] };
+            client
+                .update(
+                    "UPDATE duckpipe.table_mappings SET state = 'SNAPSHOT', \
+                     rows_synced = 0, last_sync_at = NULL, \
+                     error_message = NULL, applied_lsn = NULL, snapshot_lsn = NULL, \
+                     consecutive_failures = 0, retry_at = NULL, \
+                     snapshot_duration_ms = NULL, snapshot_rows = NULL \
+                     WHERE id = $1",
+                    None,
+                    &reset_args,
+                )
+                .unwrap();
+        }
 
         // Wake the group's worker so it picks up the resync immediately.
         let channel = listen::wakeup_channel(&group_name);
@@ -1405,7 +1622,9 @@ CREATE FUNCTION duckpipe.tables() RETURNS TABLE(
     sync_group TEXT,
     enabled BOOLEAN,
     rows_synced BIGINT,
-    last_sync TIMESTAMPTZ
+    last_sync TIMESTAMPTZ,
+    source_label TEXT,
+    source_count INTEGER
 )
 AS 'MODULE_PATHNAME', '@FUNCTION_NAME@'
 LANGUAGE C STRICT;
@@ -1419,6 +1638,8 @@ fn tables() -> TableIterator<
         name!(enabled, bool),
         name!(rows_synced, i64),
         name!(last_sync, Option<TimestampWithTimeZone>),
+        name!(source_label, Option<String>),
+        name!(source_count, i32),
     ),
 > {
     let mut rows = Vec::new();
@@ -1427,7 +1648,9 @@ fn tables() -> TableIterator<
         let result = client.select(
             "SELECT m.source_schema || '.' || m.source_table as source_table, \
              m.target_schema || '.' || m.target_table as target_table, \
-             g.name as sync_group, m.enabled, m.rows_synced, m.last_sync_at \
+             g.name as sync_group, m.enabled, m.rows_synced, m.last_sync_at, \
+             m.source_label, \
+             (COUNT(*) OVER (PARTITION BY m.target_schema, m.target_table))::int4 as source_count \
              FROM duckpipe.table_mappings m \
              JOIN duckpipe.sync_groups g ON m.group_id = g.id \
              ORDER BY g.name, m.source_schema, m.source_table",
@@ -1443,6 +1666,8 @@ fn tables() -> TableIterator<
                 let enabled: bool = row.get(4).unwrap().unwrap();
                 let rows_synced: i64 = row.get(5).unwrap().unwrap();
                 let last_sync: Option<TimestampWithTimeZone> = row.get(6).unwrap();
+                let source_label: Option<String> = row.get(7).unwrap();
+                let source_count: i32 = row.get::<i32>(8).unwrap().unwrap_or(1);
 
                 rows.push((
                     source_table,
@@ -1451,6 +1676,8 @@ fn tables() -> TableIterator<
                     enabled,
                     rows_synced,
                     last_sync,
+                    source_label,
+                    source_count,
                 ));
             }
         }
@@ -1474,7 +1701,8 @@ CREATE FUNCTION duckpipe.status() RETURNS TABLE(
     retry_at TIMESTAMPTZ,
     applied_lsn TEXT,
     snapshot_duration_ms BIGINT,
-    snapshot_rows BIGINT
+    snapshot_rows BIGINT,
+    source_label TEXT
 )
 AS 'MODULE_PATHNAME', '@FUNCTION_NAME@'
 LANGUAGE C STRICT;
@@ -1496,6 +1724,7 @@ fn status() -> TableIterator<
         name!(applied_lsn, Option<String>),
         name!(snapshot_duration_ms, Option<i64>),
         name!(snapshot_rows, Option<i64>),
+        name!(source_label, Option<String>),
     ),
 > {
     // Read SHM metrics keyed by mapping_id (for queued_changes)
@@ -1510,7 +1739,7 @@ fn status() -> TableIterator<
              m.target_schema || '.' || m.target_table as target_table, \
              m.state, m.enabled, m.rows_synced, m.last_sync_at, \
              m.error_message, m.consecutive_failures, m.retry_at, m.applied_lsn::text, \
-             m.snapshot_duration_ms, m.snapshot_rows, m.id \
+             m.snapshot_duration_ms, m.snapshot_rows, m.id, m.source_label \
              FROM duckpipe.table_mappings m \
              JOIN duckpipe.sync_groups g ON m.group_id = g.id \
              ORDER BY g.name, m.source_schema, m.source_table",
@@ -1534,6 +1763,7 @@ fn status() -> TableIterator<
                 let snapshot_duration_ms: Option<i64> = row.get(12).unwrap();
                 let snapshot_rows: Option<i64> = row.get(13).unwrap();
                 let mapping_id: i32 = row.get::<i32>(14).unwrap().unwrap_or(0);
+                let source_label: Option<String> = row.get(15).unwrap();
 
                 // Read queued_changes from SHM
                 let queued_changes = shm_map
@@ -1556,6 +1786,7 @@ fn status() -> TableIterator<
                     applied_lsn,
                     snapshot_duration_ms,
                     snapshot_rows,
+                    source_label,
                 ));
             }
         }

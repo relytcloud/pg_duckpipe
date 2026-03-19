@@ -26,9 +26,9 @@ SELECT pg_sleep(5);
 (1 row)
 
 SELECT * FROM public.jsonb_test_ducklake ORDER BY id;
- id |       data       
-----+------------------
-  1 | {"key": "value"}
+ id |       data       |     _duckpipe_source      
+----+------------------+---------------------------
+  1 | {"key": "value"} | default/public.jsonb_test
 (1 row)
 
 SELECT duckpipe.remove_table('public.jsonb_test', false);
