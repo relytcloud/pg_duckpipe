@@ -50,7 +50,7 @@ struct QueueMeta {
     attnames: Vec<String>,
     key_attrs: Vec<usize>,
     atttypes: Vec<u32>,
-    source_label: Option<String>,
+    source_label: String,
 }
 
 /// Shared queue data protected by Mutex.
@@ -398,7 +398,7 @@ impl FlushCoordinator {
         key_attrs: Vec<usize>,
         atttypes: Vec<u32>,
         paused: bool,
-        source_label: Option<String>,
+        source_label: String,
     ) {
         // Seed in-memory LSN from the persistent PG value if we haven't seen this table yet.
         // `or_insert` preserves any higher value already tracked from a completed flush.

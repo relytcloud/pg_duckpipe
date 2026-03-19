@@ -159,7 +159,7 @@ impl<'a> MetadataClient<'a> {
         let error_message: Option<String> = row.get(9);
         let applied_lsn_str: Option<String> = row.get(10);
         let applied_lsn = applied_lsn_str.map(|s| parse_lsn(&s)).unwrap_or(0);
-        let source_label: Option<String> = row.get(11);
+        let source_label: String = row.get::<_, Option<String>>(11).unwrap_or_default();
 
         Ok(Some(TableMapping {
             id,
@@ -331,7 +331,7 @@ impl<'a> MetadataClient<'a> {
                 enabled: row.get(7),
                 source_oid: row.get(8),
                 error_message: row.get(9),
-                source_label: row.get(11),
+                source_label: row.get::<_, Option<String>>(11).unwrap_or_default(),
             })
             .collect())
     }
@@ -430,7 +430,7 @@ impl<'a> MetadataClient<'a> {
             enabled: row.get(7),
             source_oid: row.get(8),
             error_message: row.get(9),
-            source_label: row.get(11),
+            source_label: row.get::<_, Option<String>>(11).unwrap_or_default(),
         }))
     }
 
@@ -637,7 +637,7 @@ impl<'a> MetadataClient<'a> {
                 source_table: row.get(2),
                 target_schema: row.get(3),
                 target_table: row.get(4),
-                source_label: row.get(5),
+                source_label: row.get::<_, Option<String>>(5).unwrap_or_default(),
             })
             .collect())
     }
@@ -736,7 +736,7 @@ pub struct SnapshotTask {
     pub source_table: String,
     pub target_schema: String,
     pub target_table: String,
-    pub source_label: Option<String>,
+    pub source_label: String,
 }
 
 /// Load column names and primary key attribute indices from any PG connection.

@@ -433,21 +433,13 @@ async fn process_one_wal_message(
                     if let Some(mapping) = mapping {
                         if mapping.enabled && mapping.state != "ERRORED" {
                             coordinator.drain_and_wait_table(mapping.id);
-                            // Scope DELETE by _duckpipe_source when source_label is set
-                            let delete_sql = if let Some(ref label) = mapping.source_label {
-                                format!(
-                                    "DELETE FROM \"{}\".\"{}\" WHERE \"_duckpipe_source\" = '{}'",
-                                    mapping.target_schema.replace('"', "\"\""),
-                                    mapping.target_table.replace('"', "\"\""),
-                                    label.replace('\'', "''")
-                                )
-                            } else {
-                                format!(
-                                    "DELETE FROM \"{}\".\"{}\"",
-                                    mapping.target_schema.replace('"', "\"\""),
-                                    mapping.target_table.replace('"', "\"\"")
-                                )
-                            };
+                            // Scope DELETE by _duckpipe_source (always set)
+                            let delete_sql = format!(
+                                "DELETE FROM \"{}\".\"{}\" WHERE \"_duckpipe_source\" = '{}'",
+                                mapping.target_schema.replace('"', "\"\""),
+                                mapping.target_table.replace('"', "\"\""),
+                                mapping.source_label.replace('\'', "''")
+                            );
                             if let Err(e) = client.execute(&delete_sql, &[]).await {
                                 tracing::error!(
                                     "pg_duckpipe: failed to clear target table {}.{}: {}",

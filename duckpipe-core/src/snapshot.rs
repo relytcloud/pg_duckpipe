@@ -76,7 +76,7 @@ pub async fn process_snapshot_task(
     timing: bool,
     task_id: i32,
     group_name: &str,
-    source_label: Option<String>,
+    source_label: String,
 ) -> Result<(u64, u64, u64), String> {
     let table_start = Instant::now();
 
@@ -173,7 +173,7 @@ pub async fn process_snapshot_task(
                 &consumer_target_schema,
                 &consumer_target_table,
                 consumer_timing,
-                consumer_source_label.as_deref(),
+                &consumer_source_label,
             )
         });
 
@@ -376,7 +376,7 @@ fn run_duckdb_consumer(
     target_schema: &str,
     target_table: &str,
     timing: bool,
-    source_label: Option<&str>,
+    source_label: &str,
 ) -> Result<u64, String> {
     let t_start = if timing { Some(Instant::now()) } else { None };
 
@@ -492,16 +492,12 @@ fn run_duckdb_consumer(
     db.execute_batch("BEGIN")
         .map_err(|e| format!("duckdb begin: {}", e))?;
 
-    // Scope DELETE by _duckpipe_source when source_label is set (fan-in safe)
-    let delete_sql = if let Some(label) = source_label {
-        format!(
-            "DELETE FROM {} WHERE \"_duckpipe_source\" = '{}'",
-            target_ref,
-            label.replace('\'', "''")
-        )
-    } else {
-        format!("DELETE FROM {}", target_ref)
-    };
+    // Scope DELETE by _duckpipe_source (always set)
+    let delete_sql = format!(
+        "DELETE FROM {} WHERE \"_duckpipe_source\" = '{}'",
+        target_ref,
+        source_label.replace('\'', "''")
+    );
     db.execute_batch(&delete_sql).map_err(|e| {
         let _ = db.execute_batch("ROLLBACK");
         format!("duckdb delete: {}", e)
@@ -517,9 +513,7 @@ fn run_duckdb_consumer(
                 let t_chunk = if timing { Some(Instant::now()) } else { None };
 
                 // Build INSERT: source columns from CSV + _duckpipe_source literal
-                let source_value = source_label
-                    .map(|l| format!("'{}'", l.replace('\'', "''")))
-                    .unwrap_or_else(|| "NULL".to_string());
+                let source_value = format!("'{}'", source_label.replace('\'', "''"));
                 let insert_sql = format!(
                     "INSERT INTO {} ({}) SELECT {}, {} FROM read_csv('{}', header=true, nullstr='__DUCKPIPE_NULL__')",
                     target_ref,

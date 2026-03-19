@@ -134,7 +134,9 @@ INSERT INTO orders_b VALUES (103, 'rivet', 15);
 -- Longer sleep for worker restart + replication reconnect
 SELECT pg_sleep(6);
 
--- shard_b rows should be present (shard_a rows may remain as orphaned data)
+-- shard_b rows should be present; shard_a rows still exist in target
+-- (remove_table does not delete synced data — only stops replication).
+-- Filter to shard_b to verify it keeps syncing independently.
 SELECT id, product, qty, _duckpipe_source FROM public.orders_ducklake
 WHERE _duckpipe_source = 'shard_b/public.orders_b' ORDER BY id;
 

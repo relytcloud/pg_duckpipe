@@ -215,10 +215,10 @@ pub struct FlushWorker {
     /// DuckDB memory limit string for the flush phase (e.g. "512MB").
     /// Stored so `flush_buffer()` can raise the limit before compaction.
     flush_memory_limit: String,
-    /// Source label for fan-in scoping (sync group name).
-    /// When Some, the `_duckpipe_source` column is populated in the buffer and
-    /// DELETE operations are scoped to this label.
-    source_label: Option<String>,
+    /// Source label for scoping (e.g. "default/public.orders").
+    /// Populates the `_duckpipe_source` column in the buffer and scopes
+    /// DELETE operations to this label for fan-in isolation.
+    source_label: String,
 }
 
 impl FlushWorker {
@@ -230,7 +230,7 @@ impl FlushWorker {
         pg_connstr: &str,
         ducklake_schema: &str,
         resolved_config: &ResolvedConfig,
-        source_label: Option<String>,
+        source_label: String,
     ) -> Result<Self, String> {
         let config = Config::default()
             .allow_unsigned_extensions()
@@ -393,8 +393,8 @@ impl FlushWorker {
         let mut seq = seq_start;
         let fixed_row_bytes = self.cached_fixed_row_bytes;
         let mut var_total: usize = 0;
-        // Resolve source label once before the loop — avoids per-row Option<String> clone
-        let append_source: Option<&str> = self.source_label.as_deref();
+        // Resolve source label once before the loop
+        let append_source: &str = &self.source_label;
 
         {
             let mut appender = self
@@ -436,8 +436,8 @@ impl FlushWorker {
                     }
                 }
 
-                // Append _duckpipe_source value (NULL if no source_label set)
-                row.push(Box::new(append_source.map(|s| s.to_string())));
+                // Append _duckpipe_source value
+                row.push(Box::new(append_source.to_string()));
 
                 let refs: Vec<&dyn duckdb::ToSql> = row.iter().map(|b| b.as_ref()).collect();
                 appender
@@ -536,17 +536,11 @@ impl FlushWorker {
             .iter()
             .map(|c| format!("{target_ref}.{c} = compacted.{c}"))
             .collect();
-        // When source_label is set, scope DELETE to only rows from this source.
-        // This enables fan-in: multiple sources can write to the same target
-        // without cross-source interference.
-        let source_scope = if let Some(label) = &self.source_label {
-            format!(
-                " AND {target_ref}.\"_duckpipe_source\" = '{}'",
-                label.replace('\'', "''")
-            )
-        } else {
-            String::new()
-        };
+        // Scope DELETE to only rows from this source (fan-in safe).
+        let source_scope = format!(
+            " AND {target_ref}.\"_duckpipe_source\" = '{}'",
+            self.source_label.replace('\'', "''")
+        );
         let delete_sql = format!(
             "DELETE FROM {target_ref} WHERE EXISTS ( \
                  SELECT 1 FROM compacted WHERE {pk_match} \
