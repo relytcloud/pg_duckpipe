@@ -321,14 +321,13 @@ impl FlushWorker {
                 .map(|&i| format!("\"{}\"", attnames[i].replace('"', "\"\"")))
                 .collect(),
         );
-        let mut all_cols: Vec<String> = attnames
+        let all_cols: Vec<String> = attnames
             .iter()
             .map(|n| format!("\"{}\"", n.replace('"', "\"\"")))
             .collect();
-        all_cols.push("\"_duckpipe_source\"".to_string());
         self.cached_all_cols = Some(all_cols);
 
-        // Build buffer table schema
+        // Build buffer table schema (no _duckpipe_source — injected as literal at INSERT time)
         let mut buf_cols = Vec::new();
         buf_cols.push("_seq INTEGER".to_string());
         buf_cols.push("_op_type INTEGER".to_string());
@@ -339,7 +338,6 @@ impl FlushWorker {
                 lake_info.column_types[i]
             ));
         }
-        buf_cols.push("\"_duckpipe_source\" VARCHAR".to_string());
 
         let create_buf = format!("CREATE TABLE buffer ({})", buf_cols.join(", "));
         self.db
@@ -393,8 +391,6 @@ impl FlushWorker {
         let mut seq = seq_start;
         let fixed_row_bytes = self.cached_fixed_row_bytes;
         let mut var_total: usize = 0;
-        // Resolve source label once before the loop
-        let append_source: &str = &self.source_label;
 
         {
             let mut appender = self
@@ -410,8 +406,8 @@ impl FlushWorker {
                     ChangeType::Delete => 2,
                 };
 
-                // +3 = _seq, _op_type, _duckpipe_source
-                let mut row: Vec<Box<dyn duckdb::ToSql>> = Vec::with_capacity(3 + ncols);
+                // +2 = _seq, _op_type
+                let mut row: Vec<Box<dyn duckdb::ToSql>> = Vec::with_capacity(2 + ncols);
                 row.push(Box::new(seq));
                 row.push(Box::new(op_type));
 
@@ -435,9 +431,6 @@ impl FlushWorker {
                         }
                     }
                 }
-
-                // Append _duckpipe_source value
-                row.push(Box::new(append_source.to_string()));
 
                 let refs: Vec<&dyn duckdb::ToSql> = row.iter().map(|b| b.as_ref()).collect();
                 appender
@@ -565,13 +558,15 @@ impl FlushWorker {
             self.may_have_conflicts = false;
         }
 
-        // Step 2c: INSERT
+        // Step 2c: INSERT — inject _duckpipe_source as a literal (not stored in buffer)
         let t_phase = Instant::now();
+        let source_literal = format!("'{}'", self.source_label.replace('\'', "''"));
         let insert_sql = format!(
-            "INSERT INTO {target_ref} ({cols}) \
-             SELECT {cols} FROM compacted WHERE _op_type IN (0, 1)",
+            "INSERT INTO {target_ref} ({cols}, \"_duckpipe_source\") \
+             SELECT {cols}, {source_literal} FROM compacted WHERE _op_type IN (0, 1)",
             target_ref = target_ref,
-            cols = all_cols.join(", ")
+            cols = all_cols.join(", "),
+            source_literal = source_literal
         );
         self.db.execute_batch(&insert_sql).map_err(|e| {
             let _ = self.db.execute_batch("ROLLBACK");
