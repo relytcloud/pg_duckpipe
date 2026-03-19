@@ -255,7 +255,7 @@ WHERE _duckpipe_source = 'shard_b/public.orders_b' ORDER BY id;
 (2 rows)
 
 -- =============================================================
--- Cleanup
+-- Cleanup (cross-group fan-in)
 -- =============================================================
 SET client_min_messages = warning;
 SELECT duckpipe.stop_worker();
@@ -288,3 +288,130 @@ DROP TABLE IF EXISTS public.orders_ducklake;
 DROP TABLE orders_a;
 DROP TABLE orders_b;
 DROP TABLE orders_bad;
+-- =============================================================
+-- Same-group fan-in: two sources in ONE group → same target
+-- =============================================================
+CREATE TABLE orders_2024 (id int primary key, product text, qty int);
+CREATE TABLE orders_2025 (id int primary key, product text, qty int);
+SELECT duckpipe.start_worker();
+NOTICE:  Started 1 background worker(s)
+ start_worker 
+--------------
+ 
+(1 row)
+
+-- =============================================================
+-- Test 13: First source in default group
+-- =============================================================
+SELECT duckpipe.add_table('public.orders_2024', 'public.orders_combined_ducklake');
+ add_table 
+-----------
+ 
+(1 row)
+
+-- =============================================================
+-- Test 14: Second source, same group, fan_in => true
+-- =============================================================
+SELECT duckpipe.add_table('public.orders_2025', 'public.orders_combined_ducklake', 'default', false, true);
+NOTICE:  relation "orders_combined_ducklake" already exists, skipping
+ add_table 
+-----------
+ 
+(1 row)
+
+-- =============================================================
+-- Test 15: tables() shows both sources in same group
+-- =============================================================
+SELECT source_table, target_table, sync_group, source_label, source_count
+FROM duckpipe.tables()
+WHERE target_table = 'public.orders_combined_ducklake'
+ORDER BY source_table;
+    source_table    |          target_table           | sync_group |        source_label        | source_count 
+--------------------+---------------------------------+------------+----------------------------+--------------
+ public.orders_2024 | public.orders_combined_ducklake | default    | default/public.orders_2024 |            2
+ public.orders_2025 | public.orders_combined_ducklake | default    | default/public.orders_2025 |            2
+(2 rows)
+
+-- =============================================================
+-- Test 16: INSERT into both sources → distinct _duckpipe_source
+-- =============================================================
+INSERT INTO orders_2024 VALUES (1, 'widget', 10), (2, 'gadget', 5);
+INSERT INTO orders_2025 VALUES (101, 'sprocket', 20), (102, 'bolt', 50);
+SELECT pg_sleep(8);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+SELECT * FROM public.orders_combined_ducklake ORDER BY id;
+ id  | product  | qty |      _duckpipe_source      
+-----+----------+-----+----------------------------
+   1 | widget   |  10 | default/public.orders_2024
+   2 | gadget   |   5 | default/public.orders_2024
+ 101 | sprocket |  20 | default/public.orders_2025
+ 102 | bolt     |  50 | default/public.orders_2025
+(4 rows)
+
+-- =============================================================
+-- Test 17: UPDATE one source → only that source's rows changed
+-- =============================================================
+UPDATE orders_2024 SET qty = 99 WHERE id = 1;
+SELECT pg_sleep(3);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+SELECT * FROM public.orders_combined_ducklake ORDER BY id;
+ id  | product  | qty |      _duckpipe_source      
+-----+----------+-----+----------------------------
+   1 | widget   |  99 | default/public.orders_2024
+   2 | gadget   |   5 | default/public.orders_2024
+ 101 | sprocket |  20 | default/public.orders_2025
+ 102 | bolt     |  50 | default/public.orders_2025
+(4 rows)
+
+-- =============================================================
+-- Test 18: TRUNCATE one source → only that source's rows removed
+-- =============================================================
+TRUNCATE orders_2024;
+SELECT pg_sleep(3);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+SELECT * FROM public.orders_combined_ducklake ORDER BY id;
+ id  | product  | qty |      _duckpipe_source      
+-----+----------+-----+----------------------------
+ 101 | sprocket |  20 | default/public.orders_2025
+ 102 | bolt     |  50 | default/public.orders_2025
+(2 rows)
+
+-- =============================================================
+-- Cleanup (same-group fan-in)
+-- =============================================================
+SET client_min_messages = warning;
+SELECT duckpipe.stop_worker();
+ stop_worker 
+-------------
+ 
+(1 row)
+
+RESET client_min_messages;
+SELECT duckpipe.remove_table('public.orders_2024');
+ remove_table 
+--------------
+ 
+(1 row)
+
+SELECT duckpipe.remove_table('public.orders_2025');
+WARNING:  Group 'default' has no remaining tables — its replication slot is still holding WAL. Run SELECT duckpipe.drop_group('default') to release it.
+ remove_table 
+--------------
+ 
+(1 row)
+
+DROP TABLE IF EXISTS public.orders_combined_ducklake;
+DROP TABLE orders_2024;
+DROP TABLE orders_2025;

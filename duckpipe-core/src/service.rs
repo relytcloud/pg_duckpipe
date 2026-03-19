@@ -215,7 +215,7 @@ async fn process_one_wal_message(
                     )
                     .await?;
                     coordinator.push_change(
-                        &target_key,
+                        mapping.id,
                         Change {
                             change_type: ChangeType::Insert,
                             lsn,
@@ -297,7 +297,7 @@ async fn process_one_wal_message(
                             })
                             .collect();
                         coordinator.push_change(
-                            &target_key,
+                            mapping.id,
                             Change {
                                 change_type: ChangeType::Delete,
                                 lsn,
@@ -307,7 +307,7 @@ async fn process_one_wal_message(
                             },
                         );
                         coordinator.push_change(
-                            &target_key,
+                            mapping.id,
                             Change {
                                 change_type: ChangeType::Insert,
                                 lsn,
@@ -321,7 +321,7 @@ async fn process_one_wal_message(
                         // Push Update with col_unchanged; the flush path will surface an
                         // error telling the operator to restore REPLICA IDENTITY FULL.
                         coordinator.push_change(
-                            &target_key,
+                            mapping.id,
                             Change {
                                 change_type: ChangeType::Update,
                                 lsn,
@@ -332,7 +332,7 @@ async fn process_one_wal_message(
                         );
                     } else {
                         coordinator.push_change(
-                            &target_key,
+                            mapping.id,
                             Change {
                                 change_type: ChangeType::Delete,
                                 lsn,
@@ -342,7 +342,7 @@ async fn process_one_wal_message(
                             },
                         );
                         coordinator.push_change(
-                            &target_key,
+                            mapping.id,
                             Change {
                                 change_type: ChangeType::Insert,
                                 lsn,
@@ -394,7 +394,7 @@ async fn process_one_wal_message(
                     let pk_attrs = cached.pk_key_attrs.as_ref().unwrap();
                     let key_values = extract_key_values(&old_values, pk_attrs);
                     coordinator.push_change(
-                        &target_key,
+                        mapping.id,
                         Change {
                             change_type: ChangeType::Delete,
                             lsn,
@@ -432,9 +432,7 @@ async fn process_one_wal_message(
                     let mapping = resolve_mapping(meta, group.id, rel_id, &cached.entry).await?;
                     if let Some(mapping) = mapping {
                         if mapping.enabled && mapping.state != "ERRORED" {
-                            let target_key =
-                                format!("{}.{}", mapping.target_schema, mapping.target_table);
-                            coordinator.drain_and_wait_table(&target_key);
+                            coordinator.drain_and_wait_table(mapping.id);
                             // Scope DELETE by _duckpipe_source when source_label is set
                             let delete_sql = if let Some(ref label) = mapping.source_label {
                                 format!(
@@ -879,8 +877,7 @@ pub async fn run_group_sync_cycle(
                         .update_table_metrics(snap.task_id, *rows_copied as i64)
                         .await;
                 }
-                let target_key = format!("{}.{}", snap.target_schema, snap.target_table);
-                coordinator.unpause_table(&target_key);
+                coordinator.unpause_table(snap.task_id);
             }
             Err(e) => {
                 match meta
