@@ -216,7 +216,7 @@ pub struct FlushWorker {
     /// Stored so `flush_buffer()` can raise the limit before compaction.
     flush_memory_limit: String,
     /// Source label for scoping (e.g. "default/public.orders").
-    /// Populates the `_duckpipe_source` column in the buffer and scopes
+    /// Injected as a SQL literal into INSERT statements and scopes
     /// DELETE operations to this label for fan-in isolation.
     source_label: String,
 }
@@ -321,11 +321,12 @@ impl FlushWorker {
                 .map(|&i| format!("\"{}\"", attnames[i].replace('"', "\"\"")))
                 .collect(),
         );
-        let all_cols: Vec<String> = attnames
-            .iter()
-            .map(|n| format!("\"{}\"", n.replace('"', "\"\"")))
-            .collect();
-        self.cached_all_cols = Some(all_cols);
+        self.cached_all_cols = Some(
+            attnames
+                .iter()
+                .map(|n| format!("\"{}\"", n.replace('"', "\"\"")))
+                .collect(),
+        );
 
         // Build buffer table schema (no _duckpipe_source — injected as literal at INSERT time)
         let mut buf_cols = Vec::new();
