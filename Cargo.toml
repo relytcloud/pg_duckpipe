@@ -12,7 +12,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive", "env"] }
 tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
 tokio-postgres = { version = "0.7", features = ["with-chrono-0_4"] }
-duckdb = { version = "=1.4.3" }
+duckdb = { version = "=1.10500.0" }
 pgwire-replication = { version = "0.2", features = ["tls-rustls"] }
 futures-util = "0.3"
 rustls = { version = "0.23", default-features = false, features = ["ring"] }

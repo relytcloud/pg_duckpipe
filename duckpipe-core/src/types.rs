@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 /// Known config keys with their validation rules.
 const VALID_CONFIG_KEYS: &[(&str, &str)] = &[
+    ("drain_poll_ms", "int"),
     ("duckdb_buffer_memory_mb", "int"),
     ("duckdb_flush_memory_mb", "int"),
     ("duckdb_threads", "int"),
@@ -15,6 +16,8 @@ const VALID_CONFIG_KEYS: &[(&str, &str)] = &[
 /// Also used to represent global_config rows (populated from key-value table).
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct GroupConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drain_poll_ms: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duckdb_buffer_memory_mb: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -53,6 +56,7 @@ impl GroupConfig {
     pub fn set_key(&mut self, key: &str, value: &str) -> Result<(), String> {
         Self::validate_key(key, value)?;
         match key {
+            "drain_poll_ms" => self.drain_poll_ms = Some(value.parse::<i32>().unwrap()),
             "duckdb_buffer_memory_mb" => {
                 self.duckdb_buffer_memory_mb = Some(value.parse::<i32>().unwrap())
             }
@@ -76,6 +80,7 @@ impl GroupConfig {
     /// Get a single key's value as a string. Returns None if unset or unknown.
     pub fn get_key(&self, key: &str) -> Option<String> {
         match key {
+            "drain_poll_ms" => self.drain_poll_ms.map(|v| v.to_string()),
             "duckdb_buffer_memory_mb" => self.duckdb_buffer_memory_mb.map(|v| v.to_string()),
             "duckdb_flush_memory_mb" => self.duckdb_flush_memory_mb.map(|v| v.to_string()),
             "duckdb_threads" => self.duckdb_threads.map(|v| v.to_string()),
@@ -122,6 +127,7 @@ impl GroupConfig {
 /// Fully resolved config — no Options. All values guaranteed present.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedConfig {
+    pub drain_poll_ms: i32,
     pub duckdb_buffer_memory_mb: i32,
     pub duckdb_flush_memory_mb: i32,
     pub duckdb_threads: i32,
@@ -134,6 +140,7 @@ pub struct ResolvedConfig {
 impl Default for ResolvedConfig {
     fn default() -> Self {
         ResolvedConfig {
+            drain_poll_ms: 100,
             duckdb_buffer_memory_mb: 16,
             duckdb_flush_memory_mb: 512,
             duckdb_threads: 1,
@@ -149,6 +156,7 @@ impl ResolvedConfig {
     /// Convert to a GroupConfig with all fields set (for JSON serialization).
     pub fn to_group_config(&self) -> GroupConfig {
         GroupConfig {
+            drain_poll_ms: Some(self.drain_poll_ms),
             duckdb_buffer_memory_mb: Some(self.duckdb_buffer_memory_mb),
             duckdb_flush_memory_mb: Some(self.duckdb_flush_memory_mb),
             duckdb_threads: Some(self.duckdb_threads),
@@ -162,6 +170,7 @@ impl ResolvedConfig {
     /// Get a single key's value as a string.
     pub fn get_key(&self, key: &str) -> Option<String> {
         match key {
+            "drain_poll_ms" => Some(self.drain_poll_ms.to_string()),
             "duckdb_buffer_memory_mb" => Some(self.duckdb_buffer_memory_mb.to_string()),
             "duckdb_flush_memory_mb" => Some(self.duckdb_flush_memory_mb.to_string()),
             "duckdb_threads" => Some(self.duckdb_threads.to_string()),
@@ -177,6 +186,10 @@ impl ResolvedConfig {
     pub fn resolve(global: &GroupConfig, group: &GroupConfig) -> Self {
         let defaults = ResolvedConfig::default();
         ResolvedConfig {
+            drain_poll_ms: group
+                .drain_poll_ms
+                .or(global.drain_poll_ms)
+                .unwrap_or(defaults.drain_poll_ms),
             duckdb_buffer_memory_mb: group
                 .duckdb_buffer_memory_mb
                 .or(global.duckdb_buffer_memory_mb)

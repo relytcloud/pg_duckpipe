@@ -17,6 +17,22 @@ use std::pin::pin;
 use std::time::Instant;
 
 use duckdb::{Config, Connection};
+
+/// Guard that DETACHes the DuckLake database on drop.
+struct DetachOnDrop(Connection);
+
+impl Drop for DetachOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.execute_batch("DETACH lake;");
+    }
+}
+
+impl std::ops::Deref for DetachOnDrop {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        &self.0
+    }
+}
 use futures_util::StreamExt;
 
 use crate::types::{format_lsn, parse_lsn};
@@ -364,8 +380,9 @@ fn run_duckdb_consumer(
     let config = Config::default()
         .allow_unsigned_extensions()
         .map_err(|e| format!("duckdb config: {}", e))?;
-    let db =
-        Connection::open_in_memory_with_flags(config).map_err(|e| format!("duckdb open: {}", e))?;
+    let db = DetachOnDrop(
+        Connection::open_in_memory_with_flags(config).map_err(|e| format!("duckdb open: {}", e))?,
+    );
 
     db.execute_batch("INSTALL ducklake; LOAD ducklake;")
         .map_err(|e| format!("duckdb install ducklake: {}", e))?;

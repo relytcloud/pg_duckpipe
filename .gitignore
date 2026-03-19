@@ -16,6 +16,8 @@
 # Regression test output
 /results/
 test/regression/results/
+test/regression/regression.conf.gen
+test/regression/tmp_uuid_test/
 regression.diffs
 regression.out
 tmp_check/
