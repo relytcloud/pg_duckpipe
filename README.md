@@ -86,10 +86,21 @@ Full breakdown (flush latency, phase timing, snapshot per-table, WAL cycles): [b
 
 ## Build & Test
 
+### With Claude Code
+
+If you use [Claude Code](https://claude.com/claude-code):
+
+- `/build` — Clone, build, and install PostgreSQL 18, pg_ducklake, and pg_duckpipe from source into a local `deps/` directory.
+- `/setup` — Start a configured PostgreSQL instance (port 5588) with all extensions loaded and ready to use.
+
+### Manual
+
+Requires PostgreSQL 18 and pg_ducklake to be installed first. Set `PG_CONFIG` to point to your installation:
+
 ```bash
-make && make install             # Build and install the extension
-make installcheck                # Run all regression tests
-make check-regression TEST=api   # Run a single test
+PG_CONFIG=/path/to/pg_config make install   # Build and install the extension
+PG_CONFIG=/path/to/pg_config make installcheck   # Run all regression tests
+make check-regression TEST=api              # Run a single test
 ```
 
 ## Documentation
