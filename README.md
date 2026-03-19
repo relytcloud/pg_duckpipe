@@ -88,7 +88,10 @@ Full breakdown (flush latency, phase timing, snapshot per-table, WAL cycles): [b
 
 ### With Claude Code
 
-If you use [Claude Code](https://claude.com/claude-code), run `/build` to automatically clone, build, and install PostgreSQL 18, pg_ducklake, and pg_duckpipe from source into a local `deps/` directory.
+If you use [Claude Code](https://claude.com/claude-code):
+
+- `/build` — Clone, build, and install PostgreSQL 18, pg_ducklake, and pg_duckpipe from source into a local `deps/` directory.
+- `/setup` — Start a configured PostgreSQL instance (port 5588) with all extensions loaded and ready to use.
 
 ### Manual
 
