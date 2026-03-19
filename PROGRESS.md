@@ -8,7 +8,7 @@
 - [ ] Batch compaction tuning — reduce Parquet file proliferation under sustained small-batch writes
 - [ ] Inline data flush
 - [ ] Parquet-over-PG write throughput — ~10k rows/sec cap bottleneck for large catch-up
-- [ ] Source-scoped DELETE in fan-in mode — add `_duckpipe_source` column; each source deduplicates only against its own data via Parquet min/max pruning
+- [ ] Fan-in Parquet min/max pruning — leverage `_duckpipe_source` column statistics so DELETE scans skip Parquet files belonging to other sources
 - [ ] Time-bounded DELETE — user-provided timestamp column + immutability horizon; skip Parquet files older than the horizon during DELETE
 - [ ] DELETE phase dominates mixed DML flush — consider DuckLake-native delete-by-PK
 - [ ] DuckLake commit contention — jumps from 1.7ms (1T) to 10.9ms (4T); metadata lock issue
@@ -39,7 +39,7 @@
 ### Future Vision
 - [ ] Transparent analytical query routing — planner hook to auto-reroute analytical queries to DuckLake
 - [ ] Incremental materialized views — CDC-driven delta maintenance of aggregate/join views
-- [ ] Multi-source fan-in / fan-out — multiple PG sources into one DuckLake, or one PG to multiple targets
+- [ ] Fan-out — one PG source to multiple DuckLake targets
 - [ ] Schema evolution timeline — audit log of DDL changes from Relation messages in the WAL stream
 - [ ] Stream rules — per-table predicates on the CDC stream with configurable actions (log, skip, pause, pg_notify, webhook)
 - [ ] Source adapter trait — unified `Source` abstraction; pgoutput decoder becomes one implementation
@@ -86,4 +86,5 @@
 - Regression tests all passing
 - Dockerfile for self-contained playground env
 - Spillable DuckDB buffer for snapshot WAL buffering — spill-to-disk + backpressure exclusion for snapshot-queued changes
+- Fan-in streaming — multiple PG sources to single DuckLake target (`_duckpipe_source` column, source-scoped DELETE/INSERT, schema validation guard, cross-group and same-group fan-in, FlushCoordinator keyed by mapping_id)
 - Bug fixes: `confirmed_lsn` reset on re-add, `lag_bytes` flat during catch-up, benchmark cleanup, index on `group_id` FK, snapshot retry backoff, bounded DuckDB memory
