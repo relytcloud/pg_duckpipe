@@ -59,11 +59,11 @@ SELECT pg_sleep(4);
 
 -- All rows must be present regardless of which path was taken.
 SELECT * FROM public.shutdown_test_ducklake ORDER BY id;
- id |  val  | _duckpipe_source 
-----+-------+------------------
-  1 | one   | default
-  2 | two   | default
-  3 | three | default
+ id |  val  |       _duckpipe_source       
+----+-------+------------------------------
+  1 | one   | default/public.shutdown_test
+  2 | two   | default/public.shutdown_test
+  3 | three | default/public.shutdown_test
 (3 rows)
 
 -- Cleanup

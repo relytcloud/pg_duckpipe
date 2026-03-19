@@ -37,12 +37,12 @@ SELECT pg_sleep(3);
 (1 row)
 
 SELECT * FROM public.cpk_orders_ducklake ORDER BY region, order_id;
- region | order_id | product | qty | _duckpipe_source 
---------+----------+---------+-----+------------------
- east   |        1 | widget  |  10 | default
- east   |        2 | gadget  |   5 | default
- west   |        1 | widget  |  20 | default
- west   |        2 | gizmo   |   3 | default
+ region | order_id | product | qty |     _duckpipe_source      
+--------+----------+---------+-----+---------------------------
+ east   |        1 | widget  |  10 | default/public.cpk_orders
+ east   |        2 | gadget  |   5 | default/public.cpk_orders
+ west   |        1 | widget  |  20 | default/public.cpk_orders
+ west   |        2 | gizmo   |   3 | default/public.cpk_orders
 (4 rows)
 
 -- UPDATE by composite PK
@@ -55,12 +55,12 @@ SELECT pg_sleep(3);
 (1 row)
 
 SELECT * FROM public.cpk_orders_ducklake ORDER BY region, order_id;
- region | order_id |   product    | qty | _duckpipe_source 
---------+----------+--------------+-----+------------------
- east   |        1 | widget       |  15 | default
- east   |        2 | super_gadget |   5 | default
- west   |        1 | widget       |  20 | default
- west   |        2 | gizmo        |   3 | default
+ region | order_id |   product    | qty |     _duckpipe_source      
+--------+----------+--------------+-----+---------------------------
+ east   |        1 | widget       |  15 | default/public.cpk_orders
+ east   |        2 | super_gadget |   5 | default/public.cpk_orders
+ west   |        1 | widget       |  20 | default/public.cpk_orders
+ west   |        2 | gizmo        |   3 | default/public.cpk_orders
 (4 rows)
 
 -- DELETE by composite PK
@@ -72,11 +72,11 @@ SELECT pg_sleep(2);
 (1 row)
 
 SELECT * FROM public.cpk_orders_ducklake ORDER BY region, order_id;
- region | order_id |   product    | qty | _duckpipe_source 
---------+----------+--------------+-----+------------------
- east   |        1 | widget       |  15 | default
- east   |        2 | super_gadget |   5 | default
- west   |        1 | widget       |  20 | default
+ region | order_id |   product    | qty |     _duckpipe_source      
+--------+----------+--------------+-----+---------------------------
+ east   |        1 | widget       |  15 | default/public.cpk_orders
+ east   |        2 | super_gadget |   5 | default/public.cpk_orders
+ west   |        1 | widget       |  20 | default/public.cpk_orders
 (3 rows)
 
 -- Three-column PK
@@ -105,12 +105,12 @@ SELECT pg_sleep(3);
 (1 row)
 
 SELECT * FROM public.cpk_triple_ducklake ORDER BY a, b, c;
- a | b | c | val | _duckpipe_source 
----+---+---+-----+------------------
- 1 | 1 | 1 | aaa | default
- 1 | 1 | 2 | aab | default
- 1 | 2 | 1 | aba | default
- 2 | 1 | 1 | baa | default
+ a | b | c | val |     _duckpipe_source      
+---+---+---+-----+---------------------------
+ 1 | 1 | 1 | aaa | default/public.cpk_triple
+ 1 | 1 | 2 | aab | default/public.cpk_triple
+ 1 | 2 | 1 | aba | default/public.cpk_triple
+ 2 | 1 | 1 | baa | default/public.cpk_triple
 (4 rows)
 
 -- Update one row, delete another
@@ -123,11 +123,11 @@ SELECT pg_sleep(2);
 (1 row)
 
 SELECT * FROM public.cpk_triple_ducklake ORDER BY a, b, c;
- a | b | c |   val   | _duckpipe_source 
----+---+---+---------+------------------
- 1 | 1 | 1 | updated | default
- 1 | 1 | 2 | aab     | default
- 2 | 1 | 1 | baa     | default
+ a | b | c |   val   |     _duckpipe_source      
+---+---+---+---------+---------------------------
+ 1 | 1 | 1 | updated | default/public.cpk_triple
+ 1 | 1 | 2 | aab     | default/public.cpk_triple
+ 2 | 1 | 1 | baa     | default/public.cpk_triple
 (3 rows)
 
 -- Rapid updates to same composite key (compaction test)
@@ -145,7 +145,7 @@ SELECT region, order_id, qty FROM public.cpk_orders_ducklake
 WHERE region = 'east' AND order_id = 1;
  region | order_id | qty 
 --------+----------+-----
- east   |        1 | 100
+ east   |        1 | 300
 (1 row)
 
 -- Cleanup

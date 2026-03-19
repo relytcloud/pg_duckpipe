@@ -66,10 +66,10 @@ SELECT source_table, target_table, sync_group, source_label, source_count
 FROM duckpipe.tables()
 WHERE target_table = 'public.orders_ducklake'
 ORDER BY source_table;
-  source_table   |      target_table      | sync_group | source_label | source_count 
------------------+------------------------+------------+--------------+--------------
- public.orders_a | public.orders_ducklake | shard_a    | shard_a      |            2
- public.orders_b | public.orders_ducklake | shard_b    | shard_b      |            2
+  source_table   |      target_table      | sync_group |      source_label       | source_count 
+-----------------+------------------------+------------+-------------------------+--------------
+ public.orders_a | public.orders_ducklake | shard_a    | shard_a/public.orders_a |            2
+ public.orders_b | public.orders_ducklake | shard_b    | shard_b/public.orders_b |            2
 (2 rows)
 
 -- =============================================================
@@ -79,10 +79,10 @@ SELECT source_table, sync_group, source_label
 FROM duckpipe.status()
 WHERE source_table IN ('public.orders_a', 'public.orders_b')
 ORDER BY source_table;
-  source_table   | sync_group | source_label 
------------------+------------+--------------
- public.orders_a | shard_a    | shard_a
- public.orders_b | shard_b    | shard_b
+  source_table   | sync_group |      source_label       
+-----------------+------------+-------------------------
+ public.orders_a | shard_a    | shard_a/public.orders_a
+ public.orders_b | shard_b    | shard_b/public.orders_b
 (2 rows)
 
 -- =============================================================
@@ -98,12 +98,12 @@ SELECT pg_sleep(8);
 (1 row)
 
 SELECT * FROM public.orders_ducklake ORDER BY id;
- id  | product  | qty | _duckpipe_source 
------+----------+-----+------------------
-   1 | widget   |  10 | shard_a
-   2 | gadget   |   5 | shard_a
- 101 | sprocket |  20 | shard_b
- 102 | bolt     |  50 | shard_b
+ id  | product  | qty |    _duckpipe_source     
+-----+----------+-----+-------------------------
+   1 | widget   |  10 | shard_a/public.orders_a
+   2 | gadget   |   5 | shard_a/public.orders_a
+ 101 | sprocket |  20 | shard_b/public.orders_b
+ 102 | bolt     |  50 | shard_b/public.orders_b
 (4 rows)
 
 -- =============================================================
@@ -117,12 +117,12 @@ SELECT pg_sleep(3);
 (1 row)
 
 SELECT * FROM public.orders_ducklake ORDER BY id;
- id  | product  | qty | _duckpipe_source 
------+----------+-----+------------------
-   1 | widget   |  99 | shard_a
-   2 | gadget   |   5 | shard_a
- 101 | sprocket |  20 | shard_b
- 102 | bolt     |  50 | shard_b
+ id  | product  | qty |    _duckpipe_source     
+-----+----------+-----+-------------------------
+   1 | widget   |  99 | shard_a/public.orders_a
+   2 | gadget   |   5 | shard_a/public.orders_a
+ 101 | sprocket |  20 | shard_b/public.orders_b
+ 102 | bolt     |  50 | shard_b/public.orders_b
 (4 rows)
 
 -- =============================================================
@@ -136,11 +136,11 @@ SELECT pg_sleep(4);
 (1 row)
 
 SELECT * FROM public.orders_ducklake ORDER BY id;
- id  | product | qty | _duckpipe_source 
------+---------+-----+------------------
-   1 | widget  |  99 | shard_a
-   2 | gadget  |   5 | shard_a
- 102 | bolt    |  50 | shard_b
+ id  | product | qty |    _duckpipe_source     
+-----+---------+-----+-------------------------
+   1 | widget  |  99 | shard_a/public.orders_a
+   2 | gadget  |   5 | shard_a/public.orders_a
+ 102 | bolt    |  50 | shard_b/public.orders_b
 (3 rows)
 
 -- =============================================================
@@ -154,9 +154,9 @@ SELECT pg_sleep(3);
 (1 row)
 
 SELECT * FROM public.orders_ducklake ORDER BY id;
- id  | product | qty | _duckpipe_source 
------+---------+-----+------------------
- 102 | bolt    |  50 | shard_b
+ id  | product | qty |    _duckpipe_source     
+-----+---------+-----+-------------------------
+ 102 | bolt    |  50 | shard_b/public.orders_b
 (1 row)
 
 -- Re-insert into orders_a for subsequent tests
@@ -168,10 +168,10 @@ SELECT pg_sleep(3);
 (1 row)
 
 SELECT * FROM public.orders_ducklake ORDER BY id;
- id  | product | qty | _duckpipe_source 
------+---------+-----+------------------
-   3 | nut     |  30 | shard_a
- 102 | bolt    |  50 | shard_b
+ id  | product | qty |    _duckpipe_source     
+-----+---------+-----+-------------------------
+   3 | nut     |  30 | shard_a/public.orders_a
+ 102 | bolt    |  50 | shard_b/public.orders_b
 (2 rows)
 
 -- =============================================================
@@ -203,11 +203,11 @@ SELECT pg_sleep(5);
 
 -- shard_a rows should match current orders_a; shard_b rows unchanged
 SELECT * FROM public.orders_ducklake ORDER BY id;
- id  | product | qty | _duckpipe_source 
------+---------+-----+------------------
-   3 | nut     |  30 | shard_a
-   4 | washer  |  40 | shard_a
- 102 | bolt    |  50 | shard_b
+ id  | product | qty |    _duckpipe_source     
+-----+---------+-----+-------------------------
+   3 | nut     |  30 | shard_a/public.orders_a
+   4 | washer  |  40 | shard_a/public.orders_a
+ 102 | bolt    |  50 | shard_b/public.orders_b
 (3 rows)
 
 -- =============================================================
@@ -247,11 +247,11 @@ SELECT pg_sleep(6);
 
 -- shard_b rows should be present (shard_a rows may remain as orphaned data)
 SELECT id, product, qty, _duckpipe_source FROM public.orders_ducklake
-WHERE _duckpipe_source = 'shard_b' ORDER BY id;
- id  | product | qty | _duckpipe_source 
------+---------+-----+------------------
- 102 | bolt    |  50 | shard_b
- 103 | rivet   |  15 | shard_b
+WHERE _duckpipe_source = 'shard_b/public.orders_b' ORDER BY id;
+ id  | product | qty |    _duckpipe_source     
+-----+---------+-----+-------------------------
+ 102 | bolt    |  50 | shard_b/public.orders_b
+ 103 | rivet   |  15 | shard_b/public.orders_b
 (2 rows)
 
 -- =============================================================

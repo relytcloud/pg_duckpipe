@@ -136,7 +136,7 @@ SELECT pg_sleep(6);
 
 -- shard_b rows should be present (shard_a rows may remain as orphaned data)
 SELECT id, product, qty, _duckpipe_source FROM public.orders_ducklake
-WHERE _duckpipe_source = 'shard_b' ORDER BY id;
+WHERE _duckpipe_source = 'shard_b/public.orders_b' ORDER BY id;
 
 -- =============================================================
 -- Cleanup

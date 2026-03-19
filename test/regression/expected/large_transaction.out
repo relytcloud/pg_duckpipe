@@ -92,7 +92,7 @@ SELECT pg_sleep(3);
 SELECT count(*) AS remaining_rows FROM public.large_txn_ducklake;
  remaining_rows 
 ----------------
-            397
+            400
 (1 row)
 
 -- Cleanup

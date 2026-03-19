@@ -932,20 +932,24 @@ fn add_table(
             .update(&create_sql, None, &[])
             .map_err(|e| format!("CREATE TABLE: {}", e))?;
 
-        // Fan-in guard: check if another group already targets this table
+        // Fan-in guard: check if ANY existing mapping targets the same table
+        // (catches both cross-group and same-group fan-in attempts)
         {
             let fan_in_args = unsafe {
                 [
                     DatumWithOid::new(t_schema.as_str(), PgBuiltInOids::TEXTOID.value()),
                     DatumWithOid::new(t_table.as_str(), PgBuiltInOids::TEXTOID.value()),
                     DatumWithOid::new(group, PgBuiltInOids::TEXTOID.value()),
+                    DatumWithOid::new(schema.as_str(), PgBuiltInOids::TEXTOID.value()),
+                    DatumWithOid::new(table.as_str(), PgBuiltInOids::TEXTOID.value()),
                 ]
             };
             let result = client
                 .select(
-                    "SELECT g.name FROM duckpipe.table_mappings m \
+                    "SELECT g.name, m.source_schema, m.source_table FROM duckpipe.table_mappings m \
                  JOIN duckpipe.sync_groups g ON m.group_id = g.id \
-                 WHERE m.target_schema = $1 AND m.target_table = $2 AND g.name != $3 \
+                 WHERE m.target_schema = $1 AND m.target_table = $2 \
+                 AND NOT (g.name = $3 AND m.source_schema = $4 AND m.source_table = $5) \
                  LIMIT 1",
                     Some(1),
                     &fan_in_args,
@@ -1020,8 +1024,9 @@ fn add_table(
             let _ = client.update(&sql, None, &[]);
         }
 
-        // Insert table mapping with source OID and source_label (group name)
+        // Insert table mapping with source OID and source_label (group/schema.table)
         let initial_state = if copy_data { "SNAPSHOT" } else { "STREAMING" };
+        let source_label = format!("{}/{}.{}", group, schema, table);
         let args = unsafe {
             [
                 DatumWithOid::new(schema.as_str(), PgBuiltInOids::TEXTOID.value()),
@@ -1031,13 +1036,14 @@ fn add_table(
                 DatumWithOid::new(initial_state, PgBuiltInOids::TEXTOID.value()),
                 DatumWithOid::new(group, PgBuiltInOids::TEXTOID.value()),
                 DatumWithOid::new(source_oid, PgBuiltInOids::INT8OID.value()),
+                DatumWithOid::new(source_label.as_str(), PgBuiltInOids::TEXTOID.value()),
             ]
         };
         client
             .update(
                 "INSERT INTO duckpipe.table_mappings (group_id, source_schema, source_table, \
                  target_schema, target_table, state, source_oid, source_label) \
-                 SELECT sg.id, $1, $2, $3, $4, $5, $7, sg.name \
+                 SELECT sg.id, $1, $2, $3, $4, $5, $7, $8 \
                  FROM duckpipe.sync_groups sg WHERE sg.name = $6",
                 None,
                 &args,
