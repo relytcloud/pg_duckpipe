@@ -170,9 +170,8 @@ The new source starts with a snapshot and catches up to live streaming while exi
 
 - All source tables must have a **PRIMARY KEY**
 - All source tables must have **identical schemas** (same column names, same types, same order) — validated at `add_table()` time
-- The `_duckpipe_source` column is automatically added to the target; do not include it in source schemas
 
 ## Limitations
 
-- **No DDL support**: schema changes (ALTER TABLE) on fan-in source tables are not supported. All sources sharing a target must maintain identical schemas. If you need to alter a column, remove all sources, alter the tables, drop and re-add them.
+- **No DDL support**: schema changes (ALTER TABLE) on fan-in source tables are not supported. All sources sharing a target must maintain identical schemas.
 - Primary key values should be globally unique across sources for best results. Overlapping PKs across sources will not cause errors (each source's data is isolated), but analytics queries should be aware that the same PK can appear from different sources.
