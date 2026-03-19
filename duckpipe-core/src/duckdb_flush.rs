@@ -626,6 +626,13 @@ impl FlushWorker {
     }
 }
 
+impl Drop for FlushWorker {
+    fn drop(&mut self) {
+        // DETACH DuckLake before closing the connection to ensure clean state.
+        let _ = self.db.execute_batch("DETACH lake;");
+    }
+}
+
 /// Result of a DuckDB-based flush.
 #[derive(Debug)]
 pub struct DuckDbFlushResult {
