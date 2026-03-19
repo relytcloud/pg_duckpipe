@@ -3,7 +3,6 @@
 ## TODO
 
 ### Performance
-- [ ] Snapshot WAL buffering — unbounded queue accumulation during long snapshots; needs spill-to-disk or backpressure
 - [ ] Snapshot producers block WAL consumer — sync file I/O on single-threaded tokio; move to `spawn_blocking`
 - [ ] Byte-based flush threshold — replace row-count with `flush_buffer_size_mb` using `avg_row_bytes`
 - [ ] Batch compaction tuning — reduce Parquet file proliferation under sustained small-batch writes
@@ -84,4 +83,5 @@
 - Remote PG sync via `conninfo` — slot+publication on remote, catalog introspection, remote cleanup
 - Regression tests all passing
 - Dockerfile for self-contained playground env
+- Spillable DuckDB buffer for snapshot WAL buffering — spill-to-disk + backpressure exclusion for snapshot-queued changes
 - Bug fixes: `confirmed_lsn` reset on re-add, `lag_bytes` flat during catch-up, benchmark cleanup, index on `group_id` FK, snapshot retry backoff, bounded DuckDB memory
