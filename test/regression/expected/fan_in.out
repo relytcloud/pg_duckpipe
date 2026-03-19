@@ -42,7 +42,7 @@ SELECT duckpipe.add_table('public.orders_a', 'public.orders_ducklake', 'shard_a'
 -- =============================================================
 SELECT duckpipe.add_table('public.orders_b', 'public.orders_ducklake', 'shard_b', false);
 NOTICE:  relation "orders_ducklake" already exists, skipping
-ERROR:  Failed to set up local target: target table public.orders_ducklake is already managed by group 'shard_a'; pass fan_in => true to confirm fan-in streaming
+ERROR:  Failed to set up local target: target table public.orders_ducklake is already managed by group 'shard_a' (source: public.orders_a); pass fan_in => true to confirm fan-in streaming
 -- =============================================================
 -- Test 3: Schema mismatch with fan_in => true
 -- =============================================================

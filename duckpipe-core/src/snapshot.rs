@@ -463,12 +463,6 @@ fn run_duckdb_consumer(
         ));
     }
 
-    // Check if the target table has a _duckpipe_source column.
-    // Tables manually recreated with `CREATE TABLE ... (LIKE src) USING ducklake` lack it.
-    let has_source_column = col_names
-        .iter()
-        .any(|n| n.to_lowercase() == "_duckpipe_source");
-
     // Separate source data columns from the _duckpipe_source system column.
     // CSV data from COPY only contains source columns; _duckpipe_source is added by duckpipe.
     let source_col_names: Vec<&String> = col_names
@@ -481,10 +475,9 @@ fn run_duckdb_consumer(
         .collect();
     let source_cols_list = quoted_source_cols.join(", ");
 
-    // Full column list including _duckpipe_source for INSERT (only if present)
+    // Full column list including _duckpipe_source for INSERT
     let quoted_all_cols: Vec<String> = col_names
         .iter()
-        .filter(|n| has_source_column || n.to_lowercase() != "_duckpipe_source")
         .map(|n| format!("\"{}\"", n.replace('"', "\"\"")))
         .collect();
     let all_cols_list = quoted_all_cols.join(", ");
@@ -499,17 +492,13 @@ fn run_duckdb_consumer(
     db.execute_batch("BEGIN")
         .map_err(|e| format!("duckdb begin: {}", e))?;
 
-    // Scope DELETE by _duckpipe_source when source_label is set AND column exists (fan-in safe)
-    let delete_sql = if has_source_column {
-        if let Some(label) = source_label {
-            format!(
-                "DELETE FROM {} WHERE \"_duckpipe_source\" = '{}'",
-                target_ref,
-                label.replace('\'', "''")
-            )
-        } else {
-            format!("DELETE FROM {}", target_ref)
-        }
+    // Scope DELETE by _duckpipe_source when source_label is set (fan-in safe)
+    let delete_sql = if let Some(label) = source_label {
+        format!(
+            "DELETE FROM {} WHERE \"_duckpipe_source\" = '{}'",
+            target_ref,
+            label.replace('\'', "''")
+        )
     } else {
         format!("DELETE FROM {}", target_ref)
     };
@@ -527,35 +516,18 @@ fn run_duckdb_consumer(
                 chunk_count += 1;
                 let t_chunk = if timing { Some(Instant::now()) } else { None };
 
-                // Build INSERT: source columns from CSV + _duckpipe_source literal (if column exists)
-                let insert_sql = if has_source_column {
-                    if let Some(label) = source_label {
-                        format!(
-                            "INSERT INTO {} ({}) SELECT {}, '{}' FROM read_csv('{}', header=true, nullstr='__DUCKPIPE_NULL__')",
-                            target_ref,
-                            all_cols_list,
-                            source_cols_list,
-                            label.replace('\'', "''"),
-                            path.replace('\'', "''")
-                        )
-                    } else {
-                        format!(
-                            "INSERT INTO {} ({}) SELECT {}, NULL FROM read_csv('{}', header=true, nullstr='__DUCKPIPE_NULL__')",
-                            target_ref,
-                            all_cols_list,
-                            source_cols_list,
-                            path.replace('\'', "''")
-                        )
-                    }
-                } else {
-                    format!(
-                        "INSERT INTO {} ({}) SELECT {} FROM read_csv('{}', header=true, nullstr='__DUCKPIPE_NULL__')",
-                        target_ref,
-                        source_cols_list,
-                        source_cols_list,
-                        path.replace('\'', "''")
-                    )
-                };
+                // Build INSERT: source columns from CSV + _duckpipe_source literal
+                let source_value = source_label
+                    .map(|l| format!("'{}'", l.replace('\'', "''")))
+                    .unwrap_or_else(|| "NULL".to_string());
+                let insert_sql = format!(
+                    "INSERT INTO {} ({}) SELECT {}, {} FROM read_csv('{}', header=true, nullstr='__DUCKPIPE_NULL__')",
+                    target_ref,
+                    all_cols_list,
+                    source_cols_list,
+                    source_value,
+                    path.replace('\'', "''")
+                );
 
                 let rows = db.execute(&insert_sql, []).map_err(|e| {
                     let _ = db.execute_batch("ROLLBACK");

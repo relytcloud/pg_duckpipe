@@ -956,13 +956,23 @@ fn add_table(
                 )
                 .unwrap();
             let mut existing_group: Option<String> = None;
+            let mut existing_source: Option<String> = None;
             for r in result {
                 existing_group = r.get::<String>(1).unwrap();
+                let src_schema: Option<String> = r.get::<String>(2).unwrap();
+                let src_table: Option<String> = r.get::<String>(3).unwrap();
+                if let (Some(s), Some(t)) = (src_schema, src_table) {
+                    existing_source = Some(format!("{}.{}", s, t));
+                }
             }
             if let Some(ref other_group) = existing_group {
                 if !fan_in {
+                    let source_info = existing_source
+                        .as_deref()
+                        .map(|s| format!(" (source: {})", s))
+                        .unwrap_or_default();
                     return Err(format!(
-                        "target table {}.{} is already managed by group '{}'; \
+                        "target table {}.{} is already managed by group '{}'{source_info}; \
                          pass fan_in => true to confirm fan-in streaming",
                         t_schema, t_table, other_group
                     ));

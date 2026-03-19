@@ -54,6 +54,7 @@ WHERE source_table = 'snap_err_src';
 
 -- Step 5: Fix the problem — recreate the ducklake target
 CREATE TABLE public.snap_err_src_ducklake (LIKE snap_err_src) USING ducklake;
+ALTER TABLE public.snap_err_src_ducklake ADD COLUMN _duckpipe_source text;
 
 -- Step 6: Force immediate auto-retry by setting retry_at to now
 -- (avoids waiting for the 30s backoff timer)

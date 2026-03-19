@@ -35,9 +35,6 @@ pub struct LakeTableInfo {
     lake_schema: String,
     /// Column types in ordinal order (DuckDB type strings: INTEGER, VARCHAR, etc.)
     column_types: Vec<String>,
-    /// Whether the target table has a `_duckpipe_source` column.
-    /// False for tables manually recreated with `CREATE TABLE ... (LIKE src) USING ducklake`.
-    has_source_column: bool,
 }
 
 /// Query the DuckLake catalog via information_schema to discover the actual schema
@@ -110,12 +107,6 @@ fn discover_lake_table_info(
         ));
     }
 
-    // Check if the target table has a _duckpipe_source column before filtering it out.
-    // Tables manually recreated with `CREATE TABLE ... (LIKE src) USING ducklake` lack it.
-    let has_source_column = col_rows
-        .iter()
-        .any(|(name, _)| name.to_lowercase() == "_duckpipe_source");
-
     // Build column_types aligned to expected_attnames order.
     // The DuckLake catalog columns should match pgoutput attnames.
     // Filter out _duckpipe_source — it's a system column managed by duckpipe,
@@ -140,7 +131,6 @@ fn discover_lake_table_info(
     Ok(LakeTableInfo {
         lake_schema,
         column_types,
-        has_source_column,
     })
 }
 
@@ -335,10 +325,7 @@ impl FlushWorker {
             .iter()
             .map(|n| format!("\"{}\"", n.replace('"', "\"\"")))
             .collect();
-        // Only include _duckpipe_source if the target table has it
-        if lake_info.has_source_column {
-            all_cols.push("\"_duckpipe_source\"".to_string());
-        }
+        all_cols.push("\"_duckpipe_source\"".to_string());
         self.cached_all_cols = Some(all_cols);
 
         // Build buffer table schema
@@ -352,9 +339,7 @@ impl FlushWorker {
                 lake_info.column_types[i]
             ));
         }
-        if lake_info.has_source_column {
-            buf_cols.push("\"_duckpipe_source\" VARCHAR".to_string());
-        }
+        buf_cols.push("\"_duckpipe_source\" VARCHAR".to_string());
 
         let create_buf = format!("CREATE TABLE buffer ({})", buf_cols.join(", "));
         self.db
@@ -408,7 +393,8 @@ impl FlushWorker {
         let mut seq = seq_start;
         let fixed_row_bytes = self.cached_fixed_row_bytes;
         let mut var_total: usize = 0;
-        let source_label_ref = self.source_label.clone();
+        // Resolve source label once before the loop — avoids per-row Option<String> clone
+        let append_source: Option<&str> = self.source_label.as_deref();
 
         {
             let mut appender = self
@@ -450,14 +436,8 @@ impl FlushWorker {
                     }
                 }
 
-                // Append _duckpipe_source value only if target has the column
-                if self
-                    .lake_info
-                    .as_ref()
-                    .map_or(false, |i| i.has_source_column)
-                {
-                    row.push(Box::new(source_label_ref.clone()));
-                }
+                // Append _duckpipe_source value (NULL if no source_label set)
+                row.push(Box::new(append_source.map(|s| s.to_string())));
 
                 let refs: Vec<&dyn duckdb::ToSql> = row.iter().map(|b| b.as_ref()).collect();
                 appender
@@ -556,11 +536,10 @@ impl FlushWorker {
             .iter()
             .map(|c| format!("{target_ref}.{c} = compacted.{c}"))
             .collect();
-        // When source_label is set AND the target has _duckpipe_source, scope DELETE
-        // to only rows from this source. This enables fan-in: multiple sources can
-        // write to the same target without cross-source interference.
-        let source_scope = if self.source_label.is_some() && lake_info.has_source_column {
-            let label = self.source_label.as_ref().unwrap();
+        // When source_label is set, scope DELETE to only rows from this source.
+        // This enables fan-in: multiple sources can write to the same target
+        // without cross-source interference.
+        let source_scope = if let Some(label) = &self.source_label {
             format!(
                 " AND {target_ref}.\"_duckpipe_source\" = '{}'",
                 label.replace('\'', "''")

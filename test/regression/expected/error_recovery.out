@@ -62,6 +62,7 @@ WHERE source_table = 'err_src';
 
 -- Re-create the target table (fix the problem)
 CREATE TABLE public.err_src_ducklake (LIKE err_src) USING ducklake;
+ALTER TABLE public.err_src_ducklake ADD COLUMN _duckpipe_source text;
 -- Insert new data to trigger sync recovery
 INSERT INTO err_src VALUES (4, 'four');
 SELECT pg_sleep(3);
