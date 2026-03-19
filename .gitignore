@@ -40,6 +40,9 @@ test/daemon/results/
 .DS_Store
 
 # Build directories
-build/
+/build/
 tmp_test/
 target/
+
+# Local dependency builds (created by /build skill)
+deps/
