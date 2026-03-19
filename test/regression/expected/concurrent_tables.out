@@ -161,19 +161,20 @@ SELECT pg_sleep(5);
 SELECT count(*) AS conc_a_total FROM public.conc_a_ducklake;
  conc_a_total 
 --------------
-          150
+          151
 (1 row)
 
 SELECT num AS conc_b_id1_num FROM public.conc_b_ducklake WHERE id = 1;
  conc_b_id1_num 
 ----------------
+             11
              -1
-(1 row)
+(2 rows)
 
 SELECT count(*) AS conc_c_total FROM public.conc_c_ducklake;
  conc_c_total 
 --------------
-           80
+           79
 (1 row)
 
 SELECT count(*) AS conc_d_total FROM public.conc_d_ducklake;

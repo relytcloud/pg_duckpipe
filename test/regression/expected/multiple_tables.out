@@ -40,24 +40,24 @@ SELECT pg_sleep(4);
 (1 row)
 
 SELECT * FROM public.multi_a_ducklake ORDER BY id;
- id |  val  
-----+-------
-  1 | alpha
-  2 | beta
+ id |  val  | _duckpipe_source 
+----+-------+------------------
+  1 | alpha | default
+  2 | beta  | default
 (2 rows)
 
 SELECT * FROM public.multi_b_ducklake ORDER BY id;
- id | num 
-----+-----
- 10 | 100
- 20 | 200
+ id | num | _duckpipe_source 
+----+-----+------------------
+ 10 | 100 | default
+ 20 | 200 | default
 (2 rows)
 
 SELECT * FROM public.multi_c_ducklake ORDER BY id;
- id | flag 
-----+------
-  1 | t
-  2 | f
+ id | flag | _duckpipe_source 
+----+------+------------------
+  1 | t    | default
+  2 | f    | default
 (2 rows)
 
 -- Update and delete across tables
@@ -70,16 +70,16 @@ SELECT pg_sleep(4);
 (1 row)
 
 SELECT * FROM public.multi_a_ducklake ORDER BY id;
- id |  val  
-----+-------
-  1 | gamma
-  2 | beta
+ id |  val  | _duckpipe_source 
+----+-------+------------------
+  1 | gamma | default
+  2 | beta  | default
 (2 rows)
 
 SELECT * FROM public.multi_b_ducklake ORDER BY id;
- id | num 
-----+-----
- 20 | 200
+ id | num | _duckpipe_source 
+----+-----+------------------
+ 20 | 200 | default
 (1 row)
 
 -- Remove tables individually

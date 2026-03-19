@@ -356,6 +356,7 @@ pub struct TableMapping {
     pub enabled: bool,
     pub source_oid: Option<i64>,
     pub error_message: Option<String>,
+    pub source_label: Option<String>,
 }
 
 /// Fixed byte size for a column type OID. Returns 0 for variable-length types (text, jsonb, etc).

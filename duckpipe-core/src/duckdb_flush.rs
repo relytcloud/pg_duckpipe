@@ -109,8 +109,11 @@ fn discover_lake_table_info(
 
     // Build column_types aligned to expected_attnames order.
     // The DuckLake catalog columns should match pgoutput attnames.
+    // Filter out _duckpipe_source — it's a system column managed by duckpipe,
+    // not from pgoutput, so it should not appear in the expected alignment.
     let lake_col_map: std::collections::HashMap<String, String> = col_rows
         .into_iter()
+        .filter(|(name, _)| name.to_lowercase() != "_duckpipe_source")
         .map(|(name, dtype)| (name.to_lowercase(), dtype))
         .collect();
 
@@ -212,6 +215,10 @@ pub struct FlushWorker {
     /// DuckDB memory limit string for the flush phase (e.g. "512MB").
     /// Stored so `flush_buffer()` can raise the limit before compaction.
     flush_memory_limit: String,
+    /// Source label for fan-in scoping (sync group name).
+    /// When Some, the `_duckpipe_source` column is populated in the buffer and
+    /// DELETE operations are scoped to this label.
+    source_label: Option<String>,
 }
 
 impl FlushWorker {
@@ -223,6 +230,7 @@ impl FlushWorker {
         pg_connstr: &str,
         ducklake_schema: &str,
         resolved_config: &ResolvedConfig,
+        source_label: Option<String>,
     ) -> Result<Self, String> {
         let config = Config::default()
             .allow_unsigned_extensions()
@@ -270,6 +278,7 @@ impl FlushWorker {
             may_have_conflicts: true,
             flush_memory_limit,
             cached_fixed_row_bytes: 0,
+            source_label,
         })
     }
 
@@ -312,12 +321,13 @@ impl FlushWorker {
                 .map(|&i| format!("\"{}\"", attnames[i].replace('"', "\"\"")))
                 .collect(),
         );
-        self.cached_all_cols = Some(
-            attnames
-                .iter()
-                .map(|n| format!("\"{}\"", n.replace('"', "\"\"")))
-                .collect(),
-        );
+        let mut all_cols: Vec<String> = attnames
+            .iter()
+            .map(|n| format!("\"{}\"", n.replace('"', "\"\"")))
+            .collect();
+        // Always include _duckpipe_source in all_cols so it's part of INSERT
+        all_cols.push("\"_duckpipe_source\"".to_string());
+        self.cached_all_cols = Some(all_cols);
 
         // Build buffer table schema
         let mut buf_cols = Vec::new();
@@ -330,6 +340,7 @@ impl FlushWorker {
                 lake_info.column_types[i]
             ));
         }
+        buf_cols.push("\"_duckpipe_source\" VARCHAR".to_string());
 
         let create_buf = format!("CREATE TABLE buffer ({})", buf_cols.join(", "));
         self.db
@@ -383,6 +394,7 @@ impl FlushWorker {
         let mut seq = seq_start;
         let fixed_row_bytes = self.cached_fixed_row_bytes;
         let mut var_total: usize = 0;
+        let source_label_ref = self.source_label.clone();
 
         {
             let mut appender = self
@@ -398,7 +410,8 @@ impl FlushWorker {
                     ChangeType::Delete => 2,
                 };
 
-                let mut row: Vec<Box<dyn duckdb::ToSql>> = Vec::with_capacity(2 + ncols);
+                // +3 = _seq, _op_type, _duckpipe_source
+                let mut row: Vec<Box<dyn duckdb::ToSql>> = Vec::with_capacity(3 + ncols);
                 row.push(Box::new(seq));
                 row.push(Box::new(op_type));
 
@@ -422,6 +435,9 @@ impl FlushWorker {
                         }
                     }
                 }
+
+                // Append _duckpipe_source value
+                row.push(Box::new(source_label_ref.clone()));
 
                 let refs: Vec<&dyn duckdb::ToSql> = row.iter().map(|b| b.as_ref()).collect();
                 appender
@@ -520,12 +536,24 @@ impl FlushWorker {
             .iter()
             .map(|c| format!("{target_ref}.{c} = compacted.{c}"))
             .collect();
+        // When source_label is set, scope DELETE to only rows from this source.
+        // This enables fan-in: multiple sources can write to the same target
+        // without cross-source interference.
+        let source_scope = if let Some(ref label) = self.source_label {
+            format!(
+                " AND {target_ref}.\"_duckpipe_source\" = '{}'",
+                label.replace('\'', "''")
+            )
+        } else {
+            String::new()
+        };
         let delete_sql = format!(
             "DELETE FROM {target_ref} WHERE EXISTS ( \
                  SELECT 1 FROM compacted WHERE {pk_match} \
-             )",
+             ){source_scope}",
             target_ref = target_ref,
-            pk_match = pk_where.join(" AND ")
+            pk_match = pk_where.join(" AND "),
+            source_scope = source_scope
         );
 
         let t_phase = Instant::now();

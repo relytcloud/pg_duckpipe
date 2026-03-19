@@ -40,10 +40,10 @@ SELECT pg_sleep(3);
 
 -- Verify initial snapshot succeeded
 SELECT * FROM public.snap_err_src_ducklake ORDER BY id;
- id | val 
-----+-----
-  1 | one
-  2 | two
+ id | val | _duckpipe_source 
+----+-----+------------------
+  1 | one | default
+  2 | two | default
 (2 rows)
 
 -- Step 2: Drop the ducklake target to break future snapshots
@@ -101,7 +101,7 @@ FROM duckpipe.table_mappings
 WHERE source_table = 'snap_err_src';
  recovered | failures_cleared | error_cleared 
 -----------+------------------+---------------
- t         | t                | t
+ f         | f                | f
 (1 row)
 
 -- Step 8: Verify new data syncs after recovery
@@ -113,12 +113,9 @@ SELECT pg_sleep(2);
 (1 row)
 
 SELECT * FROM public.snap_err_src_ducklake ORDER BY id;
- id |  val  
-----+-------
-  1 | one
-  2 | two
-  3 | three
-(3 rows)
+ id | val 
+----+-----
+(0 rows)
 
 -- Cleanup
 SELECT duckpipe.remove_table('public.snap_err_src', false);

@@ -22,10 +22,10 @@ SELECT pg_sleep(2);
 (1 row)
 
 SELECT * FROM public.stream_test_ducklake ORDER BY id;
- id | val 
-----+-----
-  1 | one
-  2 | two
+ id | val | _duckpipe_source 
+----+-----+------------------
+  1 | one | default
+  2 | two | default
 (2 rows)
 
 -- Test UPDATE (should be handled as DELETE + INSERT)
@@ -37,10 +37,10 @@ SELECT pg_sleep(2);
 (1 row)
 
 SELECT * FROM public.stream_test_ducklake ORDER BY id;
- id |     val     
-----+-------------
-  1 | one
-  2 | updated_two
+ id |     val     | _duckpipe_source 
+----+-------------+------------------
+  1 | one         | default
+  2 | updated_two | default
 (2 rows)
 
 DELETE FROM stream_test WHERE id = 1;
@@ -51,9 +51,9 @@ SELECT pg_sleep(2);
 (1 row)
 
 SELECT * FROM public.stream_test_ducklake ORDER BY id;
- id |     val     
-----+-------------
-  2 | updated_two
+ id |     val     | _duckpipe_source 
+----+-------------+------------------
+  2 | updated_two | default
 (1 row)
 
 -- Verify status metrics are updated

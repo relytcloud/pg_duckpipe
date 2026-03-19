@@ -29,6 +29,8 @@ test: large_transaction
 test: concurrent_tables
 # Multiple independent sync groups
 test: multi_group
+# Fan-in streaming: multiple sources → single target
+test: fan_in
 # Error detection and recovery via resync
 test: error_recovery
 # Snapshot error recovery with exponential backoff and auto-retry

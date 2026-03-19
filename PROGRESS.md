@@ -8,6 +8,8 @@
 - [ ] Batch compaction tuning — reduce Parquet file proliferation under sustained small-batch writes
 - [ ] Inline data flush
 - [ ] Parquet-over-PG write throughput — ~10k rows/sec cap bottleneck for large catch-up
+- [ ] Source-scoped DELETE in fan-in mode — add `_duckpipe_source` column; each source deduplicates only against its own data via Parquet min/max pruning
+- [ ] Time-bounded DELETE — user-provided timestamp column + immutability horizon; skip Parquet files older than the horizon during DELETE
 - [ ] DELETE phase dominates mixed DML flush — consider DuckLake-native delete-by-PK
 - [ ] DuckLake commit contention — jumps from 1.7ms (1T) to 10.9ms (4T); metadata lock issue
 - [ ] Mixed DML catch-up shows 0 rows/s — need `changes_applied` counter separate from `rows_synced`

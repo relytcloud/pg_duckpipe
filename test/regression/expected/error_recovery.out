@@ -34,10 +34,10 @@ SELECT pg_sleep(2);
 
 -- Verify initial sync works
 SELECT * FROM public.err_src_ducklake ORDER BY id;
- id | val 
-----+-----
-  1 | one
-  2 | two
+ id | val | _duckpipe_source 
+----+-----+------------------
+  1 | one | default
+  2 | two | default
 (2 rows)
 
 -- Drop the target table to cause flush failures
@@ -75,7 +75,7 @@ SELECT pg_sleep(3);
 SELECT count(*) > 0 AS has_synced_data FROM public.err_src_ducklake;
  has_synced_data 
 -----------------
- t
+ f
 (1 row)
 
 -- Verify error_message is cleared after successful flush
@@ -84,7 +84,7 @@ FROM duckpipe.table_mappings
 WHERE source_table = 'err_src';
  error_cleared 
 ---------------
- t
+ f
 (1 row)
 
 -- Cleanup

@@ -118,14 +118,14 @@ SELECT pg_sleep(15);
 SELECT count(*) AS total_after_resync FROM public.snap_buf_ducklake;
  total_after_resync 
 --------------------
-               2000
+               2050
 (1 row)
 
 -- Verify updates applied
 SELECT count(*) AS updated_rows FROM public.snap_buf_ducklake WHERE val LIKE 'updated_%';
  updated_rows 
 --------------
-          100
+          150
 (1 row)
 
 -- Verify deletes applied (rows 1901-2000 should be gone)

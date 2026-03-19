@@ -34,15 +34,15 @@ SELECT pg_sleep(4);
 (1 row)
 
 SELECT * FROM public.rtl_keep_ducklake ORDER BY id;
- id |   val    
-----+----------
-  1 | keep_one
+ id |   val    | _duckpipe_source 
+----+----------+------------------
+  1 | keep_one | default
 (1 row)
 
 SELECT * FROM public.rtl_drop_ducklake ORDER BY id;
- id |   val    
-----+----------
-  1 | drop_one
+ id |   val    | _duckpipe_source 
+----+----------+------------------
+  1 | drop_one | default
 (1 row)
 
 -- Record confirmed_lsn BEFORE removing the table.
@@ -69,11 +69,11 @@ SELECT pg_sleep(6);
 (1 row)
 
 SELECT * FROM public.rtl_keep_ducklake ORDER BY id;
- id |    val     
-----+------------
-  1 | keep_one
-  2 | keep_two
-  3 | keep_three
+ id |    val     | _duckpipe_source 
+----+------------+------------------
+  1 | keep_one   | default
+  2 | keep_two   | default
+  3 | keep_three | default
 (3 rows)
 
 -- Core assertion: confirmed_lsn must have advanced past the pre-removal value.
