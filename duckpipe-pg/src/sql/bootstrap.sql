@@ -39,6 +39,7 @@ CREATE TABLE duckpipe.table_mappings (
     snapshot_duration_ms BIGINT,
     snapshot_rows        BIGINT,
     source_label    TEXT,
+    routing_enabled      BOOLEAN DEFAULT true,
     UNIQUE(group_id, source_schema, source_table),
     UNIQUE(group_id, source_oid)
 );

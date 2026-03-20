@@ -16,6 +16,7 @@
 - [ ] Mixed DML replication lag 50-100x append — WAL amplification + Parquet-scan DELETE phase
 
 ### Features
+- [ ] Per-table config JSONB column on `table_mappings` — consolidate `routing_enabled` and future per-table settings into a single `config JSONB` column (like `sync_groups.config`), avoid schema sprawl
 - [ ] Schema DDL sync — ALTER TABLE ADD/DROP COLUMN propagation
 - [ ] Staged storage — durable delta layer between WAL and DuckLake to decouple CDC from file proliferation
 - [ ] Explicit `Value` variants for more PG types (date, timestamp, uuid, numeric, interval, json)
@@ -28,6 +29,9 @@
 - [ ] `applied_lsn` stays NULL during SNAPSHOT/CATCHUP — set to `snapshot_lsn` after snapshot completes
 
 ### Robustness
+- [ ] Query routing permission check — verify the current user has SELECT on both source and target tables before routing; currently inherits permissions from the user who ran `add_table()`
+- [ ] Auto-mode: detect point lookups on any btree index, not just primary key — equality on a unique btree index column should also skip routing
+- [ ] Query routing + fan-in: currently skips routing for fan-in targets entirely — could auto-inject `WHERE _duckpipe_source = 'group/schema.table'` filter instead
 - [ ] Graceful handling of DuckLake schema drift (target table altered outside duckpipe)
 - [ ] Connection pooling for flush thread PG metadata updates
 - [ ] Regression tests for crash / error cases
@@ -37,7 +41,7 @@
 - [ ] CI: run `cargo test` for unit tests — currently only `make installcheck` in CI
 
 ### Future Vision
-- [ ] Transparent analytical query routing — planner hook to auto-reroute analytical queries to DuckLake
+- [x] Transparent analytical query routing — planner hook to auto-reroute analytical queries to DuckLake
 - [ ] Incremental materialized views — CDC-driven delta maintenance of aggregate/join views
 - [ ] Fan-out — one PG source to multiple DuckLake targets
 - [ ] Schema evolution timeline — audit log of DDL changes from Relation messages in the WAL stream

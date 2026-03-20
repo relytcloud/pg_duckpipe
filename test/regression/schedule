@@ -55,3 +55,5 @@ test: remove_table_lag
 test: jsonb_type
 # Remote sync: loopback TCP exercises tokio-postgres DDL path
 test: remote_sync
+# Transparent query routing: planner hook rewrites SELECTs to DuckLake targets
+test: query_routing

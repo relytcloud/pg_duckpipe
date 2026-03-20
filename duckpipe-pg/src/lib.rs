@@ -1,4 +1,5 @@
 mod api;
+mod planner_hook;
 mod worker;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -8,6 +9,20 @@ use pgrx::lwlock::PgLwLock;
 use pgrx::pg_shmem_init;
 use pgrx::prelude::*;
 use pgrx::shmem::*;
+
+// ---------------------------------------------------------------------------
+// Query routing GUC enum
+// ---------------------------------------------------------------------------
+
+#[derive(Copy, Clone, Debug, PostgresGucEnum)]
+pub(crate) enum QueryRoutingMode {
+    #[name = c"off"]
+    Off,
+    #[name = c"on"]
+    On,
+    #[name = c"auto"]
+    Auto,
+}
 
 pg_module_magic!();
 extension_sql_file!("./sql/bootstrap.sql", bootstrap);
@@ -84,7 +99,7 @@ pub static METRICS_SHM: PgLwLock<SharedMetrics> = unsafe { PgLwLock::new(c"duckp
 /// This flag lets read/write helpers gracefully degrade instead of crashing.
 static SHM_AVAILABLE: AtomicBool = AtomicBool::new(false);
 
-fn shmem_available() -> bool {
+pub(crate) fn shmem_available() -> bool {
     SHM_AVAILABLE.load(Ordering::Relaxed)
 }
 
@@ -272,6 +287,9 @@ pub(crate) static BATCH_SIZE_PER_GROUP: GucSetting<i32> = GucSetting::<i32>::new
 pub(crate) static ENABLED: GucSetting<bool> = GucSetting::<bool>::new(true);
 pub(crate) static DEBUG_LOG: GucSetting<bool> = GucSetting::<bool>::new(false);
 pub(crate) static DATA_INLINING_ROW_LIMIT: GucSetting<i32> = GucSetting::<i32>::new(0);
+pub(crate) static QUERY_ROUTING: GucSetting<QueryRoutingMode> =
+    GucSetting::<QueryRoutingMode>::new(QueryRoutingMode::Off);
+pub(crate) static QUERY_ROUTING_LOG: GucSetting<bool> = GucSetting::<bool>::new(false);
 
 #[pg_guard]
 extern "C-unwind" fn _PG_init() {
@@ -341,4 +359,24 @@ extern "C-unwind" fn _PG_init() {
         GucContext::Userset,
         GucFlags::empty(),
     );
+
+    GucRegistry::define_enum_guc(
+        c"duckpipe.query_routing",
+        c"Route analytical SELECTs on synced tables to DuckLake (off/on/auto)",
+        c"off = no routing, on = route all SELECTs, auto = route analytical queries only",
+        &QUERY_ROUTING,
+        GucContext::Userset,
+        GucFlags::empty(),
+    );
+
+    GucRegistry::define_bool_guc(
+        c"duckpipe.query_routing_log",
+        c"Emit NOTICE for each query routed to DuckLake",
+        c"Emit NOTICE for each query routed to DuckLake",
+        &QUERY_ROUTING_LOG,
+        GucContext::Userset,
+        GucFlags::empty(),
+    );
+
+    planner_hook::install_planner_hook();
 }
