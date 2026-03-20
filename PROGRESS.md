@@ -30,6 +30,7 @@
 
 ### Robustness
 - [ ] Query routing permission check — verify the current user has SELECT on both source and target tables before routing; currently inherits permissions from the user who ran `add_table()`
+- [ ] Auto-mode: detect point lookups on any btree index, not just primary key — equality on a unique btree index column should also skip routing
 - [ ] Graceful handling of DuckLake schema drift (target table altered outside duckpipe)
 - [ ] Connection pooling for flush thread PG metadata updates
 - [ ] Regression tests for crash / error cases

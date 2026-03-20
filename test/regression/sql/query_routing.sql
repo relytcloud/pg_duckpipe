@@ -71,7 +71,15 @@ SELECT id, status FROM qr_orders WHERE id = 1;
 SELECT count(*) AS agg_with_pk FROM qr_orders WHERE id = 1;
 
 -- =======================================================================
--- 4. Subquery routing
+-- 4. EXPLAIN shows DuckDB execution when routed
+-- =======================================================================
+SET duckpipe.query_routing = 'on';
+
+-- When routed, EXPLAIN should show DuckDB's Custom Scan
+EXPLAIN (COSTS OFF) SELECT count(*) FROM qr_orders;
+
+-- =======================================================================
+-- 5. Subquery routing
 -- =======================================================================
 SET duckpipe.query_routing = 'on';
 
@@ -106,8 +114,8 @@ SET duckpipe.query_routing = 'on';
 -- Disable routing for this table
 SELECT duckpipe.set_routing('public.qr_orders', false);
 
--- Wait for routing cache to expire (TTL=2s)
-SELECT pg_sleep(3);
+-- Wait for routing cache to expire (TTL=5s)
+SELECT pg_sleep(6);
 
 -- Verify tables() shows routing_enabled = false
 SELECT source_table, routing_enabled FROM duckpipe.tables()
@@ -123,8 +131,8 @@ SELECT count(*) AS disabled_count FROM qr_orders;
 -- Re-enable routing
 SELECT duckpipe.set_routing('public.qr_orders', true);
 
--- Wait for routing cache to expire
-SELECT pg_sleep(3);
+-- Wait for routing cache to expire (TTL=5s)
+SELECT pg_sleep(6);
 
 -- Should route again (NOTICE expected)
 SELECT count(*) AS reenabled_count FROM qr_orders;

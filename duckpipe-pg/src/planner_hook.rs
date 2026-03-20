@@ -190,18 +190,16 @@ unsafe fn rewrite_query_with_cache(
             let source_oid = (*rte).relid;
             let target_oid = entry.target_oid;
 
+            let src_name = oid_to_qualified_name(source_oid);
+            let tgt_name = oid_to_qualified_name(target_oid);
             if log_notices {
-                let src_name = oid_to_qualified_name(source_oid);
-                let tgt_name = oid_to_qualified_name(target_oid);
                 pgrx::notice!("duckpipe: routing {} \u{2192} {}", src_name, tgt_name);
             }
-            pgrx::debug1!(
-                "duckpipe: rewriting RTE relid {} -> {}",
-                source_oid,
-                target_oid
-            );
+            pgrx::debug1!("duckpipe: routing {} -> {}", src_name, tgt_name);
 
-            // Rewrite the RTE
+            // Rewrite the RTE.  relkind must match the target in case the
+            // source and target have different relation kinds (e.g., if the
+            // DuckLake table is registered as a foreign table in pg_class).
             (*rte).relid = target_oid;
             (*rte).relkind = pg_sys::get_rel_relkind(target_oid) as i8;
 
@@ -491,8 +489,10 @@ struct RoutingEntry {
     pk_attnum: Vec<i16>, // AttrNumber values for PK columns
 }
 
-/// Cache TTL in seconds.
-const CACHE_TTL_SECS: u64 = 2;
+/// Cache TTL in seconds.  The SPI refresh is cheap (~1ms catalog lookup)
+/// but we avoid running it on every query.  5s is a good balance between
+/// responsiveness (set_routing takes effect within 5s) and overhead.
+const CACHE_TTL_SECS: u64 = 5;
 
 static mut ROUTING_CACHE: RoutingCache = RoutingCache {
     data: None,

@@ -123,7 +123,28 @@ NOTICE:  duckpipe: routing public.qr_orders → public.qr_orders_ducklake
 (1 row)
 
 -- =======================================================================
--- 4. Subquery routing
+-- 4. EXPLAIN shows DuckDB execution when routed
+-- =======================================================================
+SET duckpipe.query_routing = 'on';
+-- When routed, EXPLAIN should show DuckDB's Custom Scan
+EXPLAIN (COSTS OFF) SELECT count(*) FROM qr_orders;
+NOTICE:  duckpipe: routing public.qr_orders → public.qr_orders_ducklake
+          QUERY PLAN           
+-------------------------------
+ Custom Scan (DuckDBScan)
+   DuckDB Execution Plan: 
+ 
+ ┌───────────────────────────┐
+ │      COLUMN_DATA_SCAN     │
+ │    ────────────────────   │
+ │           ~1 row          │
+ └───────────────────────────┘
+ 
+ 
+(10 rows)
+
+-- =======================================================================
+-- 5. Subquery routing
 -- =======================================================================
 SET duckpipe.query_routing = 'on';
 -- Subquery in FROM clause → DuckDB handles the subquery internally
@@ -172,8 +193,8 @@ SELECT duckpipe.set_routing('public.qr_orders', false);
  
 (1 row)
 
--- Wait for routing cache to expire (TTL=2s)
-SELECT pg_sleep(3);
+-- Wait for routing cache to expire (TTL=5s)
+SELECT pg_sleep(6);
  pg_sleep 
 ----------
  
@@ -209,8 +230,8 @@ SELECT duckpipe.set_routing('public.qr_orders', true);
  
 (1 row)
 
--- Wait for routing cache to expire
-SELECT pg_sleep(3);
+-- Wait for routing cache to expire (TTL=5s)
+SELECT pg_sleep(6);
  pg_sleep 
 ----------
  
