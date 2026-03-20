@@ -50,9 +50,11 @@ else
 fi
 
 echo "==> Building ducklake extension (generator=${GEN}) ..."
+EXT_CONFIG="${PWD}/extension_config.cmake"
 mkdir -p build/release
 cmake -G "${GEN}" \
     -DCMAKE_BUILD_TYPE=Release \
+    -DDUCKDB_EXTENSION_CONFIGS="${EXT_CONFIG}" \
     -S ./duckdb/ \
     -B build/release
 cmake --build build/release --config Release
