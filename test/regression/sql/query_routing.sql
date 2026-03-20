@@ -83,15 +83,14 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM qr_orders;
 -- =======================================================================
 SET duckpipe.query_routing = 'on';
 
--- Subquery in FROM clause → DuckDB handles the subquery internally
--- after the outer query is routed (no separate NOTICE for subquery RTEs)
+-- Subquery in FROM clause → inner table routed (NOTICE expected)
 SELECT cnt FROM (SELECT count(*) AS cnt FROM qr_orders) sub;
 
 -- =======================================================================
 -- 5. CTE routing
 -- =======================================================================
 
--- CTE with aggregation → DuckDB handles CTE body after routing
+-- CTE with aggregation → inner table routed (NOTICE expected)
 WITH order_summary AS (
     SELECT status, count(*) AS cnt FROM qr_orders GROUP BY status
 )

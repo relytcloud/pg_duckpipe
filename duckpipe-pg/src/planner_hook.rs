@@ -176,45 +176,45 @@ unsafe fn rewrite_query_with_cache(
         }
     }
 
-    if routed.is_empty() {
-        return;
-    }
+    // Rewrite matching RTEs at this level
+    if !routed.is_empty() {
+        // Auto mode: check if this is a point lookup (skip routing)
+        if matches!(mode, QueryRoutingMode::Auto) && is_point_lookup(parse, &routed, cache) {
+            pgrx::debug1!("duckpipe: skipping routing (point lookup detected)");
+            // Still recurse into subqueries/CTEs below — they may have
+            // their own analytical queries that should be routed.
+        } else {
+            let log_notices = get_routing_log();
 
-    // Auto mode: check if this is a point lookup (skip routing)
-    if matches!(mode, QueryRoutingMode::Auto) && is_point_lookup(parse, &routed, cache) {
-        pgrx::debug1!("duckpipe: skipping routing (point lookup detected)");
-        return;
-    }
+            for i in 0..len {
+                let rte = list_nth_rte(rtable, i);
+                if (*rte).rtekind != pg_sys::RTEKind::RTE_RELATION {
+                    continue;
+                }
+                if let Some(entry) = cache.entries.get(&(*rte).relid) {
+                    let source_oid = (*rte).relid;
+                    let target_oid = entry.target_oid;
 
-    let log_notices = get_routing_log();
+                    let src_name = oid_to_qualified_name(source_oid);
+                    let tgt_name = oid_to_qualified_name(target_oid);
+                    if log_notices {
+                        pgrx::notice!("duckpipe: routing {} \u{2192} {}", src_name, tgt_name);
+                    }
+                    pgrx::debug1!("duckpipe: routing {} -> {}", src_name, tgt_name);
 
-    // Rewrite matching RTEs
-    for i in 0..len {
-        let rte = list_nth_rte(rtable, i);
-        if (*rte).rtekind != pg_sys::RTEKind::RTE_RELATION {
-            continue;
-        }
-        if let Some(entry) = cache.entries.get(&(*rte).relid) {
-            let source_oid = (*rte).relid;
-            let target_oid = entry.target_oid;
+                    // Rewrite the RTE.  Both source (heap) and target (DuckLake via
+                    // custom TAM) have relkind='r', so no relkind update needed.
+                    (*rte).relid = target_oid;
 
-            let src_name = oid_to_qualified_name(source_oid);
-            let tgt_name = oid_to_qualified_name(target_oid);
-            if log_notices {
-                pgrx::notice!("duckpipe: routing {} \u{2192} {}", src_name, tgt_name);
+                    // Update RTEPermissionInfo (PG16+)
+                    rewrite_perminfo(parse, rte, target_oid);
+                }
             }
-            pgrx::debug1!("duckpipe: routing {} -> {}", src_name, tgt_name);
-
-            // Rewrite the RTE.  Both source (heap) and target (DuckLake via
-            // custom TAM) have relkind='r', so no relkind update needed.
-            (*rte).relid = target_oid;
-
-            // Update RTEPermissionInfo (PG16+)
-            rewrite_perminfo(parse, rte, target_oid);
         }
     }
 
-    // Recurse into subqueries and CTEs
+    // Always recurse into subqueries and CTEs — they may reference
+    // routed tables even when the outer query doesn't.
     rewrite_subqueries(parse, mode, cache);
 }
 
