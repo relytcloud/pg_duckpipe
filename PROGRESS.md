@@ -29,6 +29,7 @@
 - [ ] `applied_lsn` stays NULL during SNAPSHOT/CATCHUP — set to `snapshot_lsn` after snapshot completes
 
 ### Robustness
+- [ ] Query routing permission check — verify the current user has SELECT on both source and target tables before routing; currently inherits permissions from the user who ran `add_table()`
 - [ ] Graceful handling of DuckLake schema drift (target table altered outside duckpipe)
 - [ ] Connection pooling for flush thread PG metadata updates
 - [ ] Regression tests for crash / error cases
