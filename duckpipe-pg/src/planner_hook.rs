@@ -573,6 +573,15 @@ impl RoutingCache {
             }
         }
 
+        // Exclude fan-in tables: multiple sources sharing the same target
+        // would return a superset of data when routed.  Count sources per
+        // target and remove any with count > 1.
+        let mut target_source_count: HashMap<pg_sys::Oid, u32> = HashMap::new();
+        for entry in entries.values() {
+            *target_source_count.entry(entry.target_oid).or_insert(0) += 1;
+        }
+        entries.retain(|_, e| target_source_count.get(&e.target_oid).copied().unwrap_or(0) <= 1);
+
         self.data = Some(RoutingCacheData { entries });
         self.last_refresh = Some(Instant::now());
     }

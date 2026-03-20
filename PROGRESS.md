@@ -31,7 +31,7 @@
 ### Robustness
 - [ ] Query routing permission check — verify the current user has SELECT on both source and target tables before routing; currently inherits permissions from the user who ran `add_table()`
 - [ ] Auto-mode: detect point lookups on any btree index, not just primary key — equality on a unique btree index column should also skip routing
-- [ ] Query routing + fan-in: routing a source table to a fan-in target returns all sources' data, not just the queried source — either skip routing for fan-in targets or auto-inject a `WHERE _duckpipe_source = 'group/schema.table'` filter
+- [ ] Query routing + fan-in: currently skips routing for fan-in targets entirely — could auto-inject `WHERE _duckpipe_source = 'group/schema.table'` filter instead
 - [ ] Graceful handling of DuckLake schema drift (target table altered outside duckpipe)
 - [ ] Connection pooling for flush thread PG metadata updates
 - [ ] Regression tests for crash / error cases
