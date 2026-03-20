@@ -49,15 +49,18 @@ else
     GEN="Unix Makefiles"
 fi
 
-echo "==> Building ducklake extension (generator=${GEN}) ..."
+echo "==> Building ducklake loadable extension (generator=${GEN}) ..."
 EXT_CONFIG="${PWD}/extension_config.cmake"
 mkdir -p build/release
 cmake -G "${GEN}" \
     -DCMAKE_BUILD_TYPE=Release \
     -DDUCKDB_EXTENSION_CONFIGS="${EXT_CONFIG}" \
+    -DEXTENSION_STATIC_BUILD=0 \
+    -DBUILD_SHELL=0 \
+    -DBUILD_UNITTESTS=0 \
     -S ./duckdb/ \
     -B build/release
-cmake --build build/release --config Release
+cmake --build build/release --config Release --target ducklake_loadable_extension
 
 EXT_FILE="build/release/extension/ducklake/ducklake.duckdb_extension"
 if [ ! -f "${EXT_FILE}" ]; then
