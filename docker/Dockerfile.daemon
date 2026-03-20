@@ -33,15 +33,15 @@ RUN apt-get update -qq && \
     apt-get install -y --no-install-recommends curl ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-COPY docker/fetch-ducklake-ext.sh /tmp/fetch-ducklake-ext.sh
-
-# Download postgres_scanner only.  The upstream postgres_scanner is safe here —
+# Download postgres_scanner only.  The upstream version is safe here —
 # the -Bsymbolic issue only affects PG backends, and the daemon runs standalone.
 # ducklake is built from source in the ducklake-builder stage.
-ENV DUCKDB_HOME=/opt/duckdb-staging \
-    SKIP_DUCKLAKE=1 \
-    FETCH_POSTGRES_SCANNER=1
-RUN /tmp/fetch-ducklake-ext.sh
+RUN DUCKDB_VER=v1.4.3 && \
+    ARCH=$(uname -m | sed 's/x86_64/linux_amd64/;s/aarch64/linux_arm64/') && \
+    EXT_DIR="/opt/duckdb-staging/.duckdb/extensions/${DUCKDB_VER}/${ARCH}" && \
+    mkdir -p "${EXT_DIR}" && \
+    curl -fsSL "https://extensions.duckdb.org/${DUCKDB_VER}/${ARCH}/postgres_scanner.duckdb_extension.gz" \
+        | gzip -d > "${EXT_DIR}/postgres_scanner.duckdb_extension"
 
 ###############################################################################
 ### BUILDER — compile duckpipe-daemon against libduckdb from pg_ducklake
