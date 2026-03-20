@@ -1,6 +1,7 @@
 # _BUILDER_PG is internal — not a CI matrix dimension.
 # The daemon is PG-version-agnostic; we only borrow libduckdb.so at build time.
 ARG _BUILDER_PG=18
+ARG DUCKDB_VERSION=v1.5.0
 
 ###############################################################################
 ### DUCKLAKE-BUILDER — build ducklake extension from pg_ducklake source
@@ -23,25 +24,6 @@ RUN apt-get update -qq && \
 COPY docker/build-ducklake-ext.sh /tmp/build-ducklake-ext.sh
 RUN DUCKLAKE_COMMIT=${DUCKLAKE_COMMIT} \
     /tmp/build-ducklake-ext.sh /opt/ducklake-ext
-
-###############################################################################
-### EXT-FETCHER — download postgres_scanner extension (parallel with build)
-###############################################################################
-FROM debian:bookworm-slim AS ext-fetcher
-
-RUN apt-get update -qq && \
-    apt-get install -y --no-install-recommends curl ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
-
-# Download postgres_scanner only.  The upstream version is safe here —
-# the -Bsymbolic issue only affects PG backends, and the daemon runs standalone.
-# ducklake is built from source in the ducklake-builder stage.
-RUN DUCKDB_VER=v1.4.3 && \
-    ARCH=$(uname -m | sed 's/x86_64/linux_amd64/;s/aarch64/linux_arm64/') && \
-    EXT_DIR="/opt/duckdb-staging/.duckdb/extensions/${DUCKDB_VER}/${ARCH}" && \
-    mkdir -p "${EXT_DIR}" && \
-    curl -fsSL "https://extensions.duckdb.org/${DUCKDB_VER}/${ARCH}/postgres_scanner.duckdb_extension.gz" \
-        | gzip -d > "${EXT_DIR}/postgres_scanner.duckdb_extension"
 
 ###############################################################################
 ### BUILDER — compile duckpipe-daemon against libduckdb from pg_ducklake
@@ -82,6 +64,17 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release -p duckpipe-daemon && \
     cp target/release/duckpipe /usr/local/bin/duckpipe
 
+# Download postgres_scanner matching DUCKDB_VERSION (from docker/.env).
+# The upstream version is safe here — the -Bsymbolic issue only affects PG
+# backends, and the daemon runs standalone.
+ARG DUCKDB_VERSION
+RUN ARCH=$(uname -m | sed 's/x86_64/linux_amd64/;s/aarch64/linux_arm64/') && \
+    EXT_DIR="/opt/duckdb-ext/.duckdb/extensions/${DUCKDB_VERSION}/${ARCH}" && \
+    mkdir -p "${EXT_DIR}" && \
+    echo "Downloading postgres_scanner ${DUCKDB_VERSION} (${ARCH}) ..." && \
+    curl -fsSL "https://extensions.duckdb.org/${DUCKDB_VERSION}/${ARCH}/postgres_scanner.duckdb_extension.gz" \
+        | gzip -d > "${EXT_DIR}/postgres_scanner.duckdb_extension"
+
 ###############################################################################
 ### RUNTIME — minimal image with daemon binary + DuckDB libraries
 ###############################################################################
@@ -114,8 +107,8 @@ COPY --from=ducklake-builder \
 RUN ldconfig
 
 # postgres_scanner extension (pre-installed for offline use)
-COPY --from=ext-fetcher --chown=duckpipe:duckpipe \
-    /opt/duckdb-staging/.duckdb/extensions/ \
+COPY --from=builder --chown=duckpipe:duckpipe \
+    /opt/duckdb-ext/.duckdb/extensions/ \
     /home/duckpipe/.duckdb/extensions/
 
 USER duckpipe
