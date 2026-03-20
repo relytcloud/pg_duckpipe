@@ -301,7 +301,6 @@ struct BackpressureState {
 pub struct FlushCoordinator {
     pg_connstr: String,
     ducklake_schema: String,
-    pkglibdir: String,
     group_name: String,
     threads: HashMap<i32, FlushThreadEntry>,
     result_tx: mpsc::Sender<FlushThreadResult>,
@@ -336,7 +335,6 @@ impl FlushCoordinator {
     pub fn new(
         pg_connstr: String,
         ducklake_schema: String,
-        pkglibdir: String,
         group_name: String,
         resolved_config: ResolvedConfig,
     ) -> Self {
@@ -347,7 +345,6 @@ impl FlushCoordinator {
         FlushCoordinator {
             pg_connstr,
             ducklake_schema,
-            pkglibdir,
             group_name,
             threads: HashMap::new(),
             result_tx: tx,
@@ -465,7 +462,6 @@ impl FlushCoordinator {
         let tx = self.result_tx.clone();
         let pg_connstr = self.pg_connstr.clone();
         let ducklake_schema = self.ducklake_schema.clone();
-        let pkglibdir = self.pkglibdir.clone();
         let group_name = self.group_name.clone();
         let bp = Arc::clone(&self.backpressure);
         let fg = Arc::clone(&self.flush_gate);
@@ -484,7 +480,6 @@ impl FlushCoordinator {
                     tx,
                     &pg_connstr,
                     &ducklake_schema,
-                    &pkglibdir,
                     &group_name,
                     bp,
                     fg,
@@ -889,10 +884,6 @@ impl FlushCoordinator {
         &self.ducklake_schema
     }
 
-    pub fn pkglibdir(&self) -> &str {
-        &self.pkglibdir
-    }
-
     /// Get the sync group name.
     pub fn group_name(&self) -> &str {
         &self.group_name
@@ -925,7 +916,6 @@ fn flush_thread_main(
     result_tx: mpsc::Sender<FlushThreadResult>,
     pg_connstr: &str,
     ducklake_schema: &str,
-    pkglibdir: &str,
     group_name: &str,
     backpressure: Arc<BackpressureState>,
     flush_gate: Arc<FlushGate>,
@@ -1042,7 +1032,6 @@ fn flush_thread_main(
                         ducklake_schema,
                         &resolved_config,
                         meta.source_label.clone(),
-                        pkglibdir,
                     ) {
                         Ok(w) => worker = Some(w),
                         Err(e) => {

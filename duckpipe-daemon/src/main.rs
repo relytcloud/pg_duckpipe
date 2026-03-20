@@ -72,6 +72,7 @@ async fn main() {
     let args = Args::parse();
 
     duckpipe_core::log::init_subscriber(args.debug);
+    duckpipe_core::duckdb_flush::init_pkglibdir(&args.duckdb_lib_dir);
 
     let connstr = args.connstr.clone();
     let state = Arc::new(api::AppState::new(connstr.clone()));
@@ -135,14 +136,7 @@ async fn main() {
     let poll_interval = Duration::from_millis(args.poll_interval as u64);
 
     // Sync loop
-    run_sync_loop(
-        &state,
-        &config,
-        &slot_params,
-        poll_interval,
-        &args.duckdb_lib_dir,
-    )
-    .await;
+    run_sync_loop(&state, &config, &slot_params, poll_interval).await;
 }
 
 /// Pre-bind the daemon to a group at startup.
@@ -277,7 +271,6 @@ async fn run_sync_loop(
     config: &ServiceConfig,
     slot_params: &duckpipe_core::service::SlotConnectParams,
     poll_interval: Duration,
-    pkglibdir: &str,
 ) {
     loop {
         // Wait for group binding if not already bound.
@@ -300,7 +293,6 @@ async fn run_sync_loop(
         let mut coordinator = FlushCoordinator::new(
             config.connstr.clone(),
             config.ducklake_schema.clone(),
-            pkglibdir.to_string(),
             group_name.clone(),
             resolved_config,
         );

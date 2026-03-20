@@ -4,9 +4,6 @@ BUILD_TYPE ?= release
 
 PGRX_PROFILE_FLAG := $(if $(filter release,$(BUILD_TYPE)),--release,--profile $(BUILD_TYPE))
 
-# Path to pg_ducklake's built ducklake loadable extension (sibling repo)
-DUCKLAKE_EXT_DIR ?= $(realpath ../pg_ducklake/third_party/ducklake/build/release/extension/ducklake)
-
 .PHONY: all check-cargo-pgrx build install install-ducklake-ext check-regression clean-regression \
        installcheck build-daemon check-daemon clean-daemon installcheck-all format clean
 
@@ -28,12 +25,21 @@ build: check-cargo-pgrx
 	DYLD_LIBRARY_PATH="$(PG_LIB):$(DYLD_LIBRARY_PATH)" \
 	cargo pgrx install $(PGRX_PROFILE_FLAG) --pg-config=$(PG_CONFIG)
 
+# Search for ducklake.duckdb_extension in sibling pg_ducklake build output.
+# Supports both release and debug builds. Override with DUCKLAKE_EXT= to use a specific file.
 install-ducklake-ext:
-	@if [ -f "$(DUCKLAKE_EXT_DIR)/ducklake.duckdb_extension" ]; then \
-		echo "Installing ducklake.duckdb_extension to $(PG_LIB)"; \
-		install -m 644 "$(DUCKLAKE_EXT_DIR)/ducklake.duckdb_extension" "$(PG_LIB)/ducklake.duckdb_extension"; \
+	@ext="$(DUCKLAKE_EXT)"; \
+	if [ -z "$$ext" ]; then \
+		for d in release debug relwithdebinfo; do \
+			f="$$(realpath ../pg_ducklake/third_party/ducklake/build/$$d/extension/ducklake/ducklake.duckdb_extension 2>/dev/null)"; \
+			if [ -f "$$f" ]; then ext="$$f"; break; fi; \
+		done; \
+	fi; \
+	if [ -n "$$ext" ]; then \
+		echo "Installing $$ext to $(PG_LIB)"; \
+		install -m 644 "$$ext" "$(PG_LIB)/ducklake.duckdb_extension"; \
 	else \
-		echo "NOTICE: ducklake.duckdb_extension not found at $(DUCKLAKE_EXT_DIR). Skipping."; \
+		echo "NOTICE: ducklake.duckdb_extension not found in sibling pg_ducklake. Skipping."; \
 	fi
 
 install: build install-ducklake-ext
