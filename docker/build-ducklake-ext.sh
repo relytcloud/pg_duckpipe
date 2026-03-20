@@ -27,6 +27,12 @@ if [ -z "${OUTPUT_DIR}" ]; then
     exit 1
 fi
 
+# Skip if already built (use FORCE=1 to rebuild)
+if [ -f "${OUTPUT_DIR}/ducklake.duckdb_extension" ] && [ "${FORCE:-0}" != "1" ]; then
+    echo "==> ducklake.duckdb_extension already exists at ${OUTPUT_DIR}. Skipping (set FORCE=1 to rebuild)."
+    exit 0
+fi
+
 WORKDIR=$(mktemp -d)
 trap 'rm -rf "${WORKDIR}"' EXIT
 
