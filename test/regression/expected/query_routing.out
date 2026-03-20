@@ -16,15 +16,26 @@ SELECT duckpipe.start_worker('qr_test');
 (1 row)
 
 RESET client_min_messages;
--- Create source table
+-- Create source tables
 CREATE TABLE qr_orders (
     id      int PRIMARY KEY,
     status  text,
     total   int
 );
--- Use copy_data=false so the table starts directly in STREAMING state.
+CREATE TABLE qr_customers (
+    id      int PRIMARY KEY,
+    name    text,
+    order_id int
+);
+-- Use copy_data=false so tables start directly in STREAMING state.
 -- Data is inserted AFTER add_table so it flows through WAL replication.
 SELECT duckpipe.add_table('public.qr_orders', NULL, 'qr_test', false);
+ add_table 
+-----------
+ 
+(1 row)
+
+SELECT duckpipe.add_table('public.qr_customers', NULL, 'qr_test', false);
  add_table 
 -----------
  
@@ -33,6 +44,8 @@ SELECT duckpipe.add_table('public.qr_orders', NULL, 'qr_test', false);
 INSERT INTO qr_orders VALUES (1, 'pending', 100);
 INSERT INTO qr_orders VALUES (2, 'shipped', 250);
 INSERT INTO qr_orders VALUES (3, 'pending', 75);
+INSERT INTO qr_customers VALUES (10, 'alice', 1);
+INSERT INTO qr_customers VALUES (20, 'bob', 2);
 -- Wait for WAL to be consumed and flushed
 SELECT pg_sleep(8);
  pg_sleep 
@@ -41,10 +54,16 @@ SELECT pg_sleep(8);
 (1 row)
 
 -- Verify data is synced
-SELECT count(*) AS synced_rows FROM public.qr_orders_ducklake;
- synced_rows 
--------------
-           3
+SELECT count(*) AS synced_orders FROM public.qr_orders_ducklake;
+ synced_orders 
+---------------
+             3
+(1 row)
+
+SELECT count(*) AS synced_customers FROM public.qr_customers_ducklake;
+ synced_customers 
+------------------
+                2
 (1 row)
 
 -- =======================================================================
@@ -104,7 +123,46 @@ NOTICE:  duckpipe: routing public.qr_orders → public.qr_orders_ducklake
 (1 row)
 
 -- =======================================================================
--- 4. Per-table routing opt-out
+-- 4. Subquery routing
+-- =======================================================================
+SET duckpipe.query_routing = 'on';
+-- Subquery in FROM clause → DuckDB handles the subquery internally
+-- after the outer query is routed (no separate NOTICE for subquery RTEs)
+SELECT cnt FROM (SELECT count(*) AS cnt FROM qr_orders) sub;
+ cnt 
+-----
+   3
+(1 row)
+
+-- =======================================================================
+-- 5. CTE routing
+-- =======================================================================
+-- CTE with aggregation → DuckDB handles CTE body after routing
+WITH order_summary AS (
+    SELECT status, count(*) AS cnt FROM qr_orders GROUP BY status
+)
+SELECT count(*) AS summary_rows FROM order_summary;
+ summary_rows 
+--------------
+            2
+(1 row)
+
+-- =======================================================================
+-- 6. JOIN between two routed tables
+-- =======================================================================
+-- JOIN both synced tables → both routed (two NOTICEs expected)
+SELECT count(*) AS join_count
+FROM qr_orders o
+JOIN qr_customers c ON c.order_id = o.id;
+NOTICE:  duckpipe: routing public.qr_orders → public.qr_orders_ducklake
+NOTICE:  duckpipe: routing public.qr_customers → public.qr_customers_ducklake
+ join_count 
+------------
+          2
+(1 row)
+
+-- =======================================================================
+-- 7. Per-table routing opt-out
 -- =======================================================================
 SET duckpipe.query_routing = 'on';
 -- Disable routing for this table
@@ -167,7 +225,7 @@ NOTICE:  duckpipe: routing public.qr_orders → public.qr_orders_ducklake
 (1 row)
 
 -- =======================================================================
--- 5. Global GUC reset disables routing
+-- 8. Global GUC reset disables routing
 -- =======================================================================
 RESET duckpipe.query_routing;
 -- Should NOT route (GUC back to 'off')
@@ -180,6 +238,12 @@ SELECT count(*) AS reset_count FROM qr_orders;
 -- =======================================================================
 -- Cleanup
 -- =======================================================================
+SELECT duckpipe.remove_table('public.qr_customers', false);
+ remove_table 
+--------------
+ 
+(1 row)
+
 SELECT duckpipe.remove_table('public.qr_orders', false);
 WARNING:  Group 'qr_test' has no remaining tables — its replication slot is still holding WAL. Run SELECT duckpipe.drop_group('qr_test') to release it.
  remove_table 
@@ -187,6 +251,8 @@ WARNING:  Group 'qr_test' has no remaining tables — its replication slot is st
  
 (1 row)
 
+DROP TABLE IF EXISTS public.qr_customers_ducklake;
+DROP TABLE qr_customers;
 DROP TABLE IF EXISTS public.qr_orders_ducklake;
 DROP TABLE qr_orders;
 SET client_min_messages = warning;

@@ -8,26 +8,36 @@ SELECT duckpipe.create_group('qr_test');
 SELECT duckpipe.start_worker('qr_test');
 RESET client_min_messages;
 
--- Create source table
+-- Create source tables
 CREATE TABLE qr_orders (
     id      int PRIMARY KEY,
     status  text,
     total   int
 );
+CREATE TABLE qr_customers (
+    id      int PRIMARY KEY,
+    name    text,
+    order_id int
+);
 
--- Use copy_data=false so the table starts directly in STREAMING state.
+-- Use copy_data=false so tables start directly in STREAMING state.
 -- Data is inserted AFTER add_table so it flows through WAL replication.
 SELECT duckpipe.add_table('public.qr_orders', NULL, 'qr_test', false);
+SELECT duckpipe.add_table('public.qr_customers', NULL, 'qr_test', false);
 
 INSERT INTO qr_orders VALUES (1, 'pending', 100);
 INSERT INTO qr_orders VALUES (2, 'shipped', 250);
 INSERT INTO qr_orders VALUES (3, 'pending', 75);
 
+INSERT INTO qr_customers VALUES (10, 'alice', 1);
+INSERT INTO qr_customers VALUES (20, 'bob', 2);
+
 -- Wait for WAL to be consumed and flushed
 SELECT pg_sleep(8);
 
 -- Verify data is synced
-SELECT count(*) AS synced_rows FROM public.qr_orders_ducklake;
+SELECT count(*) AS synced_orders FROM public.qr_orders_ducklake;
+SELECT count(*) AS synced_customers FROM public.qr_customers_ducklake;
 
 -- =======================================================================
 -- 1. Default: routing OFF — no NOTICE emitted
@@ -61,7 +71,35 @@ SELECT id, status FROM qr_orders WHERE id = 1;
 SELECT count(*) AS agg_with_pk FROM qr_orders WHERE id = 1;
 
 -- =======================================================================
--- 4. Per-table routing opt-out
+-- 4. Subquery routing
+-- =======================================================================
+SET duckpipe.query_routing = 'on';
+
+-- Subquery in FROM clause → DuckDB handles the subquery internally
+-- after the outer query is routed (no separate NOTICE for subquery RTEs)
+SELECT cnt FROM (SELECT count(*) AS cnt FROM qr_orders) sub;
+
+-- =======================================================================
+-- 5. CTE routing
+-- =======================================================================
+
+-- CTE with aggregation → DuckDB handles CTE body after routing
+WITH order_summary AS (
+    SELECT status, count(*) AS cnt FROM qr_orders GROUP BY status
+)
+SELECT count(*) AS summary_rows FROM order_summary;
+
+-- =======================================================================
+-- 6. JOIN between two routed tables
+-- =======================================================================
+
+-- JOIN both synced tables → both routed (two NOTICEs expected)
+SELECT count(*) AS join_count
+FROM qr_orders o
+JOIN qr_customers c ON c.order_id = o.id;
+
+-- =======================================================================
+-- 7. Per-table routing opt-out
 -- =======================================================================
 SET duckpipe.query_routing = 'on';
 
@@ -92,7 +130,7 @@ SELECT pg_sleep(3);
 SELECT count(*) AS reenabled_count FROM qr_orders;
 
 -- =======================================================================
--- 5. Global GUC reset disables routing
+-- 8. Global GUC reset disables routing
 -- =======================================================================
 RESET duckpipe.query_routing;
 
@@ -102,7 +140,10 @@ SELECT count(*) AS reset_count FROM qr_orders;
 -- =======================================================================
 -- Cleanup
 -- =======================================================================
+SELECT duckpipe.remove_table('public.qr_customers', false);
 SELECT duckpipe.remove_table('public.qr_orders', false);
+DROP TABLE IF EXISTS public.qr_customers_ducklake;
+DROP TABLE qr_customers;
 DROP TABLE IF EXISTS public.qr_orders_ducklake;
 DROP TABLE qr_orders;
 
