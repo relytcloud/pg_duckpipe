@@ -197,11 +197,9 @@ unsafe fn rewrite_query_with_cache(
             }
             pgrx::debug1!("duckpipe: routing {} -> {}", src_name, tgt_name);
 
-            // Rewrite the RTE.  relkind must match the target in case the
-            // source and target have different relation kinds (e.g., if the
-            // DuckLake table is registered as a foreign table in pg_class).
+            // Rewrite the RTE.  Both source (heap) and target (DuckLake via
+            // custom TAM) have relkind='r', so no relkind update needed.
             (*rte).relid = target_oid;
-            (*rte).relkind = pg_sys::get_rel_relkind(target_oid) as i8;
 
             // Update RTEPermissionInfo (PG16+)
             rewrite_perminfo(parse, rte, target_oid);
