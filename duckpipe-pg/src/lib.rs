@@ -99,7 +99,7 @@ pub static METRICS_SHM: PgLwLock<SharedMetrics> = unsafe { PgLwLock::new(c"duckp
 /// This flag lets read/write helpers gracefully degrade instead of crashing.
 static SHM_AVAILABLE: AtomicBool = AtomicBool::new(false);
 
-fn shmem_available() -> bool {
+pub(crate) fn shmem_available() -> bool {
     SHM_AVAILABLE.load(Ordering::Relaxed)
 }
 

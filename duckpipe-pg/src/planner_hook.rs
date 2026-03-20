@@ -97,6 +97,14 @@ unsafe extern "C-unwind" fn duckpipe_planner_hook(
         None => return call_next_hook(parse, query_string, cursor_options, bound_params),
     };
 
+    // Skip routing if not loaded via shared_preload_libraries.
+    // The planner hook chain (duckpipe → ducklake → duckdb) and the
+    // SPI cache queries against duckpipe.table_mappings both require
+    // the extension to be fully initialized in the postmaster.
+    if !crate::shmem_available() {
+        return call_next_hook(parse, query_string, cursor_options, bound_params);
+    }
+
     let mode = get_routing_mode();
 
     // Fast path: routing disabled
