@@ -1,6 +1,28 @@
 ARG PG_VERSION=18
 
 ###############################################################################
+### DUCKLAKE-BUILDER — build ducklake extension from pg_ducklake source
+###############################################################################
+FROM pgducklake/pgducklake:${PG_VERSION}-main AS ducklake-builder
+ARG PG_VERSION
+ARG DUCKLAKE_COMMIT=main
+
+USER root
+
+RUN apt-get update -qq && \
+    apt-get install -y --no-install-recommends \
+        git \
+        cmake \
+        ninja-build \
+        build-essential \
+        ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY docker/build-ducklake-ext.sh /tmp/build-ducklake-ext.sh
+RUN DUCKLAKE_COMMIT=${DUCKLAKE_COMMIT} \
+    /tmp/build-ducklake-ext.sh /usr/lib/postgresql/${PG_VERSION}/lib
+
+###############################################################################
 ### BUILDER — compile pg_duckpipe against the pg_ducklake installation
 ###############################################################################
 FROM pgducklake/pgducklake:${PG_VERSION}-main AS builder
@@ -34,6 +56,11 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
 
 # cargo-pgrx version must match pgrx in Cargo.toml (0.16.1)
 RUN cargo install --locked cargo-pgrx --version 0.16.1
+
+# Copy ducklake extension built from pg_ducklake source
+COPY --from=ducklake-builder \
+    /usr/lib/postgresql/${PG_VERSION}/lib/ducklake.duckdb_extension \
+    /usr/lib/postgresql/${PG_VERSION}/lib/
 
 WORKDIR /build
 COPY . .
@@ -94,17 +121,11 @@ duckdb.unsafe_allow_mixed_transactions = on\n' \
 RUN echo "/usr/lib/postgresql/${PG_VERSION}/lib" > /etc/ld.so.conf.d/duckdb.conf && \
     /sbin/ldconfig
 
-# Pre-install the ducklake DuckDB extension so flush workers never need internet
-# access at runtime.  Installs to both the standard DuckDB cache AND pkglibdir
-# so the Rust code can LOAD it directly without INSTALL.
-#
-# DuckDB version must match libduckdb.so shipped by pg_ducklake in this image.
-COPY docker/fetch-ducklake-ext.sh /usr/local/bin/fetch-ducklake-ext.sh
-RUN apt-get update -qq && apt-get install -y --no-install-recommends curl && \
-    /usr/local/bin/fetch-ducklake-ext.sh --pkglibdir /usr/lib/postgresql/${PG_VERSION}/lib && \
-    chown -R postgres:postgres /var/lib/postgresql/.duckdb && \
-    apt-get remove -y curl && apt-get autoremove -y && \
-    rm -rf /var/lib/apt/lists/*
+# Copy ducklake extension built from pg_ducklake source to pkglibdir.
+# The Rust code detects it at runtime and LOADs it directly (no INSTALL needed).
+COPY --from=ducklake-builder \
+    /usr/lib/postgresql/${PG_VERSION}/lib/ducklake.duckdb_extension \
+    /usr/lib/postgresql/${PG_VERSION}/lib/
 
 # Create pg_duckpipe extension after pg_duckdb (scripts run alphabetically).
 # 0004-localhost-trust.sh adds pg_hba entries for TCP loopback trust auth so
