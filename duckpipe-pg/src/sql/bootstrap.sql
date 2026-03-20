@@ -38,7 +38,6 @@ CREATE TABLE duckpipe.table_mappings (
     consecutive_failures INTEGER DEFAULT 0,
     snapshot_duration_ms BIGINT,
     snapshot_rows        BIGINT,
-    duckdb_memory_bytes  BIGINT DEFAULT 0,
     source_label    TEXT,
     UNIQUE(group_id, source_schema, source_table),
     UNIQUE(group_id, source_oid)
