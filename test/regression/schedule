@@ -57,3 +57,5 @@ test: jsonb_type
 test: remote_sync
 # Transparent query routing: planner hook rewrites SELECTs to DuckLake targets
 test: query_routing
+# DDL sync: ADD/DROP/RENAME COLUMN propagated to DuckLake target
+test: ddl_sync

@@ -355,6 +355,7 @@ pub struct TableMapping {
     pub applied_lsn: u64,
     pub enabled: bool,
     pub source_oid: Option<i64>,
+    pub target_oid: i64,
     pub error_message: Option<String>,
     pub source_label: String,
 }
@@ -373,6 +374,14 @@ pub fn fixed_bytes_for_oid(oid: u32) -> usize {
         701 => 8, // float8
         26 => 4,  // oid (parsed as int4)
         _ => 0,   // text, varchar, jsonb, date, timestamp, uuid, etc — variable
+    }
+}
+
+/// Map PostgreSQL type name to DuckDB-compatible type for DDL statements.
+pub fn map_pg_type_for_duckdb(pg_type: &str) -> String {
+    match pg_type {
+        "jsonb" | "json" => "JSON".to_string(),
+        other => other.to_string(),
     }
 }
 
