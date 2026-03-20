@@ -932,6 +932,40 @@ fn add_table(
             .update(&create_sql, None, &[])
             .map_err(|e| format!("CREATE TABLE: {}", e))?;
 
+        // Grant SELECT on target table to the source table owner (local groups only).
+        // For remote groups the source owner is on a different PG instance, so skip.
+        if group_conninfo.is_none() {
+            let owner_args = unsafe {
+                [
+                    DatumWithOid::new(schema.as_str(), PgBuiltInOids::TEXTOID.value()),
+                    DatumWithOid::new(table.as_str(), PgBuiltInOids::TEXTOID.value()),
+                ]
+            };
+            let owner_result = client.select(
+                "SELECT pg_catalog.pg_get_userbyid(c.relowner)::text \
+                 FROM pg_class c \
+                 JOIN pg_namespace n ON n.oid = c.relnamespace \
+                 WHERE n.nspname = $1 AND c.relname = $2",
+                Some(1),
+                &owner_args,
+            );
+            if let Ok(owner_rows) = owner_result {
+                for row in owner_rows {
+                    if let Some(owner_name) = row.get::<String>(1).unwrap() {
+                        let grant_sql = format!(
+                            "GRANT SELECT ON {}.{} TO {}",
+                            quote_ident(&t_schema),
+                            quote_ident(&t_table),
+                            quote_ident(&owner_name),
+                        );
+                        client
+                            .update(&grant_sql, None, &[])
+                            .map_err(|e| format!("GRANT SELECT: {}", e))?;
+                    }
+                }
+            }
+        }
+
         // Fan-in guard: check if ANY existing mapping targets the same table
         // (catches both cross-group and same-group fan-in attempts)
         {
