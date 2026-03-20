@@ -72,14 +72,6 @@ fn quote_ident(name: &str) -> String {
     }
 }
 
-/// Map PG type names to DuckDB-compatible equivalents.
-fn map_pg_type_for_duckdb(pg_type: &str) -> String {
-    match pg_type {
-        "jsonb" | "json" => "JSON".to_string(),
-        other => other.to_string(),
-    }
-}
-
 /// Quote a literal for SQL.
 fn quote_literal(val: &str) -> String {
     unsafe {
@@ -917,7 +909,11 @@ fn add_table(
         let mut col_clauses: Vec<String> = col_defs
             .iter()
             .map(|(name, type_str)| {
-                format!("{} {}", quote_ident(name), map_pg_type_for_duckdb(type_str))
+                format!(
+                    "{} {}",
+                    quote_ident(name),
+                    duckpipe_core::types::map_pg_type_for_duckdb(type_str)
+                )
             })
             .collect();
         // Always add _duckpipe_source column for fan-in support
@@ -1034,7 +1030,28 @@ fn add_table(
             let _ = client.update(&sql, None, &[]);
         }
 
-        // Insert table mapping with source OID and source_label (group/schema.table)
+        // Look up target OID for OID-based DDL resolution
+        let target_oid: i64 = {
+            let oid_args = unsafe {
+                [
+                    DatumWithOid::new(t_schema.as_str(), PgBuiltInOids::TEXTOID.value()),
+                    DatumWithOid::new(t_table.as_str(), PgBuiltInOids::TEXTOID.value()),
+                ]
+            };
+            let oid_result = client.select(
+                "SELECT c.oid::bigint FROM pg_class c \
+                 JOIN pg_namespace n ON n.oid = c.relnamespace \
+                 WHERE n.nspname = $1 AND c.relname = $2",
+                Some(1),
+                &oid_args,
+            );
+            match oid_result {
+                Ok(table) if table.len() > 0 => table.first().get::<i64>(1).unwrap().unwrap_or(0),
+                _ => 0,
+            }
+        };
+
+        // Insert table mapping with source OID, target OID, and source_label
         let initial_state = if copy_data { "SNAPSHOT" } else { "STREAMING" };
         let source_label = format!("{}/{}.{}", group, schema, table);
         let args = unsafe {
@@ -1046,14 +1063,15 @@ fn add_table(
                 DatumWithOid::new(initial_state, PgBuiltInOids::TEXTOID.value()),
                 DatumWithOid::new(group, PgBuiltInOids::TEXTOID.value()),
                 DatumWithOid::new(source_oid, PgBuiltInOids::INT8OID.value()),
+                DatumWithOid::new(target_oid, PgBuiltInOids::INT8OID.value()),
                 DatumWithOid::new(source_label.as_str(), PgBuiltInOids::TEXTOID.value()),
             ]
         };
         client
             .update(
                 "INSERT INTO duckpipe.table_mappings (group_id, source_schema, source_table, \
-                 target_schema, target_table, state, source_oid, source_label) \
-                 SELECT sg.id, $1, $2, $3, $4, $5, $7, $8 \
+                 target_schema, target_table, state, source_oid, target_oid, source_label) \
+                 SELECT sg.id, $1, $2, $3, $4, $5, $7, $8, $9 \
                  FROM duckpipe.sync_groups sg WHERE sg.name = $6",
                 None,
                 &args,

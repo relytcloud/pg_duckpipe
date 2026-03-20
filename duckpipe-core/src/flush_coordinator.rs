@@ -44,13 +44,34 @@ pub struct TableMetrics {
 
 /// Cloneable table schema info used by the flush thread for DuckDB buffer operations.
 #[derive(Clone, Debug)]
-struct QueueMeta {
-    target_key: String,
-    mapping_id: i32,
-    attnames: Vec<String>,
-    key_attrs: Vec<usize>,
-    atttypes: Vec<u32>,
-    source_label: String,
+pub struct QueueMeta {
+    pub target_key: String,
+    pub mapping_id: i32,
+    pub attnames: Vec<String>,
+    pub key_attrs: Vec<usize>,
+    pub atttypes: Vec<u32>,
+    pub source_label: String,
+}
+
+/// DDL command to apply to the DuckLake target table.
+#[derive(Debug, Clone)]
+pub enum DdlCommand {
+    AddColumn { col_name: String, col_type: String },
+    DropColumn { col_name: String },
+    RenameColumn { old_name: String, new_name: String },
+}
+
+/// DDL barrier: set by the WAL consumer when a schema change is detected.
+/// The flush thread drains old-schema changes, flushes, applies DDL, then continues.
+pub struct PendingDdl {
+    pub commands: Vec<DdlCommand>,
+    pub new_meta: QueueMeta,
+    /// Target table OID for resolving current name via pg_class.
+    pub target_oid: i64,
+    /// Changes received after this DDL but before the next DDL (or present).
+    /// Populated by `push_change()` routing and by `set_pending_ddl()` when
+    /// a subsequent barrier arrives.
+    pub post_changes: Vec<Change>,
 }
 
 /// Shared queue data protected by Mutex.
@@ -58,6 +79,9 @@ struct SharedTableQueue {
     meta: QueueMeta,
     changes: Vec<Change>,
     last_lsn: u64,
+    /// DDL barrier queue. When non-empty, push_change routes to the last
+    /// barrier's `post_changes`. Processed FIFO by the flush thread.
+    pending_ddls: std::collections::VecDeque<PendingDdl>,
 }
 
 /// Arc-shared handle between producer (main thread) and consumer (flush thread).
@@ -441,6 +465,7 @@ impl FlushCoordinator {
                 meta: meta.clone(),
                 changes: Vec::new(),
                 last_lsn: 0,
+                pending_ddls: std::collections::VecDeque::new(),
             }),
             condvar: Condvar::new(),
         });
@@ -508,13 +533,20 @@ impl FlushCoordinator {
     ///
     /// The flush thread wakes on its own via `drain_poll_ms` condvar timeout,
     /// so no explicit notification is needed after pushing changes.
+    ///
+    /// When a DDL barrier is set, changes are routed to the last barrier's
+    /// `post_changes` so the flush thread can drain old-schema changes first.
     pub fn push_change(&self, mapping_id: i32, change: Change) {
         if let Some(entry) = self.threads.get(&mapping_id) {
             let mut guard = entry.queue_handle.inner.lock().unwrap();
             if change.lsn > guard.last_lsn {
                 guard.last_lsn = change.lsn;
             }
-            guard.changes.push(change);
+            if let Some(last_ddl) = guard.pending_ddls.back_mut() {
+                last_ddl.post_changes.push(change);
+            } else {
+                guard.changes.push(change);
+            }
             self.backpressure
                 .total_queued
                 .fetch_add(1, Ordering::Relaxed);
@@ -523,6 +555,22 @@ impl FlushCoordinator {
                     .snapshot_queued
                     .fetch_add(1, Ordering::Relaxed);
             }
+        }
+    }
+
+    /// Set a DDL barrier on the queue for a target table.
+    ///
+    /// The WAL consumer calls this when it detects a schema change from a RELATION message.
+    /// New changes after this call are routed to the latest barrier's `post_changes`.
+    /// The flush thread processes barriers FIFO: drain old-schema changes, flush, apply
+    /// DDL, move post_changes to main queue, reset worker, then check for next barrier.
+    ///
+    /// Multiple barriers are queued (not merged) so that each batch of post_changes is
+    /// processed with the correct schema after its corresponding DDL is applied.
+    pub fn set_pending_ddl(&self, mapping_id: i32, ddl: PendingDdl) {
+        if let Some(entry) = self.threads.get(&mapping_id) {
+            let mut guard = entry.queue_handle.inner.lock().unwrap();
+            guard.pending_ddls.push_back(ddl);
         }
     }
 
@@ -675,6 +723,11 @@ impl FlushCoordinator {
                 let shared = {
                     let guard = entry.queue_handle.inner.lock().unwrap();
                     guard.changes.len() as i64
+                        + guard
+                            .pending_ddls
+                            .iter()
+                            .map(|d| d.post_changes.len() as i64)
+                            .sum::<i64>()
                 };
                 let local = entry.pending_local.load(Ordering::Relaxed);
                 let abandoned = shared + local;
@@ -962,8 +1015,9 @@ fn flush_thread_main(
         {
             let mut guard = queue_handle.inner.lock().unwrap();
 
-            // Wait with timeout for new changes, drain request, or shutdown
+            // Wait with timeout for new changes, DDL barrier, drain request, or shutdown
             if guard.changes.is_empty()
+                && guard.pending_ddls.is_empty()
                 && !control.shutdown.load(Ordering::Acquire)
                 && !control.drain_requested.load(Ordering::Acquire)
                 && wait_timeout > Duration::ZERO
@@ -1106,6 +1160,74 @@ fn flush_thread_main(
                     }
                 }
                 // Local Vec<Change> is dropped here — Rust memory freed.
+            } else if !guard.pending_ddls.is_empty() {
+                // All old-schema changes drained, DDL barrier(s) present.
+                // Process the first barrier only — its post_changes become the
+                // new main queue. If more barriers remain, they'll be processed
+                // on subsequent iterations (each with its own schema).
+                let PendingDdl {
+                    commands,
+                    new_meta,
+                    target_oid,
+                    post_changes,
+                } = guard.pending_ddls.pop_front().unwrap();
+                guard.changes = post_changes;
+                guard.meta = new_meta.clone();
+                drop(guard);
+
+                // 1. Flush old-schema buffer if any data is buffered
+                if buffered_count > 0 {
+                    if let Some(meta) = buffered_meta.as_ref() {
+                        do_flush_buffer(
+                            &mut worker,
+                            buffered_count,
+                            buffered_bytes,
+                            buffered_lsn,
+                            meta,
+                            pg_connstr,
+                            group_name,
+                            &result_tx,
+                            &rt,
+                        );
+                    }
+                    backpressure
+                        .total_queued
+                        .fetch_sub(buffered_count, Ordering::Relaxed);
+                    pending_local.store(0, Ordering::Relaxed);
+                }
+
+                // 2. Apply DDL to DuckLake target via PG connection
+                if let Err(e) = rt.block_on(apply_ddl_commands(
+                    &commands,
+                    target_oid,
+                    pg_connstr,
+                    group_name,
+                )) {
+                    tracing::error!(
+                        "pg_duckpipe: DDL sync failed for {}: {}",
+                        new_meta.target_key,
+                        e
+                    );
+                    report_flush_error(
+                        &result_tx,
+                        &rt,
+                        pg_connstr,
+                        group_name,
+                        &new_meta.target_key,
+                        new_meta.mapping_id,
+                        &format!("DDL sync failed: {}", e),
+                    );
+                }
+
+                // 3. Reset FlushWorker (forces re-discovery of lake_info)
+                worker = None;
+                buffered_meta = None;
+                buffered_count = 0;
+                buffered_bytes = 0;
+                next_seq = 0;
+                buffered_lsn = 0;
+                last_flush = Instant::now();
+                continue; // process new-schema changes on next iteration
             } else {
                 drop(guard);
             }
@@ -1308,4 +1430,79 @@ fn signal_drain_complete(
     *done = true;
     control.drain_requested.store(false, Ordering::Release);
     cvar.notify_one();
+}
+
+/// Apply DDL commands to the DuckLake target table via a short-lived PG connection.
+///
+/// Resolves the current target table name from `target_oid` via `pg_class`, so the
+/// pipeline survives user-initiated renames of the target table.
+async fn apply_ddl_commands(
+    commands: &[DdlCommand],
+    target_oid: i64,
+    pg_connstr: &str,
+    group_name: &str,
+) -> Result<(), String> {
+    let app_name = crate::connstr::app_name(group_name, "ddl");
+    let (client, conn_handle) = crate::connstr::pg_connect_with_app_name(pg_connstr, &app_name)
+        .await
+        .map_err(|e| format!("DDL connect: {}", e))?;
+
+    // Resolve current target table name from OID
+    let rows = client
+        .query(
+            "SELECT n.nspname, c.relname FROM pg_class c \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE c.oid = $1::bigint::oid",
+            &[&target_oid],
+        )
+        .await
+        .map_err(|e| format!("OID resolve: {}", e))?;
+    if rows.is_empty() {
+        return Err(format!("target OID {} not found in pg_class", target_oid));
+    }
+    let schema: String = rows[0].get(0);
+    let table: String = rows[0].get(1);
+    let target_ref = format!(
+        "\"{}\".\"{}\"",
+        schema.replace('"', "\"\""),
+        table.replace('"', "\"\""),
+    );
+
+    for cmd in commands {
+        let sql = match cmd {
+            DdlCommand::AddColumn { col_name, col_type } => {
+                format!(
+                    "ALTER TABLE {} ADD COLUMN \"{}\" {}",
+                    target_ref,
+                    col_name.replace('"', "\"\""),
+                    col_type,
+                )
+            }
+            DdlCommand::DropColumn { col_name } => {
+                format!(
+                    "ALTER TABLE {} DROP COLUMN \"{}\"",
+                    target_ref,
+                    col_name.replace('"', "\"\""),
+                )
+            }
+            DdlCommand::RenameColumn { old_name, new_name } => {
+                format!(
+                    "ALTER TABLE {} RENAME COLUMN \"{}\" TO \"{}\"",
+                    target_ref,
+                    old_name.replace('"', "\"\""),
+                    new_name.replace('"', "\"\""),
+                )
+            }
+        };
+        tracing::info!("pg_duckpipe: DDL sync: {}", sql);
+        client
+            .execute(&sql, &[])
+            .await
+            .map_err(|e| format!("DDL exec '{}': {}", sql, e))?;
+    }
+
+    drop(client);
+    let _ = conn_handle.await;
+
+    Ok(())
 }

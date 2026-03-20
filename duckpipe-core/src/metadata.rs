@@ -134,7 +134,7 @@ impl<'a> MetadataClient<'a> {
             .query(
                 "SELECT id, source_schema, source_table, target_schema, target_table, \
                  state, snapshot_lsn::text, enabled, source_oid, error_message, \
-                 applied_lsn::text, source_label \
+                 applied_lsn::text, target_oid, source_label \
                  FROM duckpipe.table_mappings \
                  WHERE group_id = $1 AND source_schema = $2 AND source_table = $3",
                 &[&group_id, &schema, &table],
@@ -159,7 +159,8 @@ impl<'a> MetadataClient<'a> {
         let error_message: Option<String> = row.get(9);
         let applied_lsn_str: Option<String> = row.get(10);
         let applied_lsn = applied_lsn_str.map(|s| parse_lsn(&s)).unwrap_or(0);
-        let source_label: String = row.get::<_, Option<String>>(11).unwrap_or_default();
+        let target_oid: i64 = row.get::<_, Option<i64>>(11).unwrap_or(0);
+        let source_label: String = row.get::<_, Option<String>>(12).unwrap_or_default();
 
         Ok(Some(TableMapping {
             id,
@@ -172,6 +173,7 @@ impl<'a> MetadataClient<'a> {
             applied_lsn,
             enabled,
             source_oid,
+            target_oid,
             error_message,
             source_label,
         }))
@@ -303,7 +305,7 @@ impl<'a> MetadataClient<'a> {
             .query(
                 "SELECT id, source_schema, source_table, target_schema, target_table, \
                  state, snapshot_lsn::text, enabled, source_oid, error_message, \
-                 applied_lsn::text, source_label \
+                 applied_lsn::text, target_oid, source_label \
                  FROM duckpipe.table_mappings \
                  WHERE group_id = $1 AND state = 'ERRORED' AND enabled = true \
                  AND retry_at IS NOT NULL AND retry_at <= now()",
@@ -330,8 +332,9 @@ impl<'a> MetadataClient<'a> {
                     .unwrap_or(0),
                 enabled: row.get(7),
                 source_oid: row.get(8),
+                target_oid: row.get::<_, Option<i64>>(11).unwrap_or(0),
                 error_message: row.get(9),
-                source_label: row.get::<_, Option<String>>(11).unwrap_or_default(),
+                source_label: row.get::<_, Option<String>>(12).unwrap_or_default(),
             })
             .collect())
     }
@@ -400,7 +403,7 @@ impl<'a> MetadataClient<'a> {
             .query(
                 "SELECT id, source_schema, source_table, target_schema, target_table, \
                  state, snapshot_lsn::text, enabled, source_oid, error_message, \
-                 applied_lsn::text, source_label \
+                 applied_lsn::text, target_oid, source_label \
                  FROM duckpipe.table_mappings \
                  WHERE group_id = $1 AND source_oid = $2",
                 &[&group_id, &source_oid],
@@ -429,8 +432,9 @@ impl<'a> MetadataClient<'a> {
                 .unwrap_or(0),
             enabled: row.get(7),
             source_oid: row.get(8),
+            target_oid: row.get::<_, Option<i64>>(11).unwrap_or(0),
             error_message: row.get(9),
-            source_label: row.get::<_, Option<String>>(11).unwrap_or_default(),
+            source_label: row.get::<_, Option<String>>(12).unwrap_or_default(),
         }))
     }
 
@@ -788,4 +792,32 @@ pub async fn load_pk_metadata(
     }
 
     Ok((attnames, key_attrs))
+}
+
+/// Look up the SQL type name for a column via `format_type()`.
+///
+/// Standalone function that can operate on either the local or remote PG connection.
+pub async fn get_column_type(
+    client: &Client,
+    schema: &str,
+    table: &str,
+    col_name: &str,
+) -> Result<String, tokio_postgres::Error> {
+    let rows = client
+        .query(
+            "SELECT pg_catalog.format_type(a.atttypid, a.atttypmod) \
+             FROM pg_class c \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             JOIN pg_attribute a ON a.attrelid = c.oid \
+             WHERE n.nspname = $1 AND c.relname = $2 AND a.attname = $3 \
+             AND a.attnum > 0 AND NOT a.attisdropped",
+            &[&schema, &table, &col_name],
+        )
+        .await?;
+
+    if let Some(row) = rows.first() {
+        Ok(row.get(0))
+    } else {
+        Ok("text".to_string()) // fallback
+    }
 }
