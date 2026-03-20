@@ -4,32 +4,12 @@ ARG _BUILDER_PG=18
 ARG DUCKDB_VERSION=v1.5.0
 
 ###############################################################################
-### DUCKLAKE-BUILDER — build ducklake extension from pg_ducklake source
-###############################################################################
-FROM pgducklake/pgducklake:${_BUILDER_PG}-main AS ducklake-builder
-ARG _BUILDER_PG
-ARG DUCKLAKE_COMMIT=main
-
-USER root
-
-RUN apt-get update -qq && \
-    apt-get install -y --no-install-recommends \
-        git \
-        cmake \
-        ninja-build \
-        build-essential \
-        ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
-
-COPY docker/build-ducklake-ext.sh /tmp/build-ducklake-ext.sh
-RUN DUCKLAKE_COMMIT=${DUCKLAKE_COMMIT} \
-    /tmp/build-ducklake-ext.sh /opt/ducklake-ext
-
-###############################################################################
 ### BUILDER — compile duckpipe-daemon against libduckdb from pg_ducklake
 ###############################################################################
 FROM pgducklake/pgducklake:${_BUILDER_PG}-main AS builder
 ARG _BUILDER_PG
+ARG DUCKLAKE_COMMIT=main
+ARG DUCKDB_VERSION
 
 USER root
 
@@ -38,10 +18,28 @@ RUN apt-get update -qq && \
     apt-get install -y --no-install-recommends \
         build-essential \
         pkg-config \
+        cmake \
+        ninja-build \
+        git \
         curl \
         ca-certificates \
         libssl-dev && \
     rm -rf /var/lib/apt/lists/*
+
+# Build ducklake extension from pg_ducklake source.
+COPY docker/build-ducklake-ext.sh /tmp/build-ducklake-ext.sh
+RUN DUCKLAKE_COMMIT=${DUCKLAKE_COMMIT} \
+    /tmp/build-ducklake-ext.sh /opt/ducklake-ext
+
+# Download postgres_scanner matching DUCKDB_VERSION (from docker/.env).
+# The upstream version is safe here — the -Bsymbolic issue only affects PG
+# backends, and the daemon runs standalone.
+RUN ARCH=$(uname -m | sed 's/x86_64/linux_amd64/;s/aarch64/linux_arm64/') && \
+    EXT_DIR="/opt/duckdb-ext/.duckdb/extensions/${DUCKDB_VERSION}/${ARCH}" && \
+    mkdir -p "${EXT_DIR}" && \
+    echo "Downloading postgres_scanner ${DUCKDB_VERSION} (${ARCH}) ..." && \
+    curl -fsSL "https://extensions.duckdb.org/${DUCKDB_VERSION}/${ARCH}/postgres_scanner.duckdb_extension.gz" \
+        | gzip -d > "${EXT_DIR}/postgres_scanner.duckdb_extension"
 
 # Install Rust
 ENV RUSTUP_HOME=/usr/local/rustup \
@@ -63,17 +61,6 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
     cargo build --release -p duckpipe-daemon && \
     cp target/release/duckpipe /usr/local/bin/duckpipe
-
-# Download postgres_scanner matching DUCKDB_VERSION (from docker/.env).
-# The upstream version is safe here — the -Bsymbolic issue only affects PG
-# backends, and the daemon runs standalone.
-ARG DUCKDB_VERSION
-RUN ARCH=$(uname -m | sed 's/x86_64/linux_amd64/;s/aarch64/linux_arm64/') && \
-    EXT_DIR="/opt/duckdb-ext/.duckdb/extensions/${DUCKDB_VERSION}/${ARCH}" && \
-    mkdir -p "${EXT_DIR}" && \
-    echo "Downloading postgres_scanner ${DUCKDB_VERSION} (${ARCH}) ..." && \
-    curl -fsSL "https://extensions.duckdb.org/${DUCKDB_VERSION}/${ARCH}/postgres_scanner.duckdb_extension.gz" \
-        | gzip -d > "${EXT_DIR}/postgres_scanner.duckdb_extension"
 
 ###############################################################################
 ### RUNTIME — minimal image with daemon binary + DuckDB libraries
@@ -100,7 +87,7 @@ COPY --from=builder \
     /usr/local/lib/
 
 # ducklake extension built from pg_ducklake source (next to libduckdb.so)
-COPY --from=ducklake-builder \
+COPY --from=builder \
     /opt/ducklake-ext/ducklake.duckdb_extension \
     /usr/local/lib/ducklake.duckdb_extension
 

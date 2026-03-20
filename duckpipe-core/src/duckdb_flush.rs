@@ -27,6 +27,9 @@ static DUCKLAKE_LOAD_SQL: OnceLock<String> = OnceLock::new();
 /// will LOAD it directly; otherwise they fall back to INSTALL + LOAD from the network.
 pub fn init_pkglibdir(pkglibdir: &str) {
     let local_path = format!("{}/{}", pkglibdir, DUCKLAKE_EXT_FILENAME);
+    // allow_extensions_metadata_mismatch is needed because the ducklake extension
+    // is built from pg_ducklake's DuckDB source tree, which may differ slightly
+    // from the libduckdb.so shipped by pg_ducklake (e.g. git describe metadata).
     let sql = if std::path::Path::new(&local_path).exists() {
         format!(
             "SET allow_extensions_metadata_mismatch = true; LOAD '{}';",
