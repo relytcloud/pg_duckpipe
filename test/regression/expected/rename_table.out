@@ -2,17 +2,46 @@
 --
 -- After ALTER TABLE RENAME, the publication still includes the table (by OID),
 -- and pgoutput RELATION messages carry the new name with the same OID.
--- The OID-based routing should continue syncing and update metadata with
--- the new table name.
+-- The OID-based routing should continue syncing and update source metadata,
+-- but the target DuckLake table name stays unchanged.
+-- Set fast flush for regression tests (default 5s is too slow for pg_sleep waits)
+SELECT duckpipe.set_config('flush_interval_ms', '1000');
+ set_config 
+------------
+ 
+(1 row)
+
+SELECT duckpipe.set_config('flush_batch_threshold', '10000');
+ set_config 
+------------
+ 
+(1 row)
+
+SET client_min_messages = warning;
+SELECT duckpipe.stop_worker();
+ stop_worker 
+-------------
+ 
+(1 row)
+
+RESET client_min_messages;
+-- Use a dedicated group to avoid stale replication slot from prior tests
+SELECT duckpipe.create_group('rename_grp');
+ create_group 
+--------------
+ rename_grp
+(1 row)
+
+SET client_min_messages = warning;
 SELECT duckpipe.start_worker();
-NOTICE:  Started 1 background worker(s)
  start_worker 
 --------------
  
 (1 row)
 
+RESET client_min_messages;
 CREATE TABLE rename_src (id int primary key, val text);
-SELECT duckpipe.add_table('public.rename_src', NULL, 'default', false);
+SELECT duckpipe.add_table('public.rename_src', NULL, 'rename_grp', false);
  add_table 
 -----------
  
@@ -28,9 +57,9 @@ SELECT pg_sleep(2);
 
 -- Verify initial sync
 SELECT * FROM public.rename_src_ducklake ORDER BY id;
- id |      val      |     _duckpipe_source      
-----+---------------+---------------------------
-  1 | before_rename | default/public.rename_src
+ id |      val      |       _duckpipe_source       
+----+---------------+------------------------------
+  1 | before_rename | rename_grp/public.rename_src
 (1 row)
 
 -- Verify metadata has original name
@@ -50,20 +79,28 @@ SELECT pg_sleep(3);
  
 (1 row)
 
--- Verify new data synced to the same target (target name doesn't change)
+-- Target table keeps the original name (source rename does NOT rename target)
 SELECT * FROM public.rename_src_ducklake ORDER BY id;
- id |      val      |     _duckpipe_source      
-----+---------------+---------------------------
-  1 | before_rename | default/public.rename_src
-  2 | after_rename  | default/public.rename_src
+ id |      val      |       _duckpipe_source       
+----+---------------+------------------------------
+  1 | before_rename | rename_grp/public.rename_src
+  2 | after_rename  | rename_grp/public.rename_src
 (2 rows)
 
--- Verify metadata was updated with new name
+-- Verify source_table metadata was updated with new name
 SELECT source_table FROM duckpipe.table_mappings
 WHERE source_table IN ('rename_src', 'rename_src_v2');
  source_table  
 ---------------
  rename_src_v2
+(1 row)
+
+-- Verify target_table is unchanged (still the original name)
+SELECT target_table FROM duckpipe.table_mappings
+WHERE source_table = 'rename_src_v2';
+    target_table     
+---------------------
+ rename_src_ducklake
 (1 row)
 
 -- UPDATE and DELETE should also work after rename
@@ -76,16 +113,22 @@ SELECT pg_sleep(2);
 (1 row)
 
 SELECT * FROM public.rename_src_ducklake ORDER BY id;
- id |   val   |     _duckpipe_source      
-----+---------+---------------------------
-  1 | updated | default/public.rename_src
+ id |   val   |       _duckpipe_source       
+----+---------+------------------------------
+  1 | updated | rename_grp/public.rename_src
 (1 row)
 
--- Cleanup (use new name)
+-- Cleanup (source uses new name, target keeps original name)
 SELECT duckpipe.remove_table('public.rename_src_v2', false);
-WARNING:  Group 'default' has no remaining tables — its replication slot is still holding WAL. Run SELECT duckpipe.drop_group('default') to release it.
+WARNING:  Group 'rename_grp' has no remaining tables — its replication slot is still holding WAL. Run SELECT duckpipe.drop_group('rename_grp') to release it.
  remove_table 
 --------------
+ 
+(1 row)
+
+SELECT duckpipe.drop_group('rename_grp');
+ drop_group 
+------------
  
 (1 row)
 

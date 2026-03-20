@@ -637,7 +637,7 @@ Iterates over `(lsn, data)` tuples, parsing each pgoutput binary message:
 
 | Message | Action |
 |---------|--------|
-| `'R'` (RELATION) | Cache schema info in `rel_cache` |
+| `'R'` (RELATION) | Cache schema info in `rel_cache`; detect DDL changes via diffing (see §5.1) |
 | `'I'` (INSERT) | Decode typed values, resolve mapping, skip if disabled/ERRORED/CATCHUP, push to queue |
 | `'U'` (UPDATE) | Decode old+new, if TOAST unchanged → `Update` change, else → `Delete` + `Insert` |
 | `'D'` (DELETE) | Decode old key values, push `Delete` change |
@@ -662,6 +662,28 @@ After the message loop:
 - Backpressure: WAL consumer pauses when total queued changes exceed `max_queued_changes`
 - TRUNCATE: uses `drain_and_wait_table()` for per-table synchronous drain before DELETE
 - Crash safety: replication slot only advances past what all tables have durably flushed (confirmed_lsn = min(applied_lsn) read from PG)
+
+### 5.1. Schema DDL Sync
+
+Schema changes (ADD/DROP/RENAME COLUMN) are automatically propagated from source to DuckLake target tables. Source table renames are tracked (metadata updated) but do **not** rename the target — the target table name is stable and independent of the source name.
+
+**Detection** — pgoutput sends a RELATION message before the first DML after a schema change. The `'R'` handler in `process_one_wal_message()` compares the new RELATION with the cached entry via `detect_schema_changes()`:
+
+- **ADD COLUMN**: column names in new but not in old → query `pg_attribute` for type
+- **DROP COLUMN**: column names in old but not in new
+- **RENAME COLUMN**: same position, different name, same type OID
+
+**Target resolution** — `apply_ddl_commands()` resolves the current target table name from `target_oid` via `pg_class` rather than using a stored name string. This means the pipeline survives user-initiated renames of the target table. For old mappings without `target_oid`, it falls back to the name stored in metadata.
+
+**Propagation** — DDL is treated as a non-blocking barrier event in the per-table queue (`PendingDdl`). The WAL consumer sets the barrier and continues immediately; the flush thread handles it autonomously:
+
+1. WAL consumer detects schema diff → calls `coordinator.set_pending_ddl()` with `DdlCommand` list and new `QueueMeta`
+2. While barrier is set, `push_change()` routes new-schema changes to `pending_after_ddl`
+3. Flush thread drains and flushes old-schema changes from the buffer
+4. Flush thread applies `ALTER TABLE` commands to the DuckLake target via a short-lived PG connection (`apply_ddl_commands()`)
+5. Flush thread resets `FlushWorker`, merges `pending_after_ddl` into main queue with updated `QueueMeta`, continues normally
+
+The barrier ensures old-schema data is flushed before ALTER TABLE, preventing column mismatch errors or data loss.
 
 ---
 
