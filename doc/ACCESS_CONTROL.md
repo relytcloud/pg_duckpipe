@@ -1,6 +1,6 @@
 # Access Control
 
-pg_duckpipe's permission model follows PostgreSQL conventions: management requires superuser access, target tables get read-only grants to source owners, and monitoring is available to any user with schema access.
+pg_duckpipe's permission model follows PostgreSQL conventions: all operations are superuser-only by default. The `duckpipe` schema has no USAGE grant to PUBLIC, so non-superusers cannot access any functions unless explicitly granted. Target DuckLake tables get read-only grants to the source table owner for local sync groups.
 
 ## Extension Installation
 
@@ -40,7 +40,7 @@ Management operations involve creating replication slots, publications, and back
 
 ## Monitoring Functions
 
-Monitoring functions are **not revoked from PUBLIC**. Any role with USAGE on the `duckpipe` schema can call them:
+Monitoring functions are **not explicitly revoked from PUBLIC**, but they are still inaccessible to non-superusers by default because the `duckpipe` schema has no USAGE grant. A superuser must grant schema access first. Once USAGE is granted, these functions are callable:
 
 | Function | Returns |
 |----------|---------|
