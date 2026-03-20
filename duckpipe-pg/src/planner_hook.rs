@@ -215,6 +215,16 @@ unsafe fn rewrite_query_with_cache(
 }
 
 /// Update the RTEPermissionInfo entry for a rewritten RTE.
+///
+/// PG16 extracted per-RTE permission fields (requiredPerms, checkAsUser,
+/// selectedCols, etc.) from RangeTblEntry into a separate RTEPermissionInfo
+/// struct, indexed via `rte.perminfoindex` into `query.rteperminfos`.
+/// After rewriting `rte.relid`, we must also update the corresponding
+/// RTEPermissionInfo.relid so PG's ACL checks target the correct table.
+///
+/// On PG14/PG15 these fields live directly on the RTE and are covered by
+/// the `rte.relid` rewrite — no separate update needed.
+#[cfg(any(feature = "pg16", feature = "pg17", feature = "pg18"))]
 unsafe fn rewrite_perminfo(
     parse: *mut pg_sys::Query,
     rte: *mut pg_sys::RangeTblEntry,
@@ -231,6 +241,15 @@ unsafe fn rewrite_perminfo(
             }
         }
     }
+}
+
+/// PG14/PG15: permissions live directly on the RTE — no separate update needed.
+#[cfg(any(feature = "pg14", feature = "pg15"))]
+unsafe fn rewrite_perminfo(
+    _parse: *mut pg_sys::Query,
+    _rte: *mut pg_sys::RangeTblEntry,
+    _target_oid: pg_sys::Oid,
+) {
 }
 
 /// Recurse into subquery RTEs and CTEs to rewrite nested queries.
