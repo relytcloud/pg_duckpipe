@@ -31,16 +31,17 @@ WORKDIR=$(mktemp -d)
 trap 'rm -rf "${WORKDIR}"' EXIT
 
 echo "==> Cloning pg_ducklake @ ${COMMIT} ..."
-git clone --depth 1 --branch "${COMMIT}" --recurse-submodules --shallow-submodules \
-    "${REPO}" "${WORKDIR}/pg_ducklake" 2>/dev/null || {
+git clone --depth 1 --branch "${COMMIT}" "${REPO}" "${WORKDIR}/pg_ducklake" || {
     # Fallback for commit hashes (--branch only works for branches/tags)
+    rm -rf "${WORKDIR}/pg_ducklake"
     git clone --depth 50 "${REPO}" "${WORKDIR}/pg_ducklake"
     cd "${WORKDIR}/pg_ducklake"
     git checkout "${COMMIT}"
-    git submodule update --init --recursive --depth 1
 }
 
-cd "${WORKDIR}/pg_ducklake/third_party/ducklake"
+cd "${WORKDIR}/pg_ducklake"
+git submodule update --init --recursive --depth 1
+cd third_party/ducklake
 
 # Use Ninja if available, else Unix Makefiles
 if command -v ninja >/dev/null 2>&1; then
