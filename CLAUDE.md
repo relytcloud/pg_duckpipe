@@ -48,6 +48,7 @@ Heap Tables → WAL → Replication Slot (pgoutput) → Decoder → FlushCoordin
 | `doc/USAGE.md` | User-facing: SQL API, monitoring, GUCs, tuning |
 | `doc/FAN_IN.md` | Fan-in streaming: multiple sources to one target, use cases, operations |
 | `doc/REMOTE_SYNC.md` | Remote sync: connection strings, TLS, architecture |
+| `doc/ACCESS_CONTROL.md` | Permission model: function ACLs, target table grants, bgworker identity |
 | `doc/DATA_TYPES.md` | PG→DuckDB type mapping, conversion architecture, limitations |
 | `doc/CODE_WALKTHROUGH.md` | Developer-facing: detailed code walkthrough |
 | `doc/DESIGN_V2.md` | Historical: original v2 architecture design |

@@ -7,6 +7,8 @@ test: monitoring
 test: metrics
 test: sync_group_mode
 test: group_config
+# Access control: target table grants, function privileges
+test: acl
 # Streaming CDC tests (require background worker)
 test: streaming
 test: snapshot_updates

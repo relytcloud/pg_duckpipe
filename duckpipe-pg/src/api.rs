@@ -932,6 +932,40 @@ fn add_table(
             .update(&create_sql, None, &[])
             .map_err(|e| format!("CREATE TABLE: {}", e))?;
 
+        // Grant SELECT on target table to the source table owner (local groups only).
+        // For remote groups the source owner is on a different PG instance, so skip.
+        if group_conninfo.is_none() {
+            let owner_args = unsafe {
+                [
+                    DatumWithOid::new(schema.as_str(), PgBuiltInOids::TEXTOID.value()),
+                    DatumWithOid::new(table.as_str(), PgBuiltInOids::TEXTOID.value()),
+                ]
+            };
+            let owner_result = client.select(
+                "SELECT pg_catalog.pg_get_userbyid(c.relowner)::text \
+                 FROM pg_class c \
+                 JOIN pg_namespace n ON n.oid = c.relnamespace \
+                 WHERE n.nspname = $1 AND c.relname = $2",
+                Some(1),
+                &owner_args,
+            );
+            if let Ok(owner_rows) = owner_result {
+                for row in owner_rows {
+                    if let Some(owner_name) = row.get::<String>(1).unwrap() {
+                        let grant_sql = format!(
+                            "GRANT SELECT ON {}.{} TO {}",
+                            quote_ident(&t_schema),
+                            quote_ident(&t_table),
+                            quote_ident(&owner_name),
+                        );
+                        client
+                            .update(&grant_sql, None, &[])
+                            .map_err(|e| format!("GRANT SELECT: {}", e))?;
+                    }
+                }
+            }
+        }
+
         // Fan-in guard: check if ANY existing mapping targets the same table
         // (catches both cross-group and same-group fan-in attempts)
         {
@@ -1557,7 +1591,7 @@ CREATE FUNCTION duckpipe.groups() RETURNS TABLE(
     conninfo TEXT
 )
 AS 'MODULE_PATHNAME', '@FUNCTION_NAME@'
-LANGUAGE C STRICT;
+LANGUAGE C STRICT SECURITY DEFINER;
 ")]
 fn groups() -> TableIterator<
     'static,
@@ -1628,7 +1662,7 @@ CREATE FUNCTION duckpipe.tables() RETURNS TABLE(
     source_count INTEGER
 )
 AS 'MODULE_PATHNAME', '@FUNCTION_NAME@'
-LANGUAGE C STRICT;
+LANGUAGE C STRICT SECURITY DEFINER;
 ")]
 fn tables() -> TableIterator<
     'static,
@@ -1710,7 +1744,7 @@ CREATE FUNCTION duckpipe.status() RETURNS TABLE(
     source_label TEXT
 )
 AS 'MODULE_PATHNAME', '@FUNCTION_NAME@'
-LANGUAGE C STRICT;
+LANGUAGE C STRICT SECURITY DEFINER;
 ")]
 fn status() -> TableIterator<
     'static,
@@ -1849,7 +1883,7 @@ CREATE FUNCTION duckpipe.worker_status() RETURNS TABLE(
     gate_timeouts BIGINT
 )
 AS 'MODULE_PATHNAME', '@FUNCTION_NAME@'
-LANGUAGE C STRICT;
+LANGUAGE C STRICT SECURITY DEFINER;
 ")]
 fn worker_status() -> TableIterator<
     'static,
@@ -1899,7 +1933,7 @@ fn worker_status() -> TableIterator<
 #[pg_extern(sql = "
 CREATE FUNCTION duckpipe.metrics() RETURNS TEXT
 AS 'MODULE_PATHNAME', '@FUNCTION_NAME@'
-LANGUAGE C STRICT;
+LANGUAGE C STRICT SECURITY DEFINER;
 ")]
 fn metrics() -> String {
     // Read in-memory metrics from SHM (already keyed by id)
@@ -2259,7 +2293,7 @@ CREATE FUNCTION duckpipe.get_config(
     key TEXT DEFAULT NULL
 ) RETURNS TEXT
 AS 'MODULE_PATHNAME', '@FUNCTION_NAME@'
-LANGUAGE C;
+LANGUAGE C SECURITY DEFINER;
 ")]
 fn get_config(key: default!(Option<&str>, "NULL")) -> Option<String> {
     Spi::connect(|client| {
@@ -2375,7 +2409,7 @@ CREATE FUNCTION duckpipe.get_group_config(
     key TEXT DEFAULT NULL
 ) RETURNS TEXT
 AS 'MODULE_PATHNAME', '@FUNCTION_NAME@'
-LANGUAGE C;
+LANGUAGE C SECURITY DEFINER;
 ")]
 fn get_group_config(group_name: &str, key: default!(Option<&str>, "NULL")) -> Option<String> {
     Spi::connect(|client| {

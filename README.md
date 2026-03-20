@@ -111,6 +111,7 @@ make check-regression TEST=api              # Run a single test
 | [doc/USAGE.md](doc/USAGE.md) | SQL usage, monitoring, **configuration (GUCs)**, and tuning |
 | [doc/DATA_TYPES.md](doc/DATA_TYPES.md) | Supported PG→DuckDB type mappings and limitations |
 | [doc/FAN_IN.md](doc/FAN_IN.md) | Fan-in streaming: multiple sources to one target, use cases, operations |
+| [doc/ACCESS_CONTROL.md](doc/ACCESS_CONTROL.md) | Permissions: who can manage, monitor, and query target tables |
 | [doc/DAEMON.md](doc/DAEMON.md) | Standalone daemon with REST API: setup, endpoints, curl examples |
 | [doc/DESIGN_V2.md](doc/DESIGN_V2.md) | Historical v2 design notes |
 | [benchmark/README.md](benchmark/README.md) | Benchmark harness |
