@@ -1591,7 +1591,7 @@ CREATE FUNCTION duckpipe.groups() RETURNS TABLE(
     conninfo TEXT
 )
 AS 'MODULE_PATHNAME', '@FUNCTION_NAME@'
-LANGUAGE C STRICT;
+LANGUAGE C STRICT SECURITY DEFINER;
 ")]
 fn groups() -> TableIterator<
     'static,
@@ -1662,7 +1662,7 @@ CREATE FUNCTION duckpipe.tables() RETURNS TABLE(
     source_count INTEGER
 )
 AS 'MODULE_PATHNAME', '@FUNCTION_NAME@'
-LANGUAGE C STRICT;
+LANGUAGE C STRICT SECURITY DEFINER;
 ")]
 fn tables() -> TableIterator<
     'static,
@@ -1744,7 +1744,7 @@ CREATE FUNCTION duckpipe.status() RETURNS TABLE(
     source_label TEXT
 )
 AS 'MODULE_PATHNAME', '@FUNCTION_NAME@'
-LANGUAGE C STRICT;
+LANGUAGE C STRICT SECURITY DEFINER;
 ")]
 fn status() -> TableIterator<
     'static,
@@ -1883,7 +1883,7 @@ CREATE FUNCTION duckpipe.worker_status() RETURNS TABLE(
     gate_timeouts BIGINT
 )
 AS 'MODULE_PATHNAME', '@FUNCTION_NAME@'
-LANGUAGE C STRICT;
+LANGUAGE C STRICT SECURITY DEFINER;
 ")]
 fn worker_status() -> TableIterator<
     'static,
@@ -1933,7 +1933,7 @@ fn worker_status() -> TableIterator<
 #[pg_extern(sql = "
 CREATE FUNCTION duckpipe.metrics() RETURNS TEXT
 AS 'MODULE_PATHNAME', '@FUNCTION_NAME@'
-LANGUAGE C STRICT;
+LANGUAGE C STRICT SECURITY DEFINER;
 ")]
 fn metrics() -> String {
     // Read in-memory metrics from SHM (already keyed by id)
@@ -2293,7 +2293,7 @@ CREATE FUNCTION duckpipe.get_config(
     key TEXT DEFAULT NULL
 ) RETURNS TEXT
 AS 'MODULE_PATHNAME', '@FUNCTION_NAME@'
-LANGUAGE C;
+LANGUAGE C SECURITY DEFINER;
 ")]
 fn get_config(key: default!(Option<&str>, "NULL")) -> Option<String> {
     Spi::connect(|client| {
@@ -2409,7 +2409,7 @@ CREATE FUNCTION duckpipe.get_group_config(
     key TEXT DEFAULT NULL
 ) RETURNS TEXT
 AS 'MODULE_PATHNAME', '@FUNCTION_NAME@'
-LANGUAGE C;
+LANGUAGE C SECURITY DEFINER;
 ")]
 fn get_group_config(group_name: &str, key: default!(Option<&str>, "NULL")) -> Option<String> {
     Spi::connect(|client| {

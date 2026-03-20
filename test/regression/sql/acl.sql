@@ -1,5 +1,4 @@
--- Test access control: target table permissions
--- Verify that add_table grants SELECT on the target to the source table owner.
+-- Test access control: target table permissions, schema USAGE, function ACLs
 
 -- Create a non-superuser role that owns the source table
 CREATE ROLE acl_owner LOGIN;
@@ -25,9 +24,23 @@ SELECT has_table_privilege('acl_owner', 'public.acl_source_ducklake', 'INSERT') 
 SELECT has_table_privilege('acl_owner', 'public.acl_source_ducklake', 'UPDATE') AS has_update;
 SELECT has_table_privilege('acl_owner', 'public.acl_source_ducklake', 'DELETE') AS has_delete;
 
--- Verify that non-superusers cannot access the duckpipe schema (no USAGE grant)
+-- Verify management functions are NOT callable by non-superusers
 SET ROLE acl_owner;
 SELECT duckpipe.add_table('public.acl_source');  -- should fail: permission denied
+RESET ROLE;
+
+-- Verify monitoring functions ARE callable by non-superusers (schema USAGE granted to PUBLIC)
+SET ROLE acl_owner;
+SELECT count(*) >= 0 AS can_call_groups FROM duckpipe.groups();
+SELECT count(*) >= 0 AS can_call_tables FROM duckpipe.tables();
+SELECT count(*) >= 0 AS can_call_status FROM duckpipe.status();
+RESET ROLE;
+
+-- Verify non-superusers cannot directly query internal tables
+SET ROLE acl_owner;
+SELECT * FROM duckpipe.sync_groups;  -- should fail: permission denied
+SELECT * FROM duckpipe.table_mappings;  -- should fail: permission denied
+SELECT * FROM duckpipe.global_config;  -- should fail: permission denied
 RESET ROLE;
 
 -- Cleanup

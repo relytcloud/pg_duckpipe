@@ -74,3 +74,13 @@ INSERT INTO duckpipe.sync_groups (name, publication, slot_name)
 VALUES ('default',
         'duckpipe_pub_' || current_database(),
         'duckpipe_slot_' || current_database());
+
+-- Allow all users to call monitoring functions (management functions have
+-- explicit REVOKE ALL FROM PUBLIC so they remain superuser-only).
+GRANT USAGE ON SCHEMA duckpipe TO PUBLIC;
+
+-- Keep internal tables private — only accessible via API functions.
+REVOKE ALL ON duckpipe.sync_groups FROM PUBLIC;
+REVOKE ALL ON duckpipe.table_mappings FROM PUBLIC;
+REVOKE ALL ON duckpipe.worker_state FROM PUBLIC;
+REVOKE ALL ON duckpipe.global_config FROM PUBLIC;
