@@ -25,22 +25,12 @@ build: check-cargo-pgrx
 	DYLD_LIBRARY_PATH="$(PG_LIB):$(DYLD_LIBRARY_PATH)" \
 	cargo pgrx install $(PGRX_PROFILE_FLAG) --pg-config=$(PG_CONFIG)
 
-# Search for ducklake.duckdb_extension in sibling pg_ducklake build output.
-# Supports both release and debug builds. Override with DUCKLAKE_EXT= to use a specific file.
+# Build ducklake.duckdb_extension from pg_ducklake source and install to pkglibdir.
+# Uses sibling ../pg_ducklake by default. Override with DUCKLAKE_REPO / DUCKLAKE_COMMIT.
+DUCKLAKE_REPO ?= $(realpath ../pg_ducklake)
+
 install-ducklake-ext:
-	@ext="$(DUCKLAKE_EXT)"; \
-	if [ -z "$$ext" ]; then \
-		for d in release debug relwithdebinfo; do \
-			f="$$(realpath ../pg_ducklake/third_party/ducklake/build/$$d/extension/ducklake/ducklake.duckdb_extension 2>/dev/null)"; \
-			if [ -f "$$f" ]; then ext="$$f"; break; fi; \
-		done; \
-	fi; \
-	if [ -n "$$ext" ]; then \
-		echo "Installing $$ext to $(PG_LIB)"; \
-		install -m 644 "$$ext" "$(PG_LIB)/ducklake.duckdb_extension"; \
-	else \
-		echo "NOTICE: ducklake.duckdb_extension not found in sibling pg_ducklake. Skipping."; \
-	fi
+	DUCKLAKE_REPO="$(DUCKLAKE_REPO)" docker/build-ducklake-ext.sh "$(PG_LIB)"
 
 install: build install-ducklake-ext
 
