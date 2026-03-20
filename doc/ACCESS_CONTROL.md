@@ -53,4 +53,4 @@ CREATE ROLE replicator LOGIN REPLICATION PASSWORD '...';
 GRANT SELECT ON public.orders TO replicator;
 ```
 
-Connection strings are stored in `duckpipe.sync_groups.conninfo`. For production, prefer `.pgpass` or certificate-based authentication over inline passwords.
+Connection strings are stored in `duckpipe.sync_groups.conninfo`. This table is only accessible to superusers — non-superusers cannot read it directly. The `groups()` monitoring function redacts passwords before returning conninfo to callers.
