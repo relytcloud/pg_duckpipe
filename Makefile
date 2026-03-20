@@ -4,8 +4,11 @@ BUILD_TYPE ?= release
 
 PGRX_PROFILE_FLAG := $(if $(filter release,$(BUILD_TYPE)),--release,--profile $(BUILD_TYPE))
 
-.PHONY: all check-cargo-pgrx build install check-regression clean-regression installcheck \
-       build-daemon check-daemon clean-daemon installcheck-all format clean
+# Path to pg_ducklake's built ducklake loadable extension (sibling repo)
+DUCKLAKE_EXT_DIR ?= $(realpath ../pg_ducklake/third_party/ducklake/build/release/extension/ducklake)
+
+.PHONY: all check-cargo-pgrx build install install-ducklake-ext check-regression clean-regression \
+       installcheck build-daemon check-daemon clean-daemon installcheck-all format clean
 
 all: build
 
@@ -25,7 +28,15 @@ build: check-cargo-pgrx
 	DYLD_LIBRARY_PATH="$(PG_LIB):$(DYLD_LIBRARY_PATH)" \
 	cargo pgrx install $(PGRX_PROFILE_FLAG) --pg-config=$(PG_CONFIG)
 
-install: build
+install-ducklake-ext:
+	@if [ -f "$(DUCKLAKE_EXT_DIR)/ducklake.duckdb_extension" ]; then \
+		echo "Installing ducklake.duckdb_extension to $(PG_LIB)"; \
+		install -m 644 "$(DUCKLAKE_EXT_DIR)/ducklake.duckdb_extension" "$(PG_LIB)/ducklake.duckdb_extension"; \
+	else \
+		echo "NOTICE: ducklake.duckdb_extension not found at $(DUCKLAKE_EXT_DIR). Skipping."; \
+	fi
+
+install: build install-ducklake-ext
 
 check-regression:
 	$(MAKE) -C test/regression check-regression

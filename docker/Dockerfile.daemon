@@ -16,9 +16,11 @@ COPY docker/fetch-ducklake-ext.sh /tmp/fetch-ducklake-ext.sh
 # Download ducklake + postgres_scanner extensions.  The upstream
 # postgres_scanner is safe here — the -Bsymbolic issue only affects
 # PG backends, and the daemon runs standalone.
+# --pkglibdir copies ducklake.duckdb_extension to /opt/duckdb-pkglib/
+# for the runtime stage to install alongside libduckdb.so.
 ENV DUCKDB_HOME=/opt/duckdb-staging \
     FETCH_POSTGRES_SCANNER=1
-RUN /tmp/fetch-ducklake-ext.sh
+RUN /tmp/fetch-ducklake-ext.sh --pkglibdir /opt/duckdb-pkglib
 
 ###############################################################################
 ### BUILDER — compile duckpipe-daemon against libduckdb from pg_ducklake
@@ -89,6 +91,12 @@ RUN ldconfig
 COPY --from=ext-fetcher --chown=duckpipe:duckpipe \
     /opt/duckdb-staging/.duckdb/extensions/ \
     /home/duckpipe/.duckdb/extensions/
+
+# Also install ducklake.duckdb_extension to /usr/local/lib/ (next to libduckdb.so)
+# so the daemon's Rust code can LOAD it directly without INSTALL.
+COPY --from=ext-fetcher \
+    /opt/duckdb-pkglib/ducklake.duckdb_extension \
+    /usr/local/lib/ducklake.duckdb_extension
 
 USER duckpipe
 WORKDIR /home/duckpipe

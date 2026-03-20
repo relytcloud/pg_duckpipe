@@ -60,6 +60,11 @@ struct Args {
     /// HTTP API bind address.
     #[arg(long, default_value_t = IpAddr::from([127, 0, 0, 1]))]
     api_bind: IpAddr,
+
+    /// Directory containing libduckdb.so and ducklake.duckdb_extension.
+    /// Defaults to DUCKDB_LIB_DIR env var, then "/usr/local/lib".
+    #[arg(long, env = "DUCKDB_LIB_DIR", default_value = "/usr/local/lib")]
+    duckdb_lib_dir: String,
 }
 
 #[tokio::main]
@@ -130,7 +135,14 @@ async fn main() {
     let poll_interval = Duration::from_millis(args.poll_interval as u64);
 
     // Sync loop
-    run_sync_loop(&state, &config, &slot_params, poll_interval).await;
+    run_sync_loop(
+        &state,
+        &config,
+        &slot_params,
+        poll_interval,
+        &args.duckdb_lib_dir,
+    )
+    .await;
 }
 
 /// Pre-bind the daemon to a group at startup.
@@ -265,6 +277,7 @@ async fn run_sync_loop(
     config: &ServiceConfig,
     slot_params: &duckpipe_core::service::SlotConnectParams,
     poll_interval: Duration,
+    pkglibdir: &str,
 ) {
     loop {
         // Wait for group binding if not already bound.
@@ -287,6 +300,7 @@ async fn run_sync_loop(
         let mut coordinator = FlushCoordinator::new(
             config.connstr.clone(),
             config.ducklake_schema.clone(),
+            pkglibdir.to_string(),
             group_name.clone(),
             resolved_config,
         );

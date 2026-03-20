@@ -95,13 +95,13 @@ RUN echo "/usr/lib/postgresql/${PG_VERSION}/lib" > /etc/ld.so.conf.d/duckdb.conf
     /sbin/ldconfig
 
 # Pre-install the ducklake DuckDB extension so flush workers never need internet
-# access at runtime.  The postgres user's $HOME/.duckdb/ is outside PGDATA so it
-# survives the Docker volume mount at /var/lib/postgresql/data.
+# access at runtime.  Installs to both the standard DuckDB cache AND pkglibdir
+# so the Rust code can LOAD it directly without INSTALL.
 #
 # DuckDB version must match libduckdb.so shipped by pg_ducklake in this image.
 COPY docker/fetch-ducklake-ext.sh /usr/local/bin/fetch-ducklake-ext.sh
 RUN apt-get update -qq && apt-get install -y --no-install-recommends curl && \
-    /usr/local/bin/fetch-ducklake-ext.sh && \
+    /usr/local/bin/fetch-ducklake-ext.sh --pkglibdir /usr/lib/postgresql/${PG_VERSION}/lib && \
     chown -R postgres:postgres /var/lib/postgresql/.duckdb && \
     apt-get remove -y curl && apt-get autoremove -y && \
     rm -rf /var/lib/apt/lists/*

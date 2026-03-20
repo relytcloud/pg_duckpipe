@@ -69,7 +69,7 @@ jobs:
               set -euo pipefail
 
               # Pre-fetch the ducklake DuckDB extension needed by tests
-              /build/docker/fetch-ducklake-ext.sh
+              /build/docker/fetch-ducklake-ext.sh --pkglibdir /usr/lib/postgresql/${{ matrix.pg_version }}/lib
               chown -R postgres:postgres /var/lib/postgresql/.duckdb /build
 
               # pg_regress refuses to run as root — switch to the postgres user
@@ -152,7 +152,7 @@ jobs:
               PG_LIB=$(${PG_CONFIG} --pkglibdir)
 
               # Pre-fetch the ducklake DuckDB extension
-              /build/docker/fetch-ducklake-ext.sh
+              /build/docker/fetch-ducklake-ext.sh --pkglibdir ${PG_LIB}
 
               # Build daemon binary
               cd /build

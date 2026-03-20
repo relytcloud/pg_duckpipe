@@ -114,6 +114,7 @@ _daemon_launch() {
     "$DUCKPIPE_BIN" \
         --connstr "$connstr" \
         --poll-interval 200 \
+        --duckdb-lib-dir "$PG_LIB" \
         "$@" \
         >"$DAEMON_LOG" 2>&1 &
     DAEMON_PID=$!

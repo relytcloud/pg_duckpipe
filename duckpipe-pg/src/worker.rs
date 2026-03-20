@@ -197,6 +197,28 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
         port, db, os_user
     );
 
+    // pkglibdir — where pg_ducklake ships libduckdb and ducklake.duckdb_extension.
+    let pkglibdir: String = unsafe {
+        pg_sys::StartTransactionCommand();
+        pg_sys::PushActiveSnapshot(pg_sys::GetTransactionSnapshot());
+        let dir = Spi::connect(|client| {
+            let result = client
+                .select(
+                    "SELECT setting FROM pg_config() WHERE name = 'PKGLIBDIR'",
+                    None,
+                    &[],
+                )
+                .unwrap();
+            for row in result {
+                return row.get::<String>(1).unwrap().unwrap_or_default();
+            }
+            String::new()
+        });
+        pg_sys::PopActiveSnapshot();
+        pg_sys::CommitTransactionCommand();
+        dir
+    };
+
     // Query group_id for SHM metrics (need transaction context with snapshot for SPI)
     let group_id: i32 = unsafe {
         pg_sys::StartTransactionCommand();
@@ -228,6 +250,7 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
     let mut coordinator = FlushCoordinator::new(
         connstr.clone(),
         "ducklake".to_string(),
+        pkglibdir,
         group_name.clone(),
         resolved_config,
     );

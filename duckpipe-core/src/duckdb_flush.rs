@@ -14,6 +14,23 @@ use duckdb::{Config, Connection};
 
 use crate::types::{fixed_bytes_for_oid, Change, ChangeType, ResolvedConfig, Value};
 
+/// Build SQL to load the ducklake extension.
+///
+/// If a local copy exists at `{pkglibdir}/ducklake.duckdb_extension`, loads it directly
+/// (avoiding downloads from extensions.duckdb.org). Otherwise, falls back to INSTALL + LOAD.
+pub fn ducklake_load_sql(pkglibdir: &str) -> String {
+    let local_path = format!("{}/ducklake.duckdb_extension", pkglibdir);
+    if std::path::Path::new(&local_path).exists() {
+        format!(
+            "SET allow_extensions_metadata_mismatch = true; LOAD '{}';",
+            local_path.replace('\'', "''")
+        )
+    } else {
+        "SET allow_extensions_metadata_mismatch = true; INSTALL ducklake; LOAD ducklake;"
+            .to_string()
+    }
+}
+
 /// Push a Value into a row Vec for the DuckDB Appender.
 /// Text values are auto-cast by DuckDB to the buffer table's declared column type.
 fn push_value_to_row(row: &mut Vec<Box<dyn duckdb::ToSql>>, val: &Value) {
@@ -231,6 +248,7 @@ impl FlushWorker {
         ducklake_schema: &str,
         resolved_config: &ResolvedConfig,
         source_label: String,
+        pkglibdir: &str,
     ) -> Result<Self, String> {
         let config = Config::default()
             .allow_unsigned_extensions()
@@ -249,7 +267,7 @@ impl FlushWorker {
         db.execute_batch(&resource_sql)
             .map_err(|e| format!("duckdb set resources: {}", e))?;
 
-        db.execute_batch("INSTALL ducklake; LOAD ducklake;")
+        db.execute_batch(&ducklake_load_sql(pkglibdir))
             .map_err(|e| format!("duckdb install ducklake: {}", e))?;
 
         let attach_sql = format!(

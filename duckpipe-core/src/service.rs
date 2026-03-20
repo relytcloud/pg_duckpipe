@@ -973,6 +973,7 @@ pub async fn run_group_sync_cycle(
             coordinator.ducklake_schema(),
             config.debug_log,
             group_name,
+            coordinator.pkglibdir(),
         );
     }
 
