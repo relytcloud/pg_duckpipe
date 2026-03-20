@@ -2,9 +2,9 @@
 
 ## TODO
 
-### Performance
-- [ ] Snapshot producers block WAL consumer — sync file I/O on single-threaded tokio; move to `spawn_blocking`
-- [ ] Byte-based flush threshold — replace row-count with `flush_buffer_size_mb` using `avg_row_bytes`
+### Performance / Scalability
+- [ ] Snapshot producers block WAL consumer — snapshot CSV producers (`run_csv_producer`) do sync file I/O (`fs::File::write_all`) and byte-by-byte quote tracking on the single-threaded tokio runtime, blocking the WAL consumer and all other async tasks during those windows; move producers to `spawn_blocking` or a dedicated thread so snapshots never interfere with WAL streaming
+- [ ] Byte-based flush threshold — replace row-count `flush_batch_threshold` with `flush_buffer_size_mb`; estimate change byte size during `append_to_buffer()` (sum of `Value` sizes), track cumulative bytes per table, trigger flush when `buffered_bytes >= threshold`; uses `avg_row_bytes` from metrics for capacity planning
 - [ ] Batch compaction tuning — reduce Parquet file proliferation under sustained small-batch writes
 - [ ] Inline data flush
 - [ ] Parquet-over-PG write throughput — ~10k rows/sec cap bottleneck for large catch-up
@@ -23,10 +23,10 @@
 - [ ] Sync tables with no PK (ensure e2e EOS)
 - [ ] Column and row filtering — selective column sync and WHERE predicates on `add_table()`
 
-### Observability
-- [ ] Replication lag in `status()` — `pg_current_wal_lsn() - applied_lsn` as `lag_bytes`
-- [ ] Prometheus text rendering — native or exporter-compatible metrics endpoint
-- [ ] `applied_lsn` stays NULL during SNAPSHOT/CATCHUP — set to `snapshot_lsn` after snapshot completes
+### Monitoring / Observability
+- [ ] Replication lag in `status()` — compute `pg_current_wal_lsn() - applied_lsn` as `lag_bytes`; needs special handling for remote groups (lag is relative to remote WAL tip, not local)
+- [ ] Prometheus text rendering — expose metrics as Prometheus-compatible text format via external tools (postgres_exporter, JSON exporter) or native endpoint
+- [ ] Per-table `avg_row_bytes` metric — track cumulative bytes and row count during `append_to_buffer()`, expose `avg_row_bytes` in `status()` / `metrics()` for capacity planning and byte-based flush threshold
 
 ### Robustness
 - [ ] Query routing permission check — verify the current user has SELECT on both source and target tables before routing; currently inherits permissions from the user who ran `add_table()`
@@ -41,9 +41,7 @@
 - [ ] CI: run `cargo test` for unit tests — currently only `make installcheck` in CI
 
 ### Future Vision
-- [x] Transparent analytical query routing — planner hook to auto-reroute analytical queries to DuckLake
 - [ ] Incremental materialized views — CDC-driven delta maintenance of aggregate/join views
-- [ ] Fan-out — one PG source to multiple DuckLake targets
 - [ ] Schema evolution timeline — audit log of DDL changes from Relation messages in the WAL stream
 - [ ] Stream rules — per-table predicates on the CDC stream with configurable actions (log, skip, pause, pg_notify, webhook)
 - [ ] Source adapter trait — unified `Source` abstraction; pgoutput decoder becomes one implementation
@@ -91,4 +89,13 @@
 - Dockerfile for self-contained playground env
 - Spillable DuckDB buffer for snapshot WAL buffering — spill-to-disk + backpressure exclusion for snapshot-queued changes
 - Fan-in streaming — multiple PG sources to single DuckLake target (`_duckpipe_source` column, source-scoped DELETE/INSERT, schema validation guard, cross-group and same-group fan-in, FlushCoordinator keyed by mapping_id)
+- Transparent analytical query routing — planner hook to auto-reroute analytical queries to DuckLake
+- Snapshot WAL buffering memory — spillable DuckDB buffer with spill-to-disk + snapshot-aware backpressure
+- Multi-table streaming lag fix — `prune_removed_tables()` in coordinator + benchmark cleanup
+- Snapshot detection delay fix — LISTEN/NOTIFY wakeup for immediate bgworker wake
+- Daemon HTTP `GET /metrics` endpoint — JSON metrics merging FlushCoordinator + PG persisted data
+- `applied_lsn` NULL during SNAPSHOT/CATCHUP — COALESCE with `snapshot_lsn` as virtual floor
+- `worker_state` updated during snapshot — observability metrics moved to SHM
+- Flush runtime stats (`flush_count`, `flush_duration_ms`) in SHM
+- Benchmark suite cleanup fix — `prepare_env` queries all existing mappings
 - Bug fixes: `confirmed_lsn` reset on re-add, `lag_bytes` flat during catch-up, benchmark cleanup, index on `group_id` FK, snapshot retry backoff, bounded DuckDB memory
