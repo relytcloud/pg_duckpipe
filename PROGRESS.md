@@ -37,7 +37,7 @@
 - [ ] CI: run `cargo test` for unit tests — currently only `make installcheck` in CI
 
 ### Future Vision
-- [ ] Transparent analytical query routing — planner hook to auto-reroute analytical queries to DuckLake
+- [x] Transparent analytical query routing — planner hook to auto-reroute analytical queries to DuckLake
 - [ ] Incremental materialized views — CDC-driven delta maintenance of aggregate/join views
 - [ ] Fan-out — one PG source to multiple DuckLake targets
 - [ ] Schema evolution timeline — audit log of DDL changes from Relation messages in the WAL stream

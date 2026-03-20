@@ -1,0 +1,206 @@
+-- Test: Transparent analytical query routing
+-- Verifies the planner hook rewrites SELECT queries on synced source tables
+-- to their DuckLake counterparts based on duckpipe.query_routing GUC.
+-- Create a dedicated group for this test to avoid slot interference
+SET client_min_messages = warning;
+SELECT duckpipe.create_group('qr_test');
+ create_group 
+--------------
+ qr_test
+(1 row)
+
+SELECT duckpipe.start_worker('qr_test');
+ start_worker 
+--------------
+ 
+(1 row)
+
+RESET client_min_messages;
+-- Create source table
+CREATE TABLE qr_orders (
+    id      int PRIMARY KEY,
+    status  text,
+    total   int
+);
+-- Use copy_data=false so the table starts directly in STREAMING state.
+-- Data is inserted AFTER add_table so it flows through WAL replication.
+SELECT duckpipe.add_table('public.qr_orders', NULL, 'qr_test', false);
+ add_table 
+-----------
+ 
+(1 row)
+
+INSERT INTO qr_orders VALUES (1, 'pending', 100);
+INSERT INTO qr_orders VALUES (2, 'shipped', 250);
+INSERT INTO qr_orders VALUES (3, 'pending', 75);
+-- Wait for WAL to be consumed and flushed
+SELECT pg_sleep(8);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+-- Verify data is synced
+SELECT count(*) AS synced_rows FROM public.qr_orders_ducklake;
+ synced_rows 
+-------------
+           3
+(1 row)
+
+-- =======================================================================
+-- 1. Default: routing OFF — no NOTICE emitted
+-- =======================================================================
+SHOW duckpipe.query_routing;
+ duckpipe.query_routing 
+------------------------
+ off
+(1 row)
+
+SET duckpipe.query_routing_log = on;
+-- This should NOT emit a routing NOTICE (routing is off)
+SELECT count(*) AS off_count FROM qr_orders;
+ off_count 
+-----------
+         3
+(1 row)
+
+-- =======================================================================
+-- 2. ON mode — route ALL SELECTs unconditionally
+-- =======================================================================
+SET duckpipe.query_routing = 'on';
+-- Full scan → routed (NOTICE expected)
+SELECT count(*) AS on_count FROM qr_orders;
+NOTICE:  duckpipe: routing public.qr_orders → public.qr_orders_ducklake
+ on_count 
+----------
+        3
+(1 row)
+
+-- =======================================================================
+-- 3. AUTO mode — route analytical, skip point lookups
+-- =======================================================================
+SET duckpipe.query_routing = 'auto';
+-- Analytical: full scan → routed (NOTICE expected)
+SELECT count(*) AS auto_full_scan FROM qr_orders;
+NOTICE:  duckpipe: routing public.qr_orders → public.qr_orders_ducklake
+ auto_full_scan 
+----------------
+              3
+(1 row)
+
+-- Point lookup on PK → NOT routed (no NOTICE, runs on PG heap)
+SELECT id, status FROM qr_orders WHERE id = 1;
+ id | status  
+----+---------
+  1 | pending
+(1 row)
+
+-- Aggregation + PK eq → routed (aggregation overrides PK lookup)
+SELECT count(*) AS agg_with_pk FROM qr_orders WHERE id = 1;
+NOTICE:  duckpipe: routing public.qr_orders → public.qr_orders_ducklake
+ agg_with_pk 
+-------------
+           1
+(1 row)
+
+-- =======================================================================
+-- 4. Per-table routing opt-out
+-- =======================================================================
+SET duckpipe.query_routing = 'on';
+-- Disable routing for this table
+SELECT duckpipe.set_routing('public.qr_orders', false);
+ set_routing 
+-------------
+ 
+(1 row)
+
+-- Wait for routing cache to expire (TTL=2s)
+SELECT pg_sleep(3);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+-- Verify tables() shows routing_enabled = false
+SELECT source_table, routing_enabled FROM duckpipe.tables()
+WHERE source_table = 'public.qr_orders';
+   source_table   | routing_enabled 
+------------------+-----------------
+ public.qr_orders | f
+(1 row)
+
+-- Verify status() shows routing_enabled = false
+SELECT source_table, routing_enabled FROM duckpipe.status()
+WHERE source_table = 'public.qr_orders';
+   source_table   | routing_enabled 
+------------------+-----------------
+ public.qr_orders | f
+(1 row)
+
+-- This should NOT emit a routing NOTICE (routing disabled for table)
+SELECT count(*) AS disabled_count FROM qr_orders;
+ disabled_count 
+----------------
+              3
+(1 row)
+
+-- Re-enable routing
+SELECT duckpipe.set_routing('public.qr_orders', true);
+ set_routing 
+-------------
+ 
+(1 row)
+
+-- Wait for routing cache to expire
+SELECT pg_sleep(3);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+-- Should route again (NOTICE expected)
+SELECT count(*) AS reenabled_count FROM qr_orders;
+NOTICE:  duckpipe: routing public.qr_orders → public.qr_orders_ducklake
+ reenabled_count 
+-----------------
+               3
+(1 row)
+
+-- =======================================================================
+-- 5. Global GUC reset disables routing
+-- =======================================================================
+RESET duckpipe.query_routing;
+-- Should NOT route (GUC back to 'off')
+SELECT count(*) AS reset_count FROM qr_orders;
+ reset_count 
+-------------
+           3
+(1 row)
+
+-- =======================================================================
+-- Cleanup
+-- =======================================================================
+SELECT duckpipe.remove_table('public.qr_orders', false);
+WARNING:  Group 'qr_test' has no remaining tables — its replication slot is still holding WAL. Run SELECT duckpipe.drop_group('qr_test') to release it.
+ remove_table 
+--------------
+ 
+(1 row)
+
+DROP TABLE IF EXISTS public.qr_orders_ducklake;
+DROP TABLE qr_orders;
+SET client_min_messages = warning;
+SELECT duckpipe.stop_worker('qr_test');
+ stop_worker 
+-------------
+ 
+(1 row)
+
+SELECT duckpipe.drop_group('qr_test');
+ drop_group 
+------------
+ 
+(1 row)
+
+RESET client_min_messages;
+RESET duckpipe.query_routing_log;
