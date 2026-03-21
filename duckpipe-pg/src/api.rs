@@ -2,7 +2,7 @@ use pgrx::datum::{DatumWithOid, TimestampWithTimeZone};
 use pgrx::prelude::*;
 
 use duckpipe_core::listen;
-use duckpipe_core::types::{GroupConfig, ResolvedConfig};
+use duckpipe_core::types::{is_duckpipe_system_column, GroupConfig, ResolvedConfig};
 
 use crate::DATA_INLINING_ROW_LIMIT;
 
@@ -645,11 +645,12 @@ CREATE FUNCTION duckpipe.add_table(
     target_table TEXT DEFAULT NULL,
     sync_group TEXT DEFAULT 'default',
     copy_data BOOLEAN DEFAULT true,
-    fan_in BOOLEAN DEFAULT false
+    fan_in BOOLEAN DEFAULT false,
+    sync_mode TEXT DEFAULT 'upsert'
 ) RETURNS void
 AS 'MODULE_PATHNAME', '@FUNCTION_NAME@'
 LANGUAGE C;
-REVOKE ALL ON FUNCTION duckpipe.add_table(TEXT, TEXT, TEXT, BOOLEAN, BOOLEAN) FROM PUBLIC;
+REVOKE ALL ON FUNCTION duckpipe.add_table(TEXT, TEXT, TEXT, BOOLEAN, BOOLEAN, TEXT) FROM PUBLIC;
 ")]
 fn add_table(
     source_table: &str,
@@ -657,11 +658,25 @@ fn add_table(
     sync_group: Option<&str>,
     copy_data: Option<bool>,
     fan_in: Option<bool>,
+    sync_mode: Option<&str>,
 ) {
     let (schema, table) = parse_source_table(source_table);
     let group = sync_group.unwrap_or("default");
     let copy_data = copy_data.unwrap_or(true);
     let fan_in = fan_in.unwrap_or(false);
+    let sync_mode = sync_mode.unwrap_or("upsert");
+
+    // Validate sync_mode
+    if sync_mode != "upsert" && sync_mode != "append" {
+        ereport!(
+            ERROR,
+            PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+            format!(
+                "sync_mode must be 'upsert' or 'append', got '{}'",
+                sync_mode
+            )
+        );
+    }
 
     let (t_schema, t_table) = if let Some(target) = target_table {
         parse_source_table(target)
@@ -922,6 +937,11 @@ fn add_table(
             .collect();
         // Always add _duckpipe_source column for fan-in support
         col_clauses.push("\"_duckpipe_source\" TEXT".to_string());
+        // Append mode: add metadata columns for change tracking
+        if sync_mode == "append" {
+            col_clauses.push("\"_duckpipe_op\" TEXT".to_string());
+            col_clauses.push("\"_duckpipe_lsn\" BIGINT".to_string());
+        }
         let create_sql = format!(
             "CREATE TABLE IF NOT EXISTS {}.{} ({}) USING ducklake",
             quote_ident(&t_schema),
@@ -1034,7 +1054,7 @@ fn add_table(
                 let mut target_cols: Vec<String> = Vec::new();
                 for r in existing_result {
                     if let Some(name) = r.get::<String>(1).unwrap() {
-                        if name != "_duckpipe_source" {
+                        if !is_duckpipe_system_column(&name) {
                             target_cols.push(name);
                         }
                     }
@@ -1068,7 +1088,7 @@ fn add_table(
             let _ = client.update(&sql, None, &[]);
         }
 
-        // Insert table mapping with source OID and source_label (group/schema.table)
+        // Insert table mapping with source OID, source_label, and sync_mode
         let initial_state = if copy_data { "SNAPSHOT" } else { "STREAMING" };
         let source_label = format!("{}/{}.{}", group, schema, table);
         let args = unsafe {
@@ -1081,13 +1101,14 @@ fn add_table(
                 DatumWithOid::new(group, PgBuiltInOids::TEXTOID.value()),
                 DatumWithOid::new(source_oid, PgBuiltInOids::INT8OID.value()),
                 DatumWithOid::new(source_label.as_str(), PgBuiltInOids::TEXTOID.value()),
+                DatumWithOid::new(sync_mode, PgBuiltInOids::TEXTOID.value()),
             ]
         };
         client
             .update(
                 "INSERT INTO duckpipe.table_mappings (group_id, source_schema, source_table, \
-                 target_schema, target_table, state, source_oid, source_label) \
-                 SELECT sg.id, $1, $2, $3, $4, $5, $7, $8 \
+                 target_schema, target_table, state, source_oid, source_label, sync_mode) \
+                 SELECT sg.id, $1, $2, $3, $4, $5, $7, $8, $9 \
                  FROM duckpipe.sync_groups sg WHERE sg.name = $6",
                 None,
                 &args,

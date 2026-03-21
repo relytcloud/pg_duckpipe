@@ -141,8 +141,47 @@ async fn ensure_coordinator_queue(
         atttypes,
         paused,
         mapping.source_label.clone(),
+        mapping.sync_mode.clone(),
     );
     Ok(())
+}
+
+/// Returns true if this WAL change should be skipped: disabled, errored,
+/// not yet caught up (CATCHUP with lsn <= snapshot_lsn), or already applied
+/// in append mode (lsn <= applied_lsn).
+fn should_skip_change(mapping: &TableMapping, lsn: u64) -> bool {
+    if !mapping.enabled || mapping.state == "ERRORED" {
+        return true;
+    }
+    if mapping.state == "CATCHUP" && mapping.snapshot_lsn != 0 && lsn <= mapping.snapshot_lsn {
+        return true;
+    }
+    // Append-mode exactly-once: skip already-applied WAL changes
+    if mapping.sync_mode == "append"
+        && mapping.state == "STREAMING"
+        && mapping.applied_lsn != 0
+        && lsn <= mapping.applied_lsn
+    {
+        return true;
+    }
+    false
+}
+
+/// Fill unchanged (TOAST) columns in `new_values` from `old_values`.
+fn fill_toast_columns(
+    new_values: &[Value],
+    old_values: &[Value],
+    unchanged: &[bool],
+) -> Vec<Value> {
+    (0..new_values.len())
+        .map(|i| {
+            if unchanged.get(i).copied().unwrap_or(false) {
+                old_values.get(i).cloned().unwrap_or(Value::Null)
+            } else {
+                new_values[i].clone()
+            }
+        })
+        .collect()
 }
 
 /// Decode and dispatch a single pgoutput WAL message to the flush coordinator.
@@ -194,13 +233,7 @@ async fn process_one_wal_message(
                     cached.mapping = resolve_mapping(meta, group.id, rel_id, &cached.entry).await?;
                 }
                 if let Some(ref mapping) = cached.mapping {
-                    if !mapping.enabled || mapping.state == "ERRORED" {
-                        return Ok(false);
-                    }
-                    if mapping.state == "CATCHUP"
-                        && mapping.snapshot_lsn != 0
-                        && lsn <= mapping.snapshot_lsn
-                    {
+                    if should_skip_change(mapping, lsn) {
                         return Ok(false);
                     }
                     let target_key = format!("{}.{}", mapping.target_schema, mapping.target_table);
@@ -252,13 +285,7 @@ async fn process_one_wal_message(
                     cached.mapping = resolve_mapping(meta, group.id, rel_id, &cached.entry).await?;
                 }
                 if let Some(ref mapping) = cached.mapping {
-                    if !mapping.enabled || mapping.state == "ERRORED" {
-                        return Ok(false);
-                    }
-                    if mapping.state == "CATCHUP"
-                        && mapping.snapshot_lsn != 0
-                        && lsn <= mapping.snapshot_lsn
-                    {
+                    if should_skip_change(mapping, lsn) {
                         return Ok(false);
                     }
                     let target_key = format!("{}.{}", mapping.target_schema, mapping.target_table);
@@ -282,20 +309,34 @@ async fn process_one_wal_message(
                         extract_key_values(&new_values, pk_attrs)
                     };
 
-                    if has_unchanged && old_marker == 'O' {
+                    if mapping.sync_mode == "append" {
+                        // Append mode: push a single Update change (preserves raw op type)
+                        let final_values = if has_unchanged && old_marker == 'O' {
+                            fill_toast_columns(&new_values, &old_values, &new_unchanged)
+                        } else {
+                            new_values
+                        };
+                        coordinator.push_change(
+                            mapping.id,
+                            Change {
+                                change_type: ChangeType::Update,
+                                lsn,
+                                col_values: final_values,
+                                key_values,
+                                col_unchanged: if has_unchanged && old_marker != 'O' {
+                                    new_unchanged
+                                } else {
+                                    Vec::new()
+                                },
+                            },
+                        );
+                    } else if has_unchanged && old_marker == 'O' {
                         // REPLICA IDENTITY FULL: old tuple carries full row values.
                         // pgoutput still uses 'u' for unchanged TOAST columns in the NEW
                         // tuple, but we can fill them from the old tuple right here —
                         // no flush-time resolution query needed.
-                        let filled_values: Vec<Value> = (0..new_values.len())
-                            .map(|i| {
-                                if new_unchanged.get(i).copied().unwrap_or(false) {
-                                    old_values.get(i).cloned().unwrap_or(Value::Null)
-                                } else {
-                                    new_values[i].clone()
-                                }
-                            })
-                            .collect();
+                        let filled_values =
+                            fill_toast_columns(&new_values, &old_values, &new_unchanged);
                         coordinator.push_change(
                             mapping.id,
                             Change {
@@ -369,13 +410,7 @@ async fn process_one_wal_message(
                     cached.mapping = resolve_mapping(meta, group.id, rel_id, &cached.entry).await?;
                 }
                 if let Some(ref mapping) = cached.mapping {
-                    if !mapping.enabled || mapping.state == "ERRORED" {
-                        return Ok(false);
-                    }
-                    if mapping.state == "CATCHUP"
-                        && mapping.snapshot_lsn != 0
-                        && lsn <= mapping.snapshot_lsn
-                    {
+                    if should_skip_change(mapping, lsn) {
                         return Ok(false);
                     }
                     let target_key = format!("{}.{}", mapping.target_schema, mapping.target_table);
@@ -432,21 +467,31 @@ async fn process_one_wal_message(
                     let mapping = resolve_mapping(meta, group.id, rel_id, &cached.entry).await?;
                     if let Some(mapping) = mapping {
                         if mapping.enabled && mapping.state != "ERRORED" {
-                            coordinator.drain_and_wait_table(mapping.id);
-                            // Scope DELETE by _duckpipe_source (always set)
-                            let delete_sql = format!(
-                                "DELETE FROM \"{}\".\"{}\" WHERE \"_duckpipe_source\" = '{}'",
-                                mapping.target_schema.replace('"', "\"\""),
-                                mapping.target_table.replace('"', "\"\""),
-                                mapping.source_label.replace('\'', "''")
-                            );
-                            if let Err(e) = client.execute(&delete_sql, &[]).await {
-                                tracing::error!(
-                                    "pg_duckpipe: failed to clear target table {}.{}: {}",
-                                    mapping.target_schema,
-                                    mapping.target_table,
-                                    e
+                            if mapping.sync_mode == "append" {
+                                // Append mode: skip DELETE, log that TRUNCATE was received.
+                                // The changelog is immutable — TRUNCATE is not propagated.
+                                tracing::info!(
+                                    "pg_duckpipe: TRUNCATE on append-mode table {}.{} — skipping (changelog is immutable)",
+                                    mapping.source_schema,
+                                    mapping.source_table
                                 );
+                            } else {
+                                coordinator.drain_and_wait_table(mapping.id);
+                                // Scope DELETE by _duckpipe_source (always set)
+                                let delete_sql = format!(
+                                    "DELETE FROM \"{}\".\"{}\" WHERE \"_duckpipe_source\" = '{}'",
+                                    mapping.target_schema.replace('"', "\"\""),
+                                    mapping.target_table.replace('"', "\"\""),
+                                    mapping.source_label.replace('\'', "''")
+                                );
+                                if let Err(e) = client.execute(&delete_sql, &[]).await {
+                                    tracing::error!(
+                                        "pg_duckpipe: failed to clear target table {}.{}: {}",
+                                        mapping.target_schema,
+                                        mapping.target_table,
+                                        e
+                                    );
+                                }
                             }
                         }
                     }
