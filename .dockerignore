@@ -4,3 +4,5 @@ doc/
 test/
 benchmark/
 .claude/
+*.md
+third_party/

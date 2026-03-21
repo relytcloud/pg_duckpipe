@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# Build ducklake.duckdb_extension from the pg_ducklake submodule source.
+# Build ducklake.duckdb_extension from a pg_ducklake source tree.
 #
 # Usage: build-ducklake-ext.sh [output-dir]
 #
 # If output-dir is omitted, auto-detects via `pg_config --pkglibdir`.
 #
 # Environment variables:
-#   DUCKLAKE_REPO  — path to pg_ducklake checkout (default: third_party/pg_ducklake)
+#   DUCKLAKE_REPO  — path to pg_ducklake checkout (default: ../pg_ducklake)
 #
 # Requires: cmake, ninja (or make), C++ compiler
 
 set -euo pipefail
 
-REPO="${DUCKLAKE_REPO:-third_party/pg_ducklake}"
+REPO="${DUCKLAKE_REPO:-../pg_ducklake}"
 
 # Output directory: argument > pg_config auto-detect
 OUTPUT_DIR="${1:-}"

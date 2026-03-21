@@ -1,13 +1,14 @@
 ARG PG_VERSION=18
+ARG DUCKLAKE_COMMIT=65cace70932f3f68b1a89251f971c903ab3b7781
 
 ###############################################################################
-### DUCKLAKE-BUILDER — build pg_duckdb + libduckdb + pg_ducklake from source
+### DUCKLAKE-BUILDER — clone + build pg_duckdb + libduckdb + pg_ducklake
 ###############################################################################
 FROM postgres:${PG_VERSION}-bookworm AS ducklake-builder
 ARG PG_VERSION
+ARG DUCKLAKE_COMMIT
 
 # C++ build deps for DuckDB + pg_duckdb + pg_ducklake.
-# git is required — DuckDB's cmake uses FetchContent (git clone) for httpfs.
 RUN apt-get update -qq && \
     apt-get install -y --no-install-recommends \
         postgresql-server-dev-${PG_VERSION} \
@@ -24,31 +25,16 @@ RUN apt-get update -qq && \
         libcurl4-openssl-dev && \
     rm -rf /var/lib/apt/lists/*
 
+# Clone pg_ducklake at the pinned commit with all submodules (pg_duckdb, duckdb, ducklake).
+# Uses shallow fetch for speed — only the exact commit and one level of history.
 WORKDIR /build/pg_ducklake
-COPY third_party/pg_ducklake/ .
-
-# Create a stub git repo with one empty commit so that:
-#   1. Make submodule-init targets see .git/modules/.../HEAD and skip
-#   2. DuckDB's cmake `git log -1` succeeds (needs >=1 commit)
-#   3. DuckDB's FetchContent can use git to clone httpfs extension
-RUN find . -name ".git" -type f -delete && \
-    git init . && \
-    git -c user.name=build -c user.email=build@build commit --allow-empty -m "stub" && \
-    mkdir -p .git/modules/third_party/pg_duckdb/modules/third_party/duckdb \
-             .git/modules/third_party/ducklake/modules/duckdb \
-             .git/modules/third_party/ducklake/modules/extension-ci-tools && \
-    for d in .git/modules/third_party/pg_duckdb \
-             .git/modules/third_party/pg_duckdb/modules/third_party/duckdb \
-             .git/modules/third_party/ducklake \
-             .git/modules/third_party/ducklake/modules/duckdb \
-             .git/modules/third_party/ducklake/modules/extension-ci-tools; do \
-        touch "$d/HEAD"; \
-    done && \
-    mkdir -p third_party/pg_duckdb/.git/modules/third_party/duckdb && \
-    touch third_party/pg_duckdb/.git/modules/third_party/duckdb/HEAD
+RUN git init . && \
+    git remote add origin https://github.com/relytcloud/pg_ducklake.git && \
+    git fetch --depth 1 origin ${DUCKLAKE_COMMIT} && \
+    git checkout FETCH_HEAD && \
+    git submodule update --init --recursive --depth 1
 
 # Build and install pg_duckdb (+ libduckdb.so) and pg_ducklake.
-# ccache is not installed; Docker layer caching serves the same purpose.
 RUN PG_CONFIG=/usr/lib/postgresql/${PG_VERSION}/bin/pg_config make install
 
 ###############################################################################
@@ -100,7 +86,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
         --pg-config /usr/lib/postgresql/${PG_VERSION}/bin/pg_config \
         --release
 
-# Build ducklake.duckdb_extension from the submodule source.
+# Build ducklake.duckdb_extension from the cloned source.
 COPY docker/build-ducklake-ext.sh /tmp/build-ducklake-ext.sh
 RUN DUCKLAKE_REPO=/build/pg_ducklake \
     /tmp/build-ducklake-ext.sh /usr/lib/postgresql/${PG_VERSION}/lib

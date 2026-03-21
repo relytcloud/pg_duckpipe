@@ -19,7 +19,7 @@ on:
       - "docker/init.d/**"
       - ".github/workflows/docker.yaml"
   schedule:
-    # Rebuild nightly to pick up base-image and submodule updates
+    # Rebuild nightly to pick up base-image updates
     - cron: "44 4 * * *"
   workflow_dispatch:
 
@@ -51,8 +51,6 @@ jobs:
 
       - name: Checkout pg_duckpipe code
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
       - name: Compute job parameters
         id: params
@@ -173,8 +171,6 @@ jobs:
 
       - name: Checkout pg_duckpipe code
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
       - name: Compute job parameters
         id: params

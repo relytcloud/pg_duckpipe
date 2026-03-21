@@ -2,12 +2,14 @@
 # The daemon is PG-version-agnostic; we only borrow libduckdb.so at build time.
 ARG _BUILDER_PG=18
 ARG DUCKDB_VERSION=v1.5.0
+ARG DUCKLAKE_COMMIT=65cace70932f3f68b1a89251f971c903ab3b7781
 
 ###############################################################################
-### DUCKLAKE-BUILDER — build libduckdb.so from pg_ducklake submodule source
+### DUCKLAKE-BUILDER — clone pg_ducklake + build libduckdb.so
 ###############################################################################
 FROM postgres:${_BUILDER_PG}-bookworm AS ducklake-builder
 ARG _BUILDER_PG
+ARG DUCKLAKE_COMMIT
 
 # Minimal C++ build deps (no clang/libclang — pgrx is not used for the daemon)
 RUN apt-get update -qq && \
@@ -15,6 +17,7 @@ RUN apt-get update -qq && \
         build-essential \
         cmake \
         ninja-build \
+        git \
         curl \
         ca-certificates \
         libssl-dev \
@@ -22,11 +25,14 @@ RUN apt-get update -qq && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build/pg_ducklake
-COPY third_party/pg_ducklake/ .
+RUN git init . && \
+    git remote add origin https://github.com/relytcloud/pg_ducklake.git && \
+    git fetch --depth 1 origin ${DUCKLAKE_COMMIT} && \
+    git checkout FETCH_HEAD && \
+    git submodule update --init --recursive --depth 1
 
 # Build libduckdb.so directly from DuckDB source via cmake.
-# This bypasses the pg_duckdb/pg_ducklake Make submodule logic — the daemon
-# only needs the shared library, not the PG extensions.
+# The daemon only needs the shared library, not the PG extensions.
 RUN cd third_party/pg_duckdb/third_party/duckdb && \
     cmake -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
@@ -44,7 +50,7 @@ FROM ducklake-builder AS builder
 ARG _BUILDER_PG
 ARG DUCKDB_VERSION
 
-# Build ducklake.duckdb_extension from the submodule source.
+# Build ducklake.duckdb_extension from the cloned source.
 COPY docker/build-ducklake-ext.sh /tmp/build-ducklake-ext.sh
 RUN DUCKLAKE_REPO=/build/pg_ducklake \
     /tmp/build-ducklake-ext.sh /opt/ducklake-ext
