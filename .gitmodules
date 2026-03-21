@@ -1,0 +1,3 @@
+[submodule "third_party/pg_ducklake"]
+	path = third_party/pg_ducklake
+	url = https://github.com/relytcloud/pg_ducklake.git

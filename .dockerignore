@@ -4,4 +4,3 @@ doc/
 test/
 benchmark/
 .claude/
-*.md

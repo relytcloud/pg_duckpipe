@@ -4,34 +4,45 @@ ARG _BUILDER_PG=18
 ARG DUCKDB_VERSION=v1.5.0
 
 ###############################################################################
-### BUILDER — compile duckpipe-daemon against libduckdb from pg_ducklake
+### DUCKLAKE-BUILDER — build ducklake extension + libduckdb.so from source
 ###############################################################################
-FROM pgducklake/pgducklake:${_BUILDER_PG}-main AS builder
+FROM postgres:${_BUILDER_PG}-bookworm AS ducklake-builder
 ARG _BUILDER_PG
-ARG DUCKLAKE_COMMIT=main
-ARG DUCKDB_VERSION
 
-USER root
-
-# Build tools — no clang/libclang-dev needed (pgrx is not used for the daemon)
+# Minimal C++ build deps (no clang/libclang — pgrx is not used for the daemon)
 RUN apt-get update -qq && \
     apt-get install -y --no-install-recommends \
         build-essential \
-        pkg-config \
         cmake \
         ninja-build \
-        git \
         curl \
         ca-certificates \
-        libssl-dev && \
+        libssl-dev \
+        pkg-config && \
     rm -rf /var/lib/apt/lists/*
 
-# Build ducklake extension from pg_ducklake source.
+WORKDIR /build/pg_ducklake
+COPY third_party/pg_ducklake/ .
+
+# Build ducklake loadable extension via cmake (this also builds DuckDB).
 COPY docker/build-ducklake-ext.sh /tmp/build-ducklake-ext.sh
-RUN DUCKLAKE_COMMIT=${DUCKLAKE_COMMIT} \
+RUN DUCKLAKE_REPO=/build/pg_ducklake \
     /tmp/build-ducklake-ext.sh /opt/ducklake-ext
 
-# Download postgres_scanner matching DUCKDB_VERSION (from docker/.env).
+# Extract libduckdb.so from the ducklake extension's DuckDB build tree.
+RUN install -m 755 \
+        third_party/ducklake/build/release/src/libduckdb.so \
+        /usr/local/lib/ && \
+    ldconfig
+
+###############################################################################
+### BUILDER — compile postgres_scanner + Rust daemon binary
+###############################################################################
+FROM ducklake-builder AS builder
+ARG _BUILDER_PG
+ARG DUCKDB_VERSION
+
+# Download postgres_scanner matching DUCKDB_VERSION.
 # The upstream version is safe here — the -Bsymbolic issue only affects PG
 # backends, and the daemon runs standalone.
 RUN ARCH=$(uname -m | sed 's/x86_64/linux_amd64/;s/aarch64/linux_arm64/') && \
@@ -49,16 +60,22 @@ ENV RUSTUP_HOME=/usr/local/rustup \
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
     sh -s -- -y --no-modify-path --default-toolchain stable --profile minimal
 
-WORKDIR /build
-COPY . .
+WORKDIR /build/pg_duckpipe
 
-# Point duckdb-rs at the shared libduckdb.so shipped by pg_ducklake
-ENV DUCKDB_LIB_DIR=/usr/lib/postgresql/${_BUILDER_PG}/lib \
-    LD_LIBRARY_PATH=/usr/lib/postgresql/${_BUILDER_PG}/lib
+# Copy workspace files and source dirs
+COPY Cargo.toml Cargo.lock ./
+COPY duckpipe-core/ duckpipe-core/
+COPY duckpipe-pg/ duckpipe-pg/
+COPY duckpipe-daemon/ duckpipe-daemon/
 
-# Build only the daemon binary
+# Point duckdb-rs at libduckdb.so installed by the ducklake-builder stage.
+ENV DUCKDB_LIB_DIR=/usr/local/lib \
+    LD_LIBRARY_PATH=/usr/local/lib
+
+# Build only the daemon binary.
+# cp is needed because the cache mount won't be available in COPY --from.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/build/target \
+    --mount=type=cache,target=/build/pg_duckpipe/target \
     cargo build --release -p duckpipe-daemon && \
     cp target/release/duckpipe /usr/local/bin/duckpipe
 
@@ -80,13 +97,10 @@ RUN useradd --create-home --shell /bin/bash duckpipe
 # Daemon binary
 COPY --from=builder /usr/local/bin/duckpipe /usr/local/bin/duckpipe
 
-# libduckdb.so (from pg_ducklake base image — PG-agnostic shared library)
-ARG _BUILDER_PG=18
-COPY --from=builder \
-    /usr/lib/postgresql/${_BUILDER_PG}/lib/libduckdb.so \
-    /usr/local/lib/
+# libduckdb.so (built from source — PG-agnostic shared library)
+COPY --from=builder /usr/local/lib/libduckdb.so /usr/local/lib/
 
-# ducklake extension built from pg_ducklake source (next to libduckdb.so)
+# ducklake extension built from pg_ducklake source
 COPY --from=builder \
     /opt/ducklake-ext/ducklake.duckdb_extension \
     /usr/local/lib/ducklake.duckdb_extension
