@@ -6,15 +6,15 @@ ARG PG_VERSION=18
 FROM postgres:${PG_VERSION}-bookworm AS ducklake-builder
 ARG PG_VERSION
 
-# Package list matches pg_ducklake's Dockerfile to ensure all C++ build deps
-# for DuckDB + pg_duckdb + pg_ducklake are present.
+# C++ build deps for DuckDB + pg_duckdb + pg_ducklake.
+# git is intentionally omitted — DuckDB's cmake falls back to empty version
+# strings when git is absent, avoiding fatal errors from our stub .git repo.
 RUN apt-get update -qq && \
     apt-get install -y --no-install-recommends \
         postgresql-server-dev-${PG_VERSION} \
         build-essential \
         cmake \
         ninja-build \
-        git \
         curl \
         ca-certificates \
         pkg-config \
@@ -27,12 +27,11 @@ RUN apt-get update -qq && \
 WORKDIR /build/pg_ducklake
 COPY third_party/pg_ducklake/ .
 
-# The source tree was COPY'd without .git/; create stub marker files so the
-# pg_ducklake / pg_duckdb Makefiles skip `git submodule update --init`.
-# Pattern follows pg_ducklake's own Dockerfile (see its lines 28-37).
+# Create stub .git marker files so the pg_ducklake / pg_duckdb Makefiles
+# skip `git submodule update --init` (source is already present from COPY).
+# These are Make prerequisites: if the HEAD file exists, the submodule-init
+# recipe is skipped.  No actual git repo needed.
 RUN find . -name ".git" -type f -delete && \
-    git init . && \
-    git -c user.name=build -c user.email=build@build commit --allow-empty -m "stub" && \
     mkdir -p .git/modules/third_party/pg_duckdb/modules/third_party/duckdb \
              .git/modules/third_party/ducklake/modules/duckdb \
              .git/modules/third_party/ducklake/modules/extension-ci-tools && \
@@ -44,8 +43,7 @@ RUN find . -name ".git" -type f -delete && \
         touch "$d/HEAD"; \
     done && \
     mkdir -p third_party/pg_duckdb/.git/modules/third_party/duckdb && \
-    cp .git/modules/third_party/pg_duckdb/modules/third_party/duckdb/HEAD \
-       third_party/pg_duckdb/.git/modules/third_party/duckdb/HEAD
+    touch third_party/pg_duckdb/.git/modules/third_party/duckdb/HEAD
 
 # Build and install pg_duckdb (+ libduckdb.so) and pg_ducklake.
 # ccache is not installed; Docker layer caching serves the same purpose.
