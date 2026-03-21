@@ -24,6 +24,7 @@ COPY third_party/pg_ducklake/ .
 
 # The source tree was COPY'd without .git/; create stub marker files so the
 # pg_ducklake / pg_duckdb Makefiles skip `git submodule update --init`.
+# Pattern follows pg_ducklake's own Dockerfile (see its lines 28-37).
 RUN find . -name ".git" -type f -delete && \
     git init . && \
     mkdir -p .git/modules/third_party/pg_duckdb/modules/third_party/duckdb \
@@ -35,7 +36,10 @@ RUN find . -name ".git" -type f -delete && \
              .git/modules/third_party/ducklake/modules/duckdb \
              .git/modules/third_party/ducklake/modules/extension-ci-tools; do \
         touch "$d/HEAD"; \
-    done
+    done && \
+    mkdir -p third_party/pg_duckdb/.git/modules/third_party/duckdb && \
+    cp .git/modules/third_party/pg_duckdb/modules/third_party/duckdb/HEAD \
+       third_party/pg_duckdb/.git/modules/third_party/duckdb/HEAD
 
 # Build and install pg_duckdb (+ libduckdb.so) and pg_ducklake.
 # ccache is not installed; Docker layer caching serves the same purpose.
