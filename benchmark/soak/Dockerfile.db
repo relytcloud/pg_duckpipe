@@ -71,10 +71,10 @@ ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     PATH=/usr/local/cargo/bin:$PATH
 
+# Install Rust + cargo-pgrx in one step to avoid PATH/cache issues
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
-    sh -s -- -y --no-modify-path --default-toolchain stable --profile minimal
-
-RUN cargo install --locked cargo-pgrx --version 0.16.1
+    sh -s -- -y --no-modify-path --default-toolchain stable --profile minimal && \
+    /usr/local/cargo/bin/cargo install --locked cargo-pgrx --version 0.16.1
 
 WORKDIR /pg_duckpipe
 COPY . .
