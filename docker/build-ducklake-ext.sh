@@ -49,6 +49,10 @@ else
     GEN="Unix Makefiles"
 fi
 
+# Use a dedicated build dir to avoid conflicts with pg_ducklake's static lib
+# build (which may have used build/release/ with a different DuckDB source).
+BUILD_DIR="build/release_loadable"
+
 echo "==> Building ducklake loadable extension (generator=${GEN}) ..."
 EXT_CONFIG="${PWD}/extension_config.cmake"
 cmake -G "${GEN}" \
@@ -58,14 +62,14 @@ cmake -G "${GEN}" \
     -DBUILD_SHELL=0 \
     -DBUILD_UNITTESTS=0 \
     -S ./duckdb/ \
-    -B build/release
-cmake --build build/release --config Release --target ducklake_loadable_extension
+    -B "${BUILD_DIR}"
+cmake --build "${BUILD_DIR}" --config Release --target ducklake_loadable_extension
 
-EXT_FILE="build/release/extension/ducklake/ducklake.duckdb_extension"
+EXT_FILE="${BUILD_DIR}/extension/ducklake/ducklake.duckdb_extension"
 if [ ! -f "${EXT_FILE}" ]; then
     echo "ERROR: ducklake.duckdb_extension not found at ${EXT_FILE}"
     echo "Build output:"
-    find build/release -name '*.duckdb_extension' 2>/dev/null || true
+    find "${BUILD_DIR}" -name '*.duckdb_extension' 2>/dev/null || true
     exit 1
 fi
 
