@@ -37,8 +37,13 @@ RUN git init . && \
 # Build and install pg_duckdb (+ libduckdb.so) and pg_ducklake.
 RUN PG_CONFIG=/usr/lib/postgresql/${PG_VERSION}/bin/pg_config make install
 
+# Build ducklake.duckdb_extension (cached together with the C++ layer above).
+COPY docker/build-ducklake-ext.sh /tmp/build-ducklake-ext.sh
+RUN DUCKLAKE_REPO=/build/pg_ducklake \
+    /tmp/build-ducklake-ext.sh /usr/lib/postgresql/${PG_VERSION}/lib
+
 ###############################################################################
-### BUILDER — compile pg_duckpipe + ducklake.duckdb_extension
+### BUILDER — compile pg_duckpipe
 ###############################################################################
 FROM ducklake-builder AS builder
 ARG PG_VERSION
@@ -85,11 +90,6 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
         --package pg_duckpipe \
         --pg-config /usr/lib/postgresql/${PG_VERSION}/bin/pg_config \
         --release
-
-# Build ducklake.duckdb_extension from the cloned source.
-COPY docker/build-ducklake-ext.sh /tmp/build-ducklake-ext.sh
-RUN DUCKLAKE_REPO=/build/pg_ducklake \
-    /tmp/build-ducklake-ext.sh /usr/lib/postgresql/${PG_VERSION}/lib
 
 ###############################################################################
 ### OUTPUT — pg_duckdb + pg_ducklake + pg_duckpipe, ready to use
