@@ -7,14 +7,14 @@ FROM postgres:${PG_VERSION}-bookworm AS ducklake-builder
 ARG PG_VERSION
 
 # C++ build deps for DuckDB + pg_duckdb + pg_ducklake.
-# git is intentionally omitted — DuckDB's cmake falls back to empty version
-# strings when git is absent, avoiding fatal errors from our stub .git repo.
+# git is required — DuckDB's cmake uses FetchContent (git clone) for httpfs.
 RUN apt-get update -qq && \
     apt-get install -y --no-install-recommends \
         postgresql-server-dev-${PG_VERSION} \
         build-essential \
         cmake \
         ninja-build \
+        git \
         curl \
         ca-certificates \
         pkg-config \
@@ -27,11 +27,13 @@ RUN apt-get update -qq && \
 WORKDIR /build/pg_ducklake
 COPY third_party/pg_ducklake/ .
 
-# Create stub .git marker files so the pg_ducklake / pg_duckdb Makefiles
-# skip `git submodule update --init` (source is already present from COPY).
-# These are Make prerequisites: if the HEAD file exists, the submodule-init
-# recipe is skipped.  No actual git repo needed.
+# Create a stub git repo with one empty commit so that:
+#   1. Make submodule-init targets see .git/modules/.../HEAD and skip
+#   2. DuckDB's cmake `git log -1` succeeds (needs >=1 commit)
+#   3. DuckDB's FetchContent can use git to clone httpfs extension
 RUN find . -name ".git" -type f -delete && \
+    git init . && \
+    git -c user.name=build -c user.email=build@build commit --allow-empty -m "stub" && \
     mkdir -p .git/modules/third_party/pg_duckdb/modules/third_party/duckdb \
              .git/modules/third_party/ducklake/modules/duckdb \
              .git/modules/third_party/ducklake/modules/extension-ci-tools && \
