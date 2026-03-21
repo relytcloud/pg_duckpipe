@@ -19,7 +19,7 @@ RUN apt-get update -qq && \
         libxml2-dev libxslt-dev libssl-dev libxml2-utils xsltproc \
         pkg-config libc++-dev libc++abi-dev libglib2.0-dev \
         cmake libstdc++-12-dev liblz4-dev ccache ninja-build \
-        git libcurl4-openssl-dev clang libclang-dev && \
+        git curl libcurl4-openssl-dev clang libclang-dev && \
     rm -rf /var/lib/apt/lists/*
 
 # Clone pg_ducklake with all submodules (pg_duckdb, duckdb, ducklake)
@@ -71,8 +71,9 @@ ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     PATH=/usr/local/cargo/bin:$PATH
 
-# Install Rust + cargo-pgrx in one step to avoid PATH/cache issues
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+# Install curl (not in cached base), Rust, and cargo-pgrx
+RUN apt-get update -qq && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/* && \
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
     sh -s -- -y --no-modify-path --default-toolchain stable --profile minimal && \
     /usr/local/cargo/bin/cargo install --locked cargo-pgrx --version 0.16.1
 
