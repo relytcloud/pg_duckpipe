@@ -32,6 +32,7 @@ COPY third_party/pg_ducklake/ .
 # Pattern follows pg_ducklake's own Dockerfile (see its lines 28-37).
 RUN find . -name ".git" -type f -delete && \
     git init . && \
+    git -c user.name=build -c user.email=build@build commit --allow-empty -m "stub" && \
     mkdir -p .git/modules/third_party/pg_duckdb/modules/third_party/duckdb \
              .git/modules/third_party/ducklake/modules/duckdb \
              .git/modules/third_party/ducklake/modules/extension-ci-tools && \
