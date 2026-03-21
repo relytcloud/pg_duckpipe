@@ -51,6 +51,7 @@ struct QueueMeta {
     key_attrs: Vec<usize>,
     atttypes: Vec<u32>,
     source_label: String,
+    sync_mode: String,
 }
 
 /// Shared queue data protected by Mutex.
@@ -399,6 +400,7 @@ impl FlushCoordinator {
         atttypes: Vec<u32>,
         paused: bool,
         source_label: String,
+        sync_mode: String,
     ) {
         // Seed in-memory LSN from the persistent PG value if we haven't seen this table yet.
         // `or_insert` preserves any higher value already tracked from a completed flush.
@@ -434,6 +436,7 @@ impl FlushCoordinator {
             key_attrs,
             atttypes,
             source_label,
+            sync_mode,
         };
 
         let queue_handle = Arc::new(TableQueueHandle {
@@ -1032,6 +1035,7 @@ fn flush_thread_main(
                         ducklake_schema,
                         &resolved_config,
                         meta.source_label.clone(),
+                        meta.sync_mode.clone(),
                     ) {
                         Ok(w) => worker = Some(w),
                         Err(e) => {

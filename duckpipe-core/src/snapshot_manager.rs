@@ -76,6 +76,7 @@ impl SnapshotManager {
             let tgt_schema = task.target_schema.clone();
             let tgt_table = task.target_table.clone();
             let source_label = task.source_label.clone();
+            let sync_mode = task.sync_mode.clone();
             let cs = connstr.to_string();
             let ddb_cs = duckdb_pg_connstr.to_string();
             let dl_schema = ducklake_schema.to_string();
@@ -96,6 +97,7 @@ impl SnapshotManager {
                     task_id,
                     &group_name,
                     source_label,
+                    sync_mode,
                 )
                 .await;
                 let _ = tx.send(snapshot::SnapshotResult {

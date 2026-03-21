@@ -1,0 +1,135 @@
+-- Test append sync mode: immutable changelog with _duckpipe_op and _duckpipe_lsn
+SET client_min_messages = warning;
+SELECT duckpipe.start_worker();
+ start_worker 
+--------------
+ 
+(1 row)
+
+RESET client_min_messages;
+CREATE TABLE append_src (id int primary key, val text);
+-- Add table in append mode (skip initial snapshot for streaming-only test)
+SELECT duckpipe.add_table('public.append_src', NULL, 'default', false, false, 'append');
+ add_table 
+-----------
+ 
+(1 row)
+
+-- Phase 1: INSERT 3 rows
+INSERT INTO append_src VALUES (1, 'one');
+INSERT INTO append_src VALUES (2, 'two');
+INSERT INTO append_src VALUES (3, 'three');
+SELECT pg_sleep(8);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+-- Verify: 3 rows with _duckpipe_op = 'I'
+SELECT count(*) AS insert_count FROM public.append_src_ducklake WHERE "_duckpipe_op" = 'I';
+ insert_count 
+--------------
+            3
+(1 row)
+
+-- All LSNs should be > 0 (streaming, not snapshot)
+SELECT count(*) AS positive_lsn_count FROM public.append_src_ducklake WHERE "_duckpipe_lsn" > 0;
+ positive_lsn_count 
+--------------------
+                  3
+(1 row)
+
+-- Phase 2: UPDATE a row — should add a NEW row with op='U', old row still present
+UPDATE append_src SET val = 'one_updated' WHERE id = 1;
+SELECT pg_sleep(8);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+-- Should now have 4 rows total (3 inserts + 1 update)
+SELECT count(*) AS total_after_update FROM public.append_src_ducklake;
+ total_after_update 
+--------------------
+                  4
+(1 row)
+
+-- Verify update row exists
+SELECT count(*) AS update_count FROM public.append_src_ducklake WHERE "_duckpipe_op" = 'U';
+ update_count 
+--------------
+            1
+(1 row)
+
+-- Original insert for id=1 should still be there
+SELECT count(*) AS id1_rows FROM public.append_src_ducklake WHERE id = 1;
+ id1_rows 
+----------
+        2
+(1 row)
+
+-- Phase 3: DELETE a row — should add a NEW row with op='D'
+DELETE FROM append_src WHERE id = 2;
+SELECT pg_sleep(8);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+-- Should now have 5 rows total (3 inserts + 1 update + 1 delete)
+SELECT count(*) AS total_after_delete FROM public.append_src_ducklake;
+ total_after_delete 
+--------------------
+                  5
+(1 row)
+
+-- Verify delete row exists
+SELECT count(*) AS delete_count FROM public.append_src_ducklake WHERE "_duckpipe_op" = 'D';
+ delete_count 
+--------------
+            1
+(1 row)
+
+-- Verify LSNs are monotonically increasing (ordered by operation sequence)
+SELECT count(*) AS monotonic_ok
+FROM (
+    SELECT "_duckpipe_lsn",
+           lag("_duckpipe_lsn") OVER (ORDER BY "_duckpipe_lsn") AS prev_lsn
+    FROM public.append_src_ducklake
+) sub
+WHERE prev_lsn IS NOT NULL AND "_duckpipe_lsn" >= prev_lsn;
+ monotonic_ok 
+--------------
+            4
+(1 row)
+
+-- Phase 4: Verify total op distribution
+SELECT "_duckpipe_op", count(*) AS cnt
+FROM public.append_src_ducklake
+GROUP BY "_duckpipe_op"
+ORDER BY "_duckpipe_op";
+ _duckpipe_op | cnt 
+--------------+-----
+ D            |   1
+ I            |   3
+ U            |   1
+(3 rows)
+
+-- Cleanup
+SELECT duckpipe.remove_table('public.append_src', false);
+WARNING:  Group 'default' has no remaining tables — its replication slot is still holding WAL. Run SELECT duckpipe.drop_group('default') to release it.
+ remove_table 
+--------------
+ 
+(1 row)
+
+DROP TABLE public.append_src_ducklake;
+DROP TABLE append_src;
+SET client_min_messages = warning;
+SELECT duckpipe.stop_worker();
+ stop_worker 
+-------------
+ 
+(1 row)
+
+RESET client_min_messages;
