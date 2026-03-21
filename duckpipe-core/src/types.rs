@@ -357,6 +357,15 @@ pub struct TableMapping {
     pub source_oid: Option<i64>,
     pub error_message: Option<String>,
     pub source_label: String,
+    pub sync_mode: String,
+}
+
+/// Returns true if `name` is a duckpipe-managed system column (case-insensitive).
+/// These columns are injected by duckpipe and should be excluded when aligning
+/// source/pgoutput columns with DuckLake catalog columns.
+pub fn is_duckpipe_system_column(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower == "_duckpipe_source" || lower == "_duckpipe_op" || lower == "_duckpipe_lsn"
 }
 
 /// Fixed byte size for a column type OID. Returns 0 for variable-length types (text, jsonb, etc).
