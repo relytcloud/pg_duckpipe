@@ -43,9 +43,9 @@ RUN --mount=type=cache,target=/ccache/ \
 # Package pg_duckdb + pg_ducklake into /out for the output stage
 RUN mkdir -p /out && DESTDIR=/out make install-pg_duckdb install
 
-# Build ducklake.duckdb_extension from the already-cloned ducklake submodule
+# Build ducklake.duckdb_extension from the already-cloned ducklake submodule.
+# Use /tmp build dir to avoid cmake cache conflict with the pg_duckdb build.
 RUN cd third_party/ducklake && \
-    mkdir -p build/release && \
     cmake -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         -DDUCKDB_EXTENSION_CONFIGS="${PWD}/extension_config.cmake" \
@@ -53,13 +53,13 @@ RUN cd third_party/ducklake && \
         -DBUILD_SHELL=0 \
         -DBUILD_UNITTESTS=0 \
         -S ./duckdb/ \
-        -B build/release && \
-    cmake --build build/release --config Release --target ducklake_loadable_extension
+        -B /tmp/ducklake-ext-build && \
+    cmake --build /tmp/ducklake-ext-build --config Release --target ducklake_loadable_extension
 
 # Install ducklake.duckdb_extension to pkglibdir and /out
 RUN PKGLIBDIR=$(pg_config --pkglibdir) && \
-    install -m 644 third_party/ducklake/build/release/extension/ducklake/ducklake.duckdb_extension "$PKGLIBDIR/" && \
-    install -m 644 third_party/ducklake/build/release/extension/ducklake/ducklake.duckdb_extension "/out$PKGLIBDIR/"
+    install -m 644 /tmp/ducklake-ext-build/extension/ducklake/ducklake.duckdb_extension "$PKGLIBDIR/" && \
+    install -m 644 /tmp/ducklake-ext-build/extension/ducklake/ducklake.duckdb_extension "/out$PKGLIBDIR/"
 
 ###############################################################################
 ### Stage 2: PGRX-BUILDER — compile pg_duckpipe (extends ducklake-builder)
