@@ -1,22 +1,18 @@
 #!/usr/bin/env bash
-# Build ducklake.duckdb_extension from pg_ducklake source.
+# Build ducklake.duckdb_extension from the pg_ducklake submodule source.
 #
 # Usage: build-ducklake-ext.sh [output-dir]
 #
 # If output-dir is omitted, auto-detects via `pg_config --pkglibdir`.
 #
 # Environment variables:
-#   DUCKLAKE_REPO    — local directory path or git URL
-#                      (default: https://github.com/relytcloud/pg_ducklake.git)
-#                      When a local directory, skips cloning and ignores DUCKLAKE_COMMIT.
-#   DUCKLAKE_COMMIT  — branch, tag, or commit (default: main; git URL only)
+#   DUCKLAKE_REPO  — path to pg_ducklake checkout (default: third_party/pg_ducklake)
 #
-# Requires: cmake, ninja (or make), C++ compiler (+ git when cloning)
+# Requires: cmake, ninja (or make), C++ compiler
 
 set -euo pipefail
 
-REPO="${DUCKLAKE_REPO:-https://github.com/relytcloud/pg_ducklake.git}"
-COMMIT="${DUCKLAKE_COMMIT:-main}"
+REPO="${DUCKLAKE_REPO:-third_party/pg_ducklake}"
 
 # Output directory: argument > pg_config auto-detect
 OUTPUT_DIR="${1:-}"
@@ -35,36 +31,16 @@ if [ -f "${OUTPUT_DIR}/ducklake.duckdb_extension" ] && [ "${FORCE:-0}" != "1" ];
     exit 0
 fi
 
-# If REPO is a local directory, use it directly; otherwise clone.
-if [ -d "${REPO}" ]; then
-    echo "==> Using local pg_ducklake at ${REPO}"
-    DUCKLAKE_SRC="${REPO}/third_party/ducklake"
-    if [ ! -d "${DUCKLAKE_SRC}" ]; then
-        echo "ERROR: ${DUCKLAKE_SRC} not found. Is this a pg_ducklake checkout?"
-        exit 1
-    fi
-    if [ ! -f "${DUCKLAKE_SRC}/duckdb/CMakeLists.txt" ]; then
-        echo "ERROR: ${DUCKLAKE_SRC}/duckdb/ is empty. Run 'git submodule update --init --recursive'."
-        exit 1
-    fi
-    cd "${DUCKLAKE_SRC}"
-else
-    WORKDIR=$(mktemp -d)
-    trap 'rm -rf "${WORKDIR}"' EXIT
-
-    echo "==> Cloning pg_ducklake @ ${COMMIT} ..."
-    git clone --depth 1 --branch "${COMMIT}" "${REPO}" "${WORKDIR}/pg_ducklake" || {
-        # Fallback for commit hashes (--branch only works for branches/tags)
-        rm -rf "${WORKDIR}/pg_ducklake"
-        git clone --depth 50 "${REPO}" "${WORKDIR}/pg_ducklake"
-        cd "${WORKDIR}/pg_ducklake"
-        git checkout "${COMMIT}"
-    }
-
-    cd "${WORKDIR}/pg_ducklake"
-    git submodule update --init --recursive --depth 1
-    cd third_party/ducklake
+DUCKLAKE_SRC="${REPO}/third_party/ducklake"
+if [ ! -d "${DUCKLAKE_SRC}" ]; then
+    echo "ERROR: ${DUCKLAKE_SRC} not found. Is DUCKLAKE_REPO a pg_ducklake checkout?"
+    exit 1
 fi
+if [ ! -f "${DUCKLAKE_SRC}/duckdb/CMakeLists.txt" ]; then
+    echo "ERROR: ${DUCKLAKE_SRC}/duckdb/ is empty. Run 'git submodule update --init --recursive'."
+    exit 1
+fi
+cd "${DUCKLAKE_SRC}"
 
 # Use Ninja if available, else Unix Makefiles
 if command -v ninja >/dev/null 2>&1; then

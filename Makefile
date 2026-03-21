@@ -25,21 +25,16 @@ build: check-cargo-pgrx
 	DYLD_LIBRARY_PATH="$(PG_LIB):$(DYLD_LIBRARY_PATH)" \
 	cargo pgrx install $(PGRX_PROFILE_FLAG) --pg-config=$(PG_CONFIG)
 
-# Build ducklake.duckdb_extension from pg_ducklake source and install to pkglibdir.
-# Search order: third_party/pg_ducklake (submodule) > ../pg_ducklake (sibling) > DUCKLAKE_REPO.
-# Skips if no repo is available.
+# Build ducklake.duckdb_extension from pg_ducklake submodule and install to pkglibdir.
 install-ducklake-ext:
 	@repo="$(DUCKLAKE_REPO)"; \
 	if [ -z "$$repo" ] && [ -d third_party/pg_ducklake ]; then \
 		repo="$$(cd third_party/pg_ducklake && pwd)"; \
 	fi; \
-	if [ -z "$$repo" ] && [ -d ../pg_ducklake ]; then \
-		repo="$$(cd ../pg_ducklake && pwd)"; \
-	fi; \
 	if [ -n "$$repo" ]; then \
 		DUCKLAKE_REPO="$$repo" docker/build-ducklake-ext.sh "$(PG_LIB)"; \
 	else \
-		echo "NOTICE: pg_ducklake not found at third_party/pg_ducklake or ../pg_ducklake and DUCKLAKE_REPO not set. Skipping ducklake extension install."; \
+		echo "NOTICE: pg_ducklake submodule not found. Run 'git submodule update --init --recursive'."; \
 	fi
 
 install: build install-ducklake-ext
