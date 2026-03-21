@@ -188,9 +188,12 @@ pub async fn process_snapshot_task(
             Err(e) => {
                 // Drop sender to unblock consumer, then return error
                 drop(chunk_tx);
-                // Wait for consumer to finish (it will see channel closed)
-                let _ = consumer_handle.await;
-                return Err(e);
+                // Wait for consumer to finish — if consumer also failed, prefer its
+                // error since the producer "consumer disconnected" is a symptom.
+                match consumer_handle.await {
+                    Ok(Err(consumer_err)) => return Err(consumer_err),
+                    _ => return Err(e),
+                }
             }
         }
 
