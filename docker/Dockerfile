@@ -6,6 +6,8 @@ ARG PG_VERSION=18
 FROM postgres:${PG_VERSION}-bookworm AS ducklake-builder
 ARG PG_VERSION
 
+# Package list matches pg_ducklake's Dockerfile to ensure all C++ build deps
+# for DuckDB + pg_duckdb + pg_ducklake are present.
 RUN apt-get update -qq && \
     apt-get install -y --no-install-recommends \
         postgresql-server-dev-${PG_VERSION} \
@@ -15,8 +17,11 @@ RUN apt-get update -qq && \
         git \
         curl \
         ca-certificates \
+        pkg-config \
         libssl-dev \
-        pkg-config && \
+        liblz4-dev \
+        libstdc++-12-dev \
+        libcurl4-openssl-dev && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build/pg_ducklake
