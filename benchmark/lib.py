@@ -4,6 +4,7 @@
 Extracted from run_sysbench.py — reusable helpers for SQL execution,
 sysbench command construction, monitoring queries, and consistency checks.
 """
+import json
 import os
 import subprocess
 import time
@@ -240,6 +241,22 @@ def get_wal_slot_size_bytes(db_params):
         "WHERE slot_name LIKE 'duckpipe_%'",
     )
     return parse_int(res, 0)
+
+
+def get_metrics_json(db_params):
+    """Query duckpipe.metrics() and return parsed JSON.
+
+    Returns a dict with 'tables' and 'groups' keys containing SHM metrics
+    (duckdb_memory_bytes, flush_count, flush_duration_ms, queued_changes)
+    merged with PG-persisted data — all in a single SQL call.
+    """
+    res = run_sql(db_params, "SELECT duckpipe.metrics()")
+    if res:
+        try:
+            return json.loads(res)
+        except json.JSONDecodeError:
+            return None
+    return None
 
 
 def get_benchmark_rows_synced(db_params, num_tables):

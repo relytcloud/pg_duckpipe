@@ -139,6 +139,9 @@ def generate_report(csv_path, events_path, config_path, output_path):
     slot_mb = [b / 1048576 for b in slot_bytes]
     queued = [r.get('queued_changes', 0) for r in metrics if isinstance(r.get('queued_changes'), (int, float))]
     errored = [r.get('tables_errored', 0) for r in metrics if isinstance(r.get('tables_errored'), (int, float))]
+    memory_mb = [r.get('duckdb_memory_mb', 0) for r in metrics if isinstance(r.get('duckdb_memory_mb'), (int, float))]
+    flush_rates = [r.get('flush_rate_s', 0) for r in metrics[1:] if isinstance(r.get('flush_rate_s'), (int, float))]
+    flush_durations = [r.get('avg_flush_duration_ms', 0) for r in metrics if isinstance(r.get('avg_flush_duration_ms'), (int, float)) and r.get('avg_flush_duration_ms', 0) > 0]
 
     # Duration
     elapsed_values = [r.get('elapsed_s', 0) for r in metrics if isinstance(r.get('elapsed_s'), (int, float))]
@@ -153,6 +156,9 @@ def generate_report(csv_path, events_path, config_path, output_path):
     sync_stats = compute_stats(sync_rates)
     lag_stats = compute_stats(lag_mb)
     slot_stats = compute_stats(slot_mb)
+    memory_stats = compute_stats(memory_mb)
+    flush_rate_stats = compute_stats(flush_rates)
+    flush_dur_stats = compute_stats(flush_durations)
 
     # Stability metrics
     sync_cv = compute_cv(sync_rates)
@@ -226,6 +232,11 @@ def generate_report(csv_path, events_path, config_path, output_path):
     lines.append(f"| Peak Sync Rate | {sync_stats['max']:,.0f} rows/s |")
     lines.append(f"| Avg WAL Lag | {lag_stats['mean']:.1f} MB |")
     lines.append(f"| Peak WAL Lag | {lag_stats['max']:.1f} MB |")
+    lines.append(f"| Avg DuckDB Memory | {memory_stats['mean']:.1f} MB |")
+    lines.append(f"| Peak DuckDB Memory | {memory_stats['max']:.1f} MB |")
+    lines.append(f"| Avg Flush Rate | {flush_rate_stats['mean']:.1f} /s |")
+    lines.append(f"| Avg Flush Duration | {flush_dur_stats['mean']:.0f} ms |")
+    lines.append(f"| P99 Flush Duration | {flush_dur_stats['p99']:.0f} ms |")
     lines.append(f"| Max Tables Errored | {max_errored} |")
     lines.append("")
 

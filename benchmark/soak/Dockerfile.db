@@ -1,0 +1,142 @@
+# Soak test DB image: build EVERYTHING from source for full debug symbols.
+# Does NOT modify shared_preload_libraries in postgresql.conf.sample
+# to avoid the initdb "access method ducklake does not exist" issue.
+# Use docker-compose `command` to set shared_preload_libraries at runtime.
+ARG PG_VERSION=18
+
+###############################################################################
+### Stage 1: DUCKLAKE-BUILDER — compile pg_duckdb + libduckdb + pg_ducklake
+###############################################################################
+FROM postgres:${PG_VERSION}-bookworm AS ducklake-builder
+ARG PG_VERSION
+
+USER root
+
+RUN apt-get update -qq && \
+    apt-get install -y \
+        postgresql-server-dev-${PG_VERSION} \
+        build-essential libreadline-dev zlib1g-dev flex bison \
+        libxml2-dev libxslt-dev libssl-dev libxml2-utils xsltproc \
+        pkg-config libc++-dev libc++abi-dev libglib2.0-dev \
+        cmake libstdc++-12-dev liblz4-dev ccache ninja-build \
+        git libcurl4-openssl-dev clang libclang-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+# Clone pg_ducklake with all submodules (pg_duckdb, duckdb, ducklake)
+RUN git clone --depth 1 https://github.com/relytcloud/pg_ducklake.git /build
+
+WORKDIR /build
+RUN git submodule update --init --recursive --depth 1
+
+# Build pg_duckdb + libduckdb, then pg_ducklake
+ENV PATH=/usr/lib/ccache:$PATH
+ENV CCACHE_DIR=/ccache
+
+RUN --mount=type=cache,target=/ccache/ \
+    make -j$(nproc) -C third_party/pg_duckdb install-duckdb && \
+    make -j$(nproc) pg_duckdb
+
+RUN --mount=type=cache,target=/ccache/ \
+    make -j$(nproc) && \
+    make install-pg_duckdb install
+
+# Package pg_duckdb + pg_ducklake into /out for the output stage
+RUN mkdir -p /out && DESTDIR=/out make install-pg_duckdb install
+
+# Build ducklake.duckdb_extension from the already-cloned ducklake submodule.
+# Use /tmp build dir to avoid cmake cache conflict with the pg_duckdb build.
+RUN cd third_party/ducklake && \
+    cmake -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DDUCKDB_EXTENSION_CONFIGS="${PWD}/extension_config.cmake" \
+        -DEXTENSION_STATIC_BUILD=0 \
+        -DBUILD_SHELL=0 \
+        -DBUILD_UNITTESTS=0 \
+        -S ./duckdb/ \
+        -B /tmp/ducklake-ext-build && \
+    cmake --build /tmp/ducklake-ext-build --config Release --target ducklake_loadable_extension
+
+# Install ducklake.duckdb_extension to pkglibdir and /out
+RUN PKGLIBDIR=$(pg_config --pkglibdir) && \
+    install -m 644 /tmp/ducklake-ext-build/extension/ducklake/ducklake.duckdb_extension "$PKGLIBDIR/" && \
+    install -m 644 /tmp/ducklake-ext-build/extension/ducklake/ducklake.duckdb_extension "/out$PKGLIBDIR/"
+
+###############################################################################
+### Stage 2: PGRX-BUILDER — compile pg_duckpipe (extends ducklake-builder)
+###############################################################################
+FROM ducklake-builder AS pgrx-builder
+ARG PG_VERSION
+
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+    sh -s -- -y --no-modify-path --default-toolchain stable --profile minimal
+
+RUN cargo install --locked cargo-pgrx --version 0.16.1
+
+WORKDIR /pg_duckpipe
+COPY . .
+
+RUN cargo pgrx init --pg${PG_VERSION} /usr/lib/postgresql/${PG_VERSION}/bin/pg_config
+
+ENV DUCKDB_LIB_DIR=/usr/lib/postgresql/${PG_VERSION}/lib \
+    LD_LIBRARY_PATH=/usr/lib/postgresql/${PG_VERSION}/lib
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/pg_duckpipe/target \
+    cargo pgrx install \
+        --package pg_duckpipe \
+        --pg-config /usr/lib/postgresql/${PG_VERSION}/bin/pg_config \
+        --release
+
+###############################################################################
+### Stage 3: OUTPUT — slim runtime image with debug tools
+###############################################################################
+FROM postgres:${PG_VERSION}-bookworm AS output
+ARG PG_VERSION
+
+USER root
+
+# Runtime dependencies + debugging tools for crash analysis
+RUN apt-get update -qq && \
+    apt-get install -y ca-certificates libcurl4 gdb procps && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copy pg_duckdb + pg_ducklake (from /out staging dir)
+COPY --from=pgrx-builder /out /
+
+# Copy pg_duckpipe extension files
+COPY --from=pgrx-builder \
+    /usr/lib/postgresql/${PG_VERSION}/lib/pg_duckpipe.so \
+    /usr/lib/postgresql/${PG_VERSION}/lib/
+
+COPY --from=pgrx-builder \
+    /usr/share/postgresql/${PG_VERSION}/extension/pg_duckpipe.control \
+    /usr/share/postgresql/${PG_VERSION}/extension/pg_duckpipe--1.0.0.sql \
+    /usr/share/postgresql/${PG_VERSION}/extension/
+
+# Copy ducklake.duckdb_extension
+COPY --from=pgrx-builder \
+    /usr/lib/postgresql/${PG_VERSION}/lib/ducklake.duckdb_extension \
+    /usr/lib/postgresql/${PG_VERSION}/lib/
+
+# Make libduckdb.so findable at runtime
+RUN echo "/usr/lib/postgresql/${PG_VERSION}/lib" > /etc/ld.so.conf.d/duckdb.conf && \
+    /sbin/ldconfig
+
+# Core dump directory
+RUN mkdir -p /var/coredumps && chmod 1777 /var/coredumps
+
+# Init scripts from pg_ducklake (preload + extension install)
+COPY --from=pgrx-builder /build/docker/init.d/ /docker-entrypoint-initdb.d/
+
+# Init scripts from pg_duckpipe (extension install + HBA config)
+COPY docker/init.d/ /docker-entrypoint-initdb.d/
+RUN chmod +x /docker-entrypoint-initdb.d/*.sh
+
+# NOTE: shared_preload_libraries is set via docker-compose `command` override
+# to avoid the initdb chicken-and-egg problem with pg_ducklake access method.
+
+USER postgres

@@ -1,7 +1,21 @@
 services:
   db:
-    image: ${DB_IMAGE:-pgducklake/pgduckpipe:18-main}
+    build:
+      context: ../..
+      dockerfile: benchmark/soak/Dockerfile.db
     platform: linux/amd64
+    command: >-
+      -c shared_preload_libraries=pg_duckdb,pg_ducklake,pg_duckpipe
+      -c wal_level=logical
+      -c max_replication_slots=10
+      -c max_wal_senders=10
+      -c duckdb.unsafe_allow_mixed_transactions=on
+    cap_add:
+      - SYS_PTRACE
+    ulimits:
+      core:
+        soft: -1
+        hard: -1
     ports:
       - "${PORT:-5432}:5432"
     environment:
@@ -9,6 +23,8 @@ services:
       POSTGRES_PASSWORD: ${PASSWORD:-duckdb}
     volumes:
       - soak_pgdata:/var/lib/postgresql
+      - soak_coredumps:/var/coredumps
+    restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 2s
@@ -26,7 +42,7 @@ services:
     environment:
       DB_URL: "host=db port=5432 user=postgres password=${PASSWORD:-duckdb} dbname=postgres"
       SOAK_SCENARIO: "${SCENARIO:-sustained-insert}"
-      SOAK_DURATION: "${DURATION:-3600}"
+      SOAK_DURATION: "${DURATION:-10800}"
     volumes:
       - ./soak_results:/bench/soak_results
     # Override to run monitor instead:
@@ -34,3 +50,4 @@ services:
 
 volumes:
   soak_pgdata:
+  soak_coredumps:
