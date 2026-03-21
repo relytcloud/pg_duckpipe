@@ -5,6 +5,7 @@ ARG PG_VERSION=18
 ###############################################################################
 FROM pgducklake/pgducklake:${PG_VERSION}-main AS builder
 ARG PG_VERSION
+ARG DUCKLAKE_COMMIT=main
 
 USER root
 
@@ -18,11 +19,17 @@ RUN apt-get update -qq && \
         pkg-config \
         cmake \
         ninja-build \
+        git \
         curl \
         ca-certificates \
         libssl-dev \
         jq && \
     rm -rf /var/lib/apt/lists/*
+
+# Build ducklake extension from pg_ducklake source and install to pkglibdir.
+COPY docker/build-ducklake-ext.sh /tmp/build-ducklake-ext.sh
+RUN DUCKLAKE_COMMIT=${DUCKLAKE_COMMIT} \
+    /tmp/build-ducklake-ext.sh /usr/lib/postgresql/${PG_VERSION}/lib
 
 # Install Rust system-wide so it's on PATH for the build
 ENV RUSTUP_HOME=/usr/local/rustup \
@@ -94,17 +101,11 @@ duckdb.unsafe_allow_mixed_transactions = on\n' \
 RUN echo "/usr/lib/postgresql/${PG_VERSION}/lib" > /etc/ld.so.conf.d/duckdb.conf && \
     /sbin/ldconfig
 
-# Pre-install the ducklake DuckDB extension so flush workers never need internet
-# access at runtime.  The postgres user's $HOME/.duckdb/ is outside PGDATA so it
-# survives the Docker volume mount at /var/lib/postgresql/data.
-#
-# DuckDB version must match libduckdb.so shipped by pg_ducklake in this image.
-COPY docker/fetch-ducklake-ext.sh /usr/local/bin/fetch-ducklake-ext.sh
-RUN apt-get update -qq && apt-get install -y --no-install-recommends curl && \
-    /usr/local/bin/fetch-ducklake-ext.sh && \
-    chown -R postgres:postgres /var/lib/postgresql/.duckdb && \
-    apt-get remove -y curl && apt-get autoremove -y && \
-    rm -rf /var/lib/apt/lists/*
+# Copy ducklake extension built from pg_ducklake source to pkglibdir.
+# The Rust code detects it at runtime and LOADs it directly (no INSTALL needed).
+COPY --from=builder \
+    /usr/lib/postgresql/${PG_VERSION}/lib/ducklake.duckdb_extension \
+    /usr/lib/postgresql/${PG_VERSION}/lib/
 
 # Create pg_duckpipe extension after pg_duckdb (scripts run alphabetically).
 # 0004-localhost-trust.sh adds pg_hba entries for TCP loopback trust auth so

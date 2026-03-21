@@ -8,11 +8,82 @@
 //! 2. `flush_buffer()` — compacts (dedup by PK), applies DELETE+INSERT to DuckLake, drops buffer
 //! 3. `clear_buffer()` — drops the buffer table without flushing (shutdown/error)
 
+use std::sync::OnceLock;
 use std::time::Instant;
 
 use duckdb::{Config, Connection};
 
 use crate::types::{fixed_bytes_for_oid, Change, ChangeType, ResolvedConfig, Value};
+
+const DUCKLAKE_EXT_FILENAME: &str = "ducklake.duckdb_extension";
+
+/// Cached SQL for loading the ducklake extension — resolved once at startup.
+static DUCKLAKE_LOAD_SQL: OnceLock<String> = OnceLock::new();
+
+/// Set the pkglibdir and resolve ducklake extension loading SQL.
+///
+/// Must be called once at startup (bgworker or daemon) before any DuckDB connections.
+/// If the local file `{pkglibdir}/ducklake.duckdb_extension` exists, all connections
+/// will LOAD it directly; otherwise they fall back to INSTALL + LOAD from the network.
+pub fn init_pkglibdir(pkglibdir: &str) {
+    let local_path = format!("{}/{}", pkglibdir, DUCKLAKE_EXT_FILENAME);
+    // allow_extensions_metadata_mismatch is needed because the ducklake extension
+    // is built from pg_ducklake's DuckDB source tree, which may differ slightly
+    // from the libduckdb.so shipped by pg_ducklake (e.g. git describe metadata).
+    let sql = if std::path::Path::new(&local_path).exists() {
+        format!(
+            "SET allow_extensions_metadata_mismatch = true; LOAD '{}';",
+            local_path.replace('\'', "''")
+        )
+    } else {
+        "SET allow_extensions_metadata_mismatch = true; INSTALL ducklake; LOAD ducklake;"
+            .to_string()
+    };
+    let _ = DUCKLAKE_LOAD_SQL.set(sql);
+}
+
+/// Returns the SQL to load the ducklake extension (resolved at startup via `init_pkglibdir`).
+/// Falls back to INSTALL + LOAD if `init_pkglibdir` was never called.
+fn ducklake_load_sql() -> &'static str {
+    DUCKLAKE_LOAD_SQL.get_or_init(|| {
+        "SET allow_extensions_metadata_mismatch = true; INSTALL ducklake; LOAD ducklake;"
+            .to_string()
+    })
+}
+
+/// Open a DuckDB in-memory connection with ducklake loaded and attached to PostgreSQL.
+///
+/// Shared setup for both flush workers and snapshot consumers.
+pub fn open_ducklake_connection(
+    pg_connstr: &str,
+    ducklake_schema: &str,
+) -> Result<Connection, String> {
+    let config = Config::default()
+        .allow_unsigned_extensions()
+        .map_err(|e| format!("duckdb config: {}", e))?;
+    let db =
+        Connection::open_in_memory_with_flags(config).map_err(|e| format!("duckdb open: {}", e))?;
+
+    db.execute_batch(ducklake_load_sql())
+        .map_err(|e| format!("duckdb load ducklake: {}", e))?;
+
+    let attach_sql = format!(
+        "ATTACH 'ducklake:postgres:{}' AS lake (METADATA_SCHEMA '{}')",
+        pg_connstr.replace('\'', "''"),
+        ducklake_schema.replace('\'', "''")
+    );
+    db.execute_batch(&attach_sql)
+        .map_err(|e| format!("duckdb attach: {}", e))?;
+
+    db.execute_batch(
+        "SET ducklake_retry_wait_ms = 100; \
+         SET ducklake_retry_backoff = 2.0; \
+         SET ducklake_max_retry_count = 10;",
+    )
+    .map_err(|e| format!("duckdb set retry: {}", e))?;
+
+    Ok(db)
+}
 
 /// Push a Value into a row Vec for the DuckDB Appender.
 /// Text values are auto-cast by DuckDB to the buffer table's declared column type.
@@ -232,11 +303,7 @@ impl FlushWorker {
         resolved_config: &ResolvedConfig,
         source_label: String,
     ) -> Result<Self, String> {
-        let config = Config::default()
-            .allow_unsigned_extensions()
-            .map_err(|e| format!("duckdb config: {}", e))?;
-        let db = Connection::open_in_memory_with_flags(config)
-            .map_err(|e| format!("duckdb open: {}", e))?;
+        let db = open_ducklake_connection(pg_connstr, ducklake_schema)?;
 
         let buffer_memory_limit = format!("{}MB", resolved_config.duckdb_buffer_memory_mb);
         let flush_memory_limit = format!("{}MB", resolved_config.duckdb_flush_memory_mb);
@@ -248,24 +315,6 @@ impl FlushWorker {
         );
         db.execute_batch(&resource_sql)
             .map_err(|e| format!("duckdb set resources: {}", e))?;
-
-        db.execute_batch("INSTALL ducklake; LOAD ducklake;")
-            .map_err(|e| format!("duckdb install ducklake: {}", e))?;
-
-        let attach_sql = format!(
-            "ATTACH 'ducklake:postgres:{}' AS lake (METADATA_SCHEMA '{}')",
-            pg_connstr.replace('\'', "''"),
-            ducklake_schema.replace('\'', "''")
-        );
-        db.execute_batch(&attach_sql)
-            .map_err(|e| format!("duckdb attach: {}", e))?;
-
-        db.execute_batch(
-            "SET ducklake_retry_wait_ms = 100; \
-             SET ducklake_retry_backoff = 2.0; \
-             SET ducklake_max_retry_count = 10;",
-        )
-        .map_err(|e| format!("duckdb set retry: {}", e))?;
 
         Ok(FlushWorker {
             db,

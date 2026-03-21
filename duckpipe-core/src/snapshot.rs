@@ -16,7 +16,7 @@ use std::path::Path;
 use std::pin::pin;
 use std::time::Instant;
 
-use duckdb::{Config, Connection};
+use duckdb::Connection;
 
 /// Guard that DETACHes the DuckLake database on drop.
 struct DetachOnDrop(Connection);
@@ -380,31 +380,10 @@ fn run_duckdb_consumer(
 ) -> Result<u64, String> {
     let t_start = if timing { Some(Instant::now()) } else { None };
 
-    // Setup DuckDB: open in-memory, INSTALL/LOAD ducklake, ATTACH
-    let config = Config::default()
-        .allow_unsigned_extensions()
-        .map_err(|e| format!("duckdb config: {}", e))?;
-    let db = DetachOnDrop(
-        Connection::open_in_memory_with_flags(config).map_err(|e| format!("duckdb open: {}", e))?,
-    );
-
-    db.execute_batch("INSTALL ducklake; LOAD ducklake;")
-        .map_err(|e| format!("duckdb install ducklake: {}", e))?;
-
-    let attach_sql = format!(
-        "ATTACH 'ducklake:postgres:{}' AS lake (METADATA_SCHEMA '{}')",
-        duckdb_pg_connstr.replace('\'', "''"),
-        ducklake_schema.replace('\'', "''")
-    );
-    db.execute_batch(&attach_sql)
-        .map_err(|e| format!("duckdb attach: {}", e))?;
-
-    db.execute_batch(
-        "SET ducklake_retry_wait_ms = 100; \
-         SET ducklake_retry_backoff = 2.0; \
-         SET ducklake_max_retry_count = 10;",
-    )
-    .map_err(|e| format!("duckdb set retry: {}", e))?;
+    let db = DetachOnDrop(crate::duckdb_flush::open_ducklake_connection(
+        duckdb_pg_connstr,
+        ducklake_schema,
+    )?);
 
     // Discover lake schema + column names from information_schema
     let schema_sql = format!(

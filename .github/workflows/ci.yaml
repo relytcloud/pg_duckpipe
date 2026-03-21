@@ -68,15 +68,16 @@ jobs:
             pg_duckpipe:builder-${{ matrix.pg_version }} bash -c '
               set -euo pipefail
 
-              # Pre-fetch the ducklake DuckDB extension needed by tests
-              /build/docker/fetch-ducklake-ext.sh
-              chown -R postgres:postgres /var/lib/postgresql/.duckdb /build
+              PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg_version }}/bin/pg_config
+              PG_LIB=$(${PG_CONFIG} --pkglibdir)
+
+              chown -R postgres:postgres /build
 
               # pg_regress refuses to run as root — switch to the postgres user
               su postgres -s /bin/bash -c "
-                export LD_LIBRARY_PATH=/usr/lib/postgresql/${{ matrix.pg_version }}/lib
+                export LD_LIBRARY_PATH=${PG_LIB}
                 make -C /build/test/regression check-regression \
-                  PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg_version }}/bin/pg_config
+                  PG_CONFIG=${PG_CONFIG}
               " || {
                 mkdir -p /results
                 cp /build/test/regression/regression.diffs /results/ 2>/dev/null || true
@@ -151,16 +152,13 @@ jobs:
               PG_CONFIG=/usr/lib/postgresql/${PG_VERSION}/bin/pg_config
               PG_LIB=$(${PG_CONFIG} --pkglibdir)
 
-              # Pre-fetch the ducklake DuckDB extension
-              /build/docker/fetch-ducklake-ext.sh
-
               # Build daemon binary
               cd /build
               DUCKDB_LIB_DIR="${PG_LIB}" \
                 LD_LIBRARY_PATH="${PG_LIB}" \
                 cargo build --release -p duckpipe-daemon
 
-              chown -R postgres:postgres /var/lib/postgresql/.duckdb /build
+              chown -R postgres:postgres /build
 
               # Run daemon tests as postgres user
               su postgres -s /bin/bash -c "

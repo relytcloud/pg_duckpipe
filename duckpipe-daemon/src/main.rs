@@ -60,6 +60,11 @@ struct Args {
     /// HTTP API bind address.
     #[arg(long, default_value_t = IpAddr::from([127, 0, 0, 1]))]
     api_bind: IpAddr,
+
+    /// Directory containing libduckdb.so and ducklake.duckdb_extension.
+    /// Defaults to DUCKDB_LIB_DIR env var, then "/usr/local/lib".
+    #[arg(long, env = "DUCKDB_LIB_DIR", default_value = "/usr/local/lib")]
+    duckdb_lib_dir: String,
 }
 
 #[tokio::main]
@@ -67,6 +72,7 @@ async fn main() {
     let args = Args::parse();
 
     duckpipe_core::log::init_subscriber(args.debug);
+    duckpipe_core::duckdb_flush::init_pkglibdir(&args.duckdb_lib_dir);
 
     let connstr = args.connstr.clone();
     let state = Arc::new(api::AppState::new(connstr.clone()));

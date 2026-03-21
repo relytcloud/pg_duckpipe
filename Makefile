@@ -4,8 +4,8 @@ BUILD_TYPE ?= release
 
 PGRX_PROFILE_FLAG := $(if $(filter release,$(BUILD_TYPE)),--release,--profile $(BUILD_TYPE))
 
-.PHONY: all check-cargo-pgrx build install check-regression clean-regression installcheck \
-       build-daemon check-daemon clean-daemon installcheck-all format clean
+.PHONY: all check-cargo-pgrx build install install-ducklake-ext check-regression clean-regression \
+       installcheck build-daemon check-daemon clean-daemon installcheck-all format clean
 
 all: build
 
@@ -25,7 +25,21 @@ build: check-cargo-pgrx
 	DYLD_LIBRARY_PATH="$(PG_LIB):$(DYLD_LIBRARY_PATH)" \
 	cargo pgrx install $(PGRX_PROFILE_FLAG) --pg-config=$(PG_CONFIG)
 
-install: build
+# Build ducklake.duckdb_extension from pg_ducklake source and install to pkglibdir.
+# Uses sibling ../pg_ducklake by default. Override with DUCKLAKE_REPO=<url>.
+# Skips if no repo is available (no sibling dir and DUCKLAKE_REPO not set).
+install-ducklake-ext:
+	@repo="$(DUCKLAKE_REPO)"; \
+	if [ -z "$$repo" ] && [ -d ../pg_ducklake ]; then \
+		repo="$$(cd ../pg_ducklake && pwd)"; \
+	fi; \
+	if [ -n "$$repo" ]; then \
+		DUCKLAKE_REPO="$$repo" docker/build-ducklake-ext.sh "$(PG_LIB)"; \
+	else \
+		echo "NOTICE: pg_ducklake not found at ../pg_ducklake and DUCKLAKE_REPO not set. Skipping ducklake extension install."; \
+	fi
+
+install: build install-ducklake-ext
 
 check-regression:
 	$(MAKE) -C test/regression check-regression

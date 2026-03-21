@@ -15,7 +15,7 @@ on:
       - "docker/Dockerfile"
       - "docker/Dockerfile.daemon"
       - "docker/docker-bake.hcl"
-      - "docker/fetch-ducklake-ext.sh"
+      - "docker/build-ducklake-ext.sh"
       - "docker/init.d/**"
       - ".github/workflows/docker.yaml"
   schedule:

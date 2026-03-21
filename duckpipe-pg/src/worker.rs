@@ -197,6 +197,18 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
         port, db, os_user
     );
 
+    // Resolve pkglibdir and cache the ducklake extension loading SQL once.
+    {
+        let pkglibdir = unsafe {
+            let ptr = std::ptr::addr_of!(pg_sys::pkglib_path) as *const std::ffi::c_char;
+            std::ffi::CStr::from_ptr(ptr)
+                .to_str()
+                .unwrap_or_default()
+                .to_string()
+        };
+        duckpipe_core::duckdb_flush::init_pkglibdir(&pkglibdir);
+    }
+
     // Query group_id for SHM metrics (need transaction context with snapshot for SPI)
     let group_id: i32 = unsafe {
         pg_sys::StartTransactionCommand();

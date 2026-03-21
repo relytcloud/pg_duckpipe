@@ -6,6 +6,10 @@ variable "PG_VERSION" {
   default = "18"
 }
 
+variable "DUCKDB_VERSION" {
+  default = "v1.5.0"
+}
+
 # Base target: defines build args, target stage, and default tag.
 # The docker.yaml workflow overrides tags via `set: pg_duckpipe.tags=...`.
 target "pg_duckpipe" {
@@ -27,6 +31,9 @@ target "pg_duckpipe_18" {
 # Standalone daemon image (PG-version-agnostic)
 target "duckpipe_daemon" {
   dockerfile = "docker/Dockerfile.daemon"
+  args = {
+    DUCKDB_VERSION = "${DUCKDB_VERSION}"
+  }
   target = "runtime"
   tags   = ["pgducklake/duckpipe-daemon:dev"]
 }
