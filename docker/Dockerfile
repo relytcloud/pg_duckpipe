@@ -8,6 +8,7 @@ ARG PG_VERSION
 
 RUN apt-get update -qq && \
     apt-get install -y --no-install-recommends \
+        postgresql-server-dev-${PG_VERSION} \
         build-essential \
         cmake \
         ninja-build \

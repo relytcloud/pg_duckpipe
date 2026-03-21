@@ -4,7 +4,7 @@ ARG _BUILDER_PG=18
 ARG DUCKDB_VERSION=v1.5.0
 
 ###############################################################################
-### DUCKLAKE-BUILDER — build ducklake extension + libduckdb.so from source
+### DUCKLAKE-BUILDER — build libduckdb.so from pg_ducklake submodule source
 ###############################################################################
 FROM postgres:${_BUILDER_PG}-bookworm AS ducklake-builder
 ARG _BUILDER_PG
@@ -24,23 +24,30 @@ RUN apt-get update -qq && \
 WORKDIR /build/pg_ducklake
 COPY third_party/pg_ducklake/ .
 
-# Build ducklake loadable extension via cmake (this also builds DuckDB).
-COPY docker/build-ducklake-ext.sh /tmp/build-ducklake-ext.sh
-RUN DUCKLAKE_REPO=/build/pg_ducklake \
-    /tmp/build-ducklake-ext.sh /opt/ducklake-ext
-
-# Extract libduckdb.so from the ducklake extension's DuckDB build tree.
-RUN install -m 755 \
-        third_party/ducklake/build/release/src/libduckdb.so \
-        /usr/local/lib/ && \
+# Build libduckdb.so directly from DuckDB source via cmake.
+# This bypasses the pg_duckdb/pg_ducklake Make submodule logic — the daemon
+# only needs the shared library, not the PG extensions.
+RUN cd third_party/pg_duckdb/third_party/duckdb && \
+    cmake -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_SHELL=0 \
+        -DBUILD_UNITTESTS=0 \
+        -S . -B build/release && \
+    cmake --build build/release --target duckdb && \
+    install -m 755 build/release/src/libduckdb.so /usr/local/lib/ && \
     ldconfig
 
 ###############################################################################
-### BUILDER — compile postgres_scanner + Rust daemon binary
+### BUILDER — compile ducklake ext + postgres_scanner + Rust daemon binary
 ###############################################################################
 FROM ducklake-builder AS builder
 ARG _BUILDER_PG
 ARG DUCKDB_VERSION
+
+# Build ducklake.duckdb_extension from the submodule source.
+COPY docker/build-ducklake-ext.sh /tmp/build-ducklake-ext.sh
+RUN DUCKLAKE_REPO=/build/pg_ducklake \
+    /tmp/build-ducklake-ext.sh /opt/ducklake-ext
 
 # Download postgres_scanner matching DUCKDB_VERSION.
 # The upstream version is safe here — the -Bsymbolic issue only affects PG
