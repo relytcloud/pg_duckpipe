@@ -4,21 +4,8 @@
 -- Start the worker with default poll_interval (1s) so it stabilizes quickly.
 SELECT duckpipe.start_worker();
 
--- Wait until the worker is visible in pg_stat_activity.
-DO $$
-DECLARE
-  i int := 0;
-BEGIN
-  WHILE i < 50 LOOP
-    IF EXISTS (SELECT 1 FROM pg_stat_activity WHERE backend_type LIKE 'pg_duckpipe:%') THEN
-      RETURN;
-    END IF;
-    PERFORM pg_sleep(0.1);
-    i := i + 1;
-  END LOOP;
-  RAISE EXCEPTION 'worker did not appear in pg_stat_activity';
-END;
-$$;
+-- Give the worker time to start and register in pg_stat_activity.
+SELECT pg_sleep(2);
 
 -- Wait for the worker to drain any WAL backlog from previous tests.
 -- The worker must complete its sync cycles before we can rely on

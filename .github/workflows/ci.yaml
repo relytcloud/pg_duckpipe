@@ -38,7 +38,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pg_version: [18]
+        pg_version: [17, 18]
 
     steps:
       - name: Checkout code
@@ -118,7 +118,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pg_version: [18]
+        pg_version: [17, 18]
 
     steps:
       - name: Checkout code
