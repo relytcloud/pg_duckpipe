@@ -97,6 +97,13 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 FROM postgres:${PG_VERSION}-bookworm AS output
 ARG PG_VERSION
 
+# Runtime deps for DuckDB (libcurl for httpfs, libssl for TLS)
+RUN apt-get update -qq && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates \
+        libcurl4 && \
+    rm -rf /var/lib/apt/lists/*
+
 # Copy shared libraries
 COPY --from=builder \
     /usr/lib/postgresql/${PG_VERSION}/lib/libduckdb.so \
