@@ -19,7 +19,7 @@ on:
       - "docker/init.d/**"
       - ".github/workflows/docker.yaml"
   schedule:
-    # Rebuild nightly to pick up base-image updates from pg_ducklake
+    # Rebuild nightly to pick up base-image updates
     - cron: "44 4 * * *"
   workflow_dispatch:
 

@@ -25,18 +25,31 @@ build: check-cargo-pgrx
 	DYLD_LIBRARY_PATH="$(PG_LIB):$(DYLD_LIBRARY_PATH)" \
 	cargo pgrx install $(PGRX_PROFILE_FLAG) --pg-config=$(PG_CONFIG)
 
-# Build ducklake.duckdb_extension from pg_ducklake source and install to pkglibdir.
-# Uses sibling ../pg_ducklake by default. Override with DUCKLAKE_REPO=<url>.
-# Skips if no repo is available (no sibling dir and DUCKLAKE_REPO not set).
+# Build ducklake.duckdb_extension and install to pkglibdir.
+# Skips if already present. Clones pg_ducklake on demand if DUCKLAKE_REPO is not set.
+DUCKLAKE_GIT_URL ?= https://github.com/relytcloud/pg_ducklake.git
+DUCKLAKE_COMMIT  ?= c6b2fd9408431cd86f720fba276774d2bcf23eff
+
 install-ducklake-ext:
-	@repo="$(DUCKLAKE_REPO)"; \
-	if [ -z "$$repo" ] && [ -d ../pg_ducklake ]; then \
-		repo="$$(cd ../pg_ducklake && pwd)"; \
-	fi; \
-	if [ -n "$$repo" ]; then \
-		DUCKLAKE_REPO="$$repo" docker/build-ducklake-ext.sh "$(PG_LIB)"; \
+	@if [ -f "$(PG_LIB)/ducklake.duckdb_extension" ] && [ "$${FORCE:-0}" != "1" ]; then \
+		echo "==> ducklake.duckdb_extension already in $(PG_LIB). Skipping (set FORCE=1 to rebuild)."; \
 	else \
-		echo "NOTICE: pg_ducklake not found at ../pg_ducklake and DUCKLAKE_REPO not set. Skipping ducklake extension install."; \
+		repo="$(DUCKLAKE_REPO)"; \
+		if [ -z "$$repo" ]; then \
+			if [ -d deps/pg_ducklake ]; then \
+				echo "==> Using existing deps/pg_ducklake"; \
+			else \
+				echo "==> Cloning pg_ducklake @ $(DUCKLAKE_COMMIT) into deps/ ..."; \
+				mkdir -p deps && \
+				git init deps/pg_ducklake && \
+				git -C deps/pg_ducklake remote add origin "$(DUCKLAKE_GIT_URL)" && \
+				git -C deps/pg_ducklake fetch --depth 1 origin "$(DUCKLAKE_COMMIT)" && \
+				git -C deps/pg_ducklake checkout FETCH_HEAD && \
+				git -C deps/pg_ducklake submodule update --init --recursive --depth 1; \
+			fi; \
+			repo="$$(cd deps/pg_ducklake && pwd)"; \
+		fi; \
+		DUCKLAKE_REPO="$$repo" FORCE=1 docker/build-ducklake-ext.sh "$(PG_LIB)"; \
 	fi
 
 install: build install-ducklake-ext
