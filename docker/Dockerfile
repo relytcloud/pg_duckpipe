@@ -133,7 +133,7 @@ RUN printf '\n# pg_duckpipe CDC settings\n\
 wal_level = logical\n\
 max_replication_slots = 10\n\
 max_wal_senders = 10\n\
-shared_preload_libraries = '"'"'pg_duckdb,pg_ducklake,pg_duckpipe'"'"'\n\
+shared_preload_libraries = '"'"'pg_duckdb,pg_duckpipe'"'"'\n\
 duckdb.unsafe_allow_mixed_transactions = on\n' \
     >> /usr/share/postgresql/postgresql.conf.sample
 
