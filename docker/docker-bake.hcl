@@ -21,6 +21,13 @@ target "pg_duckpipe" {
   tags   = ["${REPO}:${PG_VERSION}-dev"]
 }
 
+target "pg_duckpipe_17" {
+  inherits = ["pg_duckpipe"]
+  args = {
+    PG_VERSION = "17"
+  }
+}
+
 target "pg_duckpipe_18" {
   inherits = ["pg_duckpipe"]
   args = {
