@@ -22,7 +22,8 @@ RUN apt-get update -qq && \
         libssl-dev \
         liblz4-dev \
         libstdc++-12-dev \
-        libcurl4-openssl-dev && \
+        libcurl4-openssl-dev \
+        jq && \
     rm -rf /var/lib/apt/lists/*
 
 # Clone pg_ducklake at the pinned commit with all submodules (pg_duckdb, duckdb, ducklake).
