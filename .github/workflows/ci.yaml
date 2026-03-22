@@ -63,7 +63,7 @@ jobs:
         id: run-tests
         run: |
           docker run --rm \
-            -v ${{ github.workspace }}/test:/build/test \
+            -v ${{ github.workspace }}/test:/build/pg_duckpipe/test \
             -v /tmp/regression-output-${{ matrix.pg_version }}:/results \
             pg_duckpipe:builder-${{ matrix.pg_version }} bash -c '
               set -euo pipefail
@@ -76,12 +76,12 @@ jobs:
               # pg_regress refuses to run as root — switch to the postgres user
               su postgres -s /bin/bash -c "
                 export LD_LIBRARY_PATH=${PG_LIB}
-                make -C /build/test/regression check-regression \
+                make -C /build/pg_duckpipe/test/regression check-regression \
                   PG_CONFIG=${PG_CONFIG}
               " || {
                 mkdir -p /results
-                cp /build/test/regression/regression.diffs /results/ 2>/dev/null || true
-                cp -r /build/test/regression/log/ /results/log/ 2>/dev/null || true
+                cp /build/pg_duckpipe/test/regression/regression.diffs /results/ 2>/dev/null || true
+                cp -r /build/pg_duckpipe/test/regression/log/ /results/log/ 2>/dev/null || true
                 cp -r /tmp/pg_duckpipe_test_log/ /results/pg_log/ 2>/dev/null || true
                 chmod -R a+rX /results/ 2>/dev/null || true
                 exit 1
@@ -143,7 +143,7 @@ jobs:
         id: run-daemon-tests
         run: |
           docker run --rm \
-            -v ${{ github.workspace }}/test:/build/test \
+            -v ${{ github.workspace }}/test:/build/pg_duckpipe/test \
             -v /tmp/daemon-output-${{ matrix.pg_version }}:/results \
             pg_duckpipe:builder-${{ matrix.pg_version }} bash -c '
               set -euo pipefail
@@ -153,7 +153,7 @@ jobs:
               PG_LIB=$(${PG_CONFIG} --pkglibdir)
 
               # Build daemon binary
-              cd /build
+              cd /build/pg_duckpipe
               DUCKDB_LIB_DIR="${PG_LIB}" \
                 LD_LIBRARY_PATH="${PG_LIB}" \
                 cargo build --release -p duckpipe-daemon
@@ -164,12 +164,12 @@ jobs:
               su postgres -s /bin/bash -c "
                 export LD_LIBRARY_PATH=${PG_LIB}
                 export PG_CONFIG=${PG_CONFIG}
-                export DUCKPIPE_BIN=/build/target/release/duckpipe
-                cd /build/test/daemon
+                export DUCKPIPE_BIN=/build/pg_duckpipe/target/release/duckpipe
+                cd /build/pg_duckpipe/test/daemon
                 bash run_tests.sh
               " || {
                 mkdir -p /results
-                cp -r /build/test/daemon/log/ /results/log/ 2>/dev/null || true
+                cp -r /build/pg_duckpipe/test/daemon/log/ /results/log/ 2>/dev/null || true
                 cp -r /tmp/pg_duckpipe_daemon_test_log/ /results/pg_log/ 2>/dev/null || true
                 chmod -R a+rX /results/ 2>/dev/null || true
                 exit 1

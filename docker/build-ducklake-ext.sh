@@ -1,20 +1,22 @@
 #!/usr/bin/env bash
-# Build ducklake.duckdb_extension from pg_ducklake source.
+# Build ducklake.duckdb_extension from a pg_ducklake source tree.
 #
 # Usage: build-ducklake-ext.sh [output-dir]
 #
 # If output-dir is omitted, auto-detects via `pg_config --pkglibdir`.
 #
 # Environment variables:
-#   DUCKLAKE_REPO    — git URL (default: https://github.com/relytcloud/pg_ducklake.git)
-#   DUCKLAKE_COMMIT  — branch, tag, or commit (default: main)
+#   DUCKLAKE_REPO  — path to pg_ducklake checkout (required)
 #
-# Requires: git, cmake, ninja (or make), C++ compiler
+# Requires: cmake, ninja (or make), C++ compiler
 
 set -euo pipefail
 
-REPO="${DUCKLAKE_REPO:-https://github.com/relytcloud/pg_ducklake.git}"
-COMMIT="${DUCKLAKE_COMMIT:-main}"
+REPO="${DUCKLAKE_REPO:-}"
+if [ -z "${REPO}" ]; then
+    echo "ERROR: DUCKLAKE_REPO must be set to a pg_ducklake checkout path."
+    exit 1
+fi
 
 # Output directory: argument > pg_config auto-detect
 OUTPUT_DIR="${1:-}"
@@ -33,21 +35,16 @@ if [ -f "${OUTPUT_DIR}/ducklake.duckdb_extension" ] && [ "${FORCE:-0}" != "1" ];
     exit 0
 fi
 
-WORKDIR=$(mktemp -d)
-trap 'rm -rf "${WORKDIR}"' EXIT
-
-echo "==> Cloning pg_ducklake @ ${COMMIT} ..."
-git clone --depth 1 --branch "${COMMIT}" "${REPO}" "${WORKDIR}/pg_ducklake" || {
-    # Fallback for commit hashes (--branch only works for branches/tags)
-    rm -rf "${WORKDIR}/pg_ducklake"
-    git clone --depth 50 "${REPO}" "${WORKDIR}/pg_ducklake"
-    cd "${WORKDIR}/pg_ducklake"
-    git checkout "${COMMIT}"
-}
-
-cd "${WORKDIR}/pg_ducklake"
-git submodule update --init --recursive --depth 1
-cd third_party/ducklake
+DUCKLAKE_SRC="${REPO}/third_party/ducklake"
+if [ ! -d "${DUCKLAKE_SRC}" ]; then
+    echo "ERROR: ${DUCKLAKE_SRC} not found. Is DUCKLAKE_REPO a pg_ducklake checkout?"
+    exit 1
+fi
+if [ ! -f "${DUCKLAKE_SRC}/duckdb/CMakeLists.txt" ]; then
+    echo "ERROR: ${DUCKLAKE_SRC}/duckdb/ is empty. Run 'git submodule update --init --recursive' in pg_ducklake."
+    exit 1
+fi
+cd "${DUCKLAKE_SRC}"
 
 # Use Ninja if available, else Unix Makefiles
 if command -v ninja >/dev/null 2>&1; then
@@ -56,9 +53,12 @@ else
     GEN="Unix Makefiles"
 fi
 
+# Use a dedicated build dir to avoid conflicts with pg_ducklake's static lib
+# build (which may have used build/release/ with a different DuckDB source).
+BUILD_DIR="build/release_loadable"
+
 echo "==> Building ducklake loadable extension (generator=${GEN}) ..."
 EXT_CONFIG="${PWD}/extension_config.cmake"
-mkdir -p build/release
 cmake -G "${GEN}" \
     -DCMAKE_BUILD_TYPE=Release \
     -DDUCKDB_EXTENSION_CONFIGS="${EXT_CONFIG}" \
@@ -66,14 +66,14 @@ cmake -G "${GEN}" \
     -DBUILD_SHELL=0 \
     -DBUILD_UNITTESTS=0 \
     -S ./duckdb/ \
-    -B build/release
-cmake --build build/release --config Release --target ducklake_loadable_extension
+    -B "${BUILD_DIR}"
+cmake --build "${BUILD_DIR}" --config Release --target ducklake_loadable_extension
 
-EXT_FILE="build/release/extension/ducklake/ducklake.duckdb_extension"
+EXT_FILE="${BUILD_DIR}/extension/ducklake/ducklake.duckdb_extension"
 if [ ! -f "${EXT_FILE}" ]; then
     echo "ERROR: ducklake.duckdb_extension not found at ${EXT_FILE}"
     echo "Build output:"
-    find build/release -name '*.duckdb_extension' 2>/dev/null || true
+    find "${BUILD_DIR}" -name '*.duckdb_extension' 2>/dev/null || true
     exit 1
 fi
 
