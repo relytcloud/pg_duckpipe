@@ -37,7 +37,7 @@ if [ ! -d "${DUCKLAKE_SRC}" ]; then
     exit 1
 fi
 if [ ! -f "${DUCKLAKE_SRC}/duckdb/CMakeLists.txt" ]; then
-    echo "ERROR: ${DUCKLAKE_SRC}/duckdb/ is empty. Run 'git submodule update --init --recursive'."
+    echo "ERROR: ${DUCKLAKE_SRC}/duckdb/ is empty. Run 'git submodule update --init --recursive' in pg_ducklake."
     exit 1
 fi
 cd "${DUCKLAKE_SRC}"
