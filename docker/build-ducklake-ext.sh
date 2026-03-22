@@ -6,13 +6,17 @@
 # If output-dir is omitted, auto-detects via `pg_config --pkglibdir`.
 #
 # Environment variables:
-#   DUCKLAKE_REPO  — path to pg_ducklake checkout (default: ../pg_ducklake)
+#   DUCKLAKE_REPO  — path to pg_ducklake checkout (required)
 #
 # Requires: cmake, ninja (or make), C++ compiler
 
 set -euo pipefail
 
-REPO="${DUCKLAKE_REPO:-../pg_ducklake}"
+REPO="${DUCKLAKE_REPO:-}"
+if [ -z "${REPO}" ]; then
+    echo "ERROR: DUCKLAKE_REPO must be set to a pg_ducklake checkout path."
+    exit 1
+fi
 
 # Output directory: argument > pg_config auto-detect
 OUTPUT_DIR="${1:-}"
