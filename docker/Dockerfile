@@ -1,5 +1,5 @@
 ARG PG_VERSION=18
-ARG DUCKLAKE_COMMIT=65cace70932f3f68b1a89251f971c903ab3b7781
+ARG DUCKLAKE_COMMIT=c6b2fd9408431cd86f720fba276774d2bcf23eff
 
 ###############################################################################
 ### DUCKLAKE-BUILDER — clone + build pg_duckdb + libduckdb + pg_ducklake
@@ -133,7 +133,7 @@ RUN printf '\n# pg_duckpipe CDC settings\n\
 wal_level = logical\n\
 max_replication_slots = 10\n\
 max_wal_senders = 10\n\
-shared_preload_libraries = '"'"'pg_duckdb,pg_duckpipe'"'"'\n\
+shared_preload_libraries = '"'"'pg_duckdb,pg_ducklake,pg_duckpipe'"'"'\n\
 duckdb.unsafe_allow_mixed_transactions = on\n' \
     >> /usr/share/postgresql/postgresql.conf.sample
 

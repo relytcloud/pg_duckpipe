@@ -28,7 +28,7 @@ build: check-cargo-pgrx
 # Build ducklake.duckdb_extension and install to pkglibdir.
 # Skips if already present. Clones pg_ducklake on demand if DUCKLAKE_REPO is not set.
 DUCKLAKE_GIT_URL ?= https://github.com/relytcloud/pg_ducklake.git
-DUCKLAKE_COMMIT  ?= 65cace70932f3f68b1a89251f971c903ab3b7781
+DUCKLAKE_COMMIT  ?= c6b2fd9408431cd86f720fba276774d2bcf23eff
 
 install-ducklake-ext:
 	@if [ -f "$(PG_LIB)/ducklake.duckdb_extension" ] && [ "$${FORCE:-0}" != "1" ]; then \

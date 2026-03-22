@@ -2,7 +2,7 @@
 # The daemon is PG-version-agnostic; we only borrow libduckdb.so at build time.
 ARG _BUILDER_PG=18
 ARG DUCKDB_VERSION=v1.5.0
-ARG DUCKLAKE_COMMIT=65cace70932f3f68b1a89251f971c903ab3b7781
+ARG DUCKLAKE_COMMIT=c6b2fd9408431cd86f720fba276774d2bcf23eff
 
 ###############################################################################
 ### DUCKLAKE-BUILDER — clone pg_ducklake + build libduckdb.so
