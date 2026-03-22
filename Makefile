@@ -36,15 +36,18 @@ install-ducklake-ext:
 	else \
 		repo="$(DUCKLAKE_REPO)"; \
 		if [ -z "$$repo" ]; then \
-			echo "==> Cloning pg_ducklake @ $(DUCKLAKE_COMMIT) ..."; \
-			tmpdir=$$(mktemp -d); \
-			trap 'rm -rf "$$tmpdir"' EXIT; \
-			git init "$$tmpdir/pg_ducklake" && \
-			git -C "$$tmpdir/pg_ducklake" remote add origin "$(DUCKLAKE_GIT_URL)" && \
-			git -C "$$tmpdir/pg_ducklake" fetch --depth 1 origin "$(DUCKLAKE_COMMIT)" && \
-			git -C "$$tmpdir/pg_ducklake" checkout FETCH_HEAD && \
-			git -C "$$tmpdir/pg_ducklake" submodule update --init --recursive --depth 1 && \
-			repo="$$tmpdir/pg_ducklake"; \
+			if [ -d deps/pg_ducklake ]; then \
+				echo "==> Using existing deps/pg_ducklake"; \
+			else \
+				echo "==> Cloning pg_ducklake @ $(DUCKLAKE_COMMIT) into deps/ ..."; \
+				mkdir -p deps && \
+				git init deps/pg_ducklake && \
+				git -C deps/pg_ducklake remote add origin "$(DUCKLAKE_GIT_URL)" && \
+				git -C deps/pg_ducklake fetch --depth 1 origin "$(DUCKLAKE_COMMIT)" && \
+				git -C deps/pg_ducklake checkout FETCH_HEAD && \
+				git -C deps/pg_ducklake submodule update --init --recursive --depth 1; \
+			fi; \
+			repo="$$(cd deps/pg_ducklake && pwd)"; \
 		fi; \
 		DUCKLAKE_REPO="$$repo" FORCE=1 docker/build-ducklake-ext.sh "$(PG_LIB)"; \
 	fi
