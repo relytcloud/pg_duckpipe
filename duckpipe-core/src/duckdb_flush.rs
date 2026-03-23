@@ -13,7 +13,9 @@ use std::time::Instant;
 
 use duckdb::{Config, Connection};
 
-use crate::types::{fixed_bytes_for_oid, Change, ChangeType, ResolvedConfig, Value};
+use crate::types::{
+    fixed_bytes_for_oid, is_duckpipe_system_column, Change, ChangeType, ResolvedConfig, Value,
+};
 
 const DUCKLAKE_EXT_FILENAME: &str = "ducklake.duckdb_extension";
 
@@ -180,11 +182,11 @@ fn discover_lake_table_info(
 
     // Build column_types aligned to expected_attnames order.
     // The DuckLake catalog columns should match pgoutput attnames.
-    // Filter out _duckpipe_source — it's a system column managed by duckpipe,
-    // not from pgoutput, so it should not appear in the expected alignment.
+    // Filter out duckpipe system columns — they're managed by duckpipe,
+    // not from pgoutput, so they should not appear in the expected alignment.
     let lake_col_map: std::collections::HashMap<String, String> = col_rows
         .into_iter()
-        .filter(|(name, _)| name.to_lowercase() != "_duckpipe_source")
+        .filter(|(name, _)| !is_duckpipe_system_column(name))
         .map(|(name, dtype)| (name.to_lowercase(), dtype))
         .collect();
 
@@ -290,6 +292,12 @@ pub struct FlushWorker {
     /// Injected as a SQL literal into INSERT statements and scopes
     /// DELETE operations to this label for fan-in isolation.
     source_label: String,
+    /// Sync mode: "upsert" (default) or "append" (immutable changelog).
+    sync_mode: String,
+    /// Cached high-water `_duckpipe_lsn` from the target table (append mode only).
+    /// Queried once on the first flush after restart, then reused across subsequent
+    /// flushes until all replayed WAL has been consumed. Zero means no dedup needed.
+    append_dedup_lsn: i64,
 }
 
 impl FlushWorker {
@@ -302,6 +310,7 @@ impl FlushWorker {
         ducklake_schema: &str,
         resolved_config: &ResolvedConfig,
         source_label: String,
+        sync_mode: String,
     ) -> Result<Self, String> {
         let db = open_ducklake_connection(pg_connstr, ducklake_schema)?;
 
@@ -328,6 +337,8 @@ impl FlushWorker {
             flush_memory_limit,
             cached_fixed_row_bytes: 0,
             source_label,
+            sync_mode,
+            append_dedup_lsn: 0,
         })
     }
 
@@ -388,6 +399,10 @@ impl FlushWorker {
                 lake_info.column_types[i]
             ));
         }
+        // Append mode: store per-change LSN for _duckpipe_lsn metadata
+        if self.sync_mode == "append" {
+            buf_cols.push("_lsn BIGINT".to_string());
+        }
 
         let create_buf = format!("CREATE TABLE buffer ({})", buf_cols.join(", "));
         self.db
@@ -441,6 +456,7 @@ impl FlushWorker {
         let mut seq = seq_start;
         let fixed_row_bytes = self.cached_fixed_row_bytes;
         let mut var_total: usize = 0;
+        let is_append = self.sync_mode == "append";
 
         {
             let mut appender = self
@@ -456,8 +472,9 @@ impl FlushWorker {
                     ChangeType::Delete => 2,
                 };
 
-                // +2 = _seq, _op_type
-                let mut row: Vec<Box<dyn duckdb::ToSql>> = Vec::with_capacity(2 + ncols);
+                // +2 = _seq, _op_type; +1 more for _lsn in append mode
+                let extra = if is_append { 3 } else { 2 };
+                let mut row: Vec<Box<dyn duckdb::ToSql>> = Vec::with_capacity(extra + ncols);
                 row.push(Box::new(seq));
                 row.push(Box::new(op_type));
 
@@ -482,6 +499,11 @@ impl FlushWorker {
                     }
                 }
 
+                // Append mode: store LSN for _duckpipe_lsn metadata
+                if is_append {
+                    row.push(Box::new(change.lsn as i64));
+                }
+
                 let refs: Vec<&dyn duckdb::ToSql> = row.iter().map(|b| b.as_ref()).collect();
                 appender
                     .append_row(refs.as_slice())
@@ -497,8 +519,8 @@ impl FlushWorker {
         Ok((seq, batch_bytes))
     }
 
-    /// Compact the buffer (dedup by PK), apply DELETE+INSERT to DuckLake in a
-    /// transaction, then drop the buffer table.
+    /// Flush the buffer to DuckLake. Dispatches to the appropriate strategy
+    /// based on `sync_mode`: append (immutable changelog) or upsert (compact + replace).
     ///
     /// Returns the flush result with timing and memory metrics.
     pub fn flush_buffer(
@@ -521,27 +543,148 @@ impl FlushWorker {
 
         let flush_start = Instant::now();
 
-        let target_table = self
-            .target_table
-            .as_ref()
-            .ok_or("target_table not cached — ensure_buffer should have been called")?;
-        let lake_info = self.lake_info.as_ref().ok_or_else(|| {
-            "lake_info not available — ensure_buffer should have been called".to_string()
-        })?;
-        let pk_cols = self
-            .cached_pk_cols
-            .as_ref()
-            .ok_or("pk_cols not cached — ensure_buffer should have been called")?;
-        let all_cols = self
-            .cached_all_cols
-            .as_ref()
-            .ok_or("all_cols not cached — ensure_buffer should have been called")?;
-        let has_non_inserts = self.has_non_inserts;
-
         // Raise memory limit for flush phase (compaction + DuckLake writes)
         self.db
             .execute_batch(&format!("SET memory_limit = '{}'", self.flush_memory_limit))
             .map_err(|e| format!("duckdb raise memory_limit: {}", e))?;
+
+        if self.sync_mode == "append" {
+            self.flush_append(target_key, applied_count, &flush_start)?;
+        } else {
+            self.flush_upsert(target_key, applied_count, &flush_start)?;
+        }
+
+        let memory_bytes = query_memory_usage(&self.db);
+        let flush_duration_ms = flush_start.elapsed().as_millis() as i64;
+
+        Ok(DuckDbFlushResult {
+            target_key: target_key.to_string(),
+            mapping_id,
+            applied_count,
+            memory_bytes,
+            flush_duration_ms,
+            buffered_bytes,
+        })
+    }
+
+    /// Append-mode flush: INSERT all buffered rows with metadata columns.
+    /// No compaction, no DELETE — the target is an immutable changelog.
+    ///
+    /// Crash-recovery dedup: on the first flush after worker creation, queries
+    /// `MAX(_duckpipe_lsn)` from the target and caches it in `append_dedup_lsn`.
+    /// All subsequent flushes within this worker's lifetime add
+    /// `WHERE _lsn > {dedup_lsn}` to skip already-committed rows.
+    ///
+    /// The WHERE filter is on the small in-memory buffer table (not the target),
+    /// so the cost is negligible. Workers are dropped after each flush cycle and
+    /// recreated with a fresh `append_dedup_lsn = 0`, so the MAX query runs at
+    /// most once per flush cycle. In steady state (no crash), `MAX()` returns
+    /// a value below all incoming LSNs, so the WHERE clause filters nothing.
+    fn flush_append(
+        &mut self,
+        target_key: &str,
+        applied_count: i64,
+        flush_start: &Instant,
+    ) -> Result<(), String> {
+        let (target_ref, source_literal, all_cols) = self.flush_refs()?;
+
+        // Query the target's high-water LSN once and cache it for this worker's
+        // lifetime. Reused across multiple flushes if the worker survives
+        // (e.g., drain_poll batching splits a large backlog into chunks).
+        if self.append_dedup_lsn == 0 && self.may_have_conflicts {
+            let sql = format!(
+                "SELECT COALESCE(MAX(\"_duckpipe_lsn\"), 0) FROM {} \
+                 WHERE \"_duckpipe_source\" = {}",
+                target_ref, source_literal
+            );
+            let mut stmt = self
+                .db
+                .prepare(&sql)
+                .map_err(|e| format!("dedup max_lsn prepare: {}", e))?;
+            self.append_dedup_lsn = stmt
+                .query_row([], |row| row.get(0))
+                .map_err(|e| format!("dedup max_lsn query: {}", e))?;
+            if self.append_dedup_lsn > 0 {
+                tracing::info!(
+                    "DuckPipe: append dedup for {} — high-water _lsn = {} (crash recovery)",
+                    target_key,
+                    self.append_dedup_lsn
+                );
+            }
+        }
+
+        let where_clause = if self.append_dedup_lsn > 0 {
+            format!(" WHERE _lsn > {}", self.append_dedup_lsn)
+        } else {
+            String::new()
+        };
+
+        let t_phase = Instant::now();
+        self.db
+            .execute_batch("BEGIN")
+            .map_err(|e| format!("duckdb begin: {}", e))?;
+        let t_begin_ms = t_phase.elapsed().as_secs_f64() * 1000.0;
+
+        let t_phase = Instant::now();
+        let insert_sql = format!(
+            "INSERT INTO {target_ref} ({cols}, \"_duckpipe_source\", \"_duckpipe_op\", \"_duckpipe_lsn\") \
+             SELECT {cols}, {source_literal}, \
+             CASE _op_type WHEN 0 THEN 'I' WHEN 1 THEN 'U' WHEN 2 THEN 'D' ELSE 'I' END, \
+             _lsn \
+             FROM buffer{where_clause} ORDER BY _seq",
+            target_ref = target_ref,
+            cols = all_cols,
+            source_literal = source_literal,
+            where_clause = where_clause
+        );
+        self.db.execute_batch(&insert_sql).map_err(|e| {
+            let _ = self.db.execute_batch("ROLLBACK");
+            format!("duckdb append insert into {}: {}", target_key, e)
+        })?;
+        let t_insert_ms = t_phase.elapsed().as_secs_f64() * 1000.0;
+
+        let t_phase = Instant::now();
+        self.db
+            .execute_batch("COMMIT")
+            .map_err(|e| format!("duckdb commit: {}", e))?;
+        let t_commit_ms = t_phase.elapsed().as_secs_f64() * 1000.0;
+
+        let t_phase = Instant::now();
+        self.db
+            .execute_batch("DROP TABLE IF EXISTS buffer;")
+            .map_err(|e| format!("duckdb cleanup: {}", e))?;
+        self.buffer_exists = false;
+        self.has_non_inserts = false;
+        let t_cleanup_ms = t_phase.elapsed().as_secs_f64() * 1000.0;
+
+        tracing::info!(
+            "DuckPipe timing: action=duckdb_flush_append target={} rows={} dedup_lsn={} \
+             begin_ms={:.1} insert_ms={:.1} commit_ms={:.1} cleanup_ms={:.1} total_ms={:.1}",
+            target_key,
+            applied_count,
+            self.append_dedup_lsn,
+            t_begin_ms,
+            t_insert_ms,
+            t_commit_ms,
+            t_cleanup_ms,
+            flush_start.elapsed().as_secs_f64() * 1000.0,
+        );
+        Ok(())
+    }
+
+    /// Upsert-mode flush: compact by PK (dedup), DELETE matching rows, INSERT latest values.
+    fn flush_upsert(
+        &mut self,
+        target_key: &str,
+        applied_count: i64,
+        flush_start: &Instant,
+    ) -> Result<(), String> {
+        let (target_ref, source_literal, all_cols) = self.flush_refs()?;
+        let pk_cols = self
+            .cached_pk_cols
+            .as_ref()
+            .ok_or("pk_cols not cached — ensure_buffer should have been called")?;
+        let has_non_inserts = self.has_non_inserts;
 
         // Step 1: Compact — deduplicate by PK, keep last operation (highest seq).
         let t_phase = Instant::now();
@@ -558,28 +701,19 @@ impl FlushWorker {
             .map_err(|e| format!("duckdb compact: {}", e))?;
         let t_compact_ms = t_phase.elapsed().as_secs_f64() * 1000.0;
 
-        // Step 2: Apply changes to DuckLake target
-        let target_ref = format!(
-            "lake.\"{}\".\"{}\"",
-            lake_info.lake_schema.replace('"', "\"\""),
-            target_table.replace('"', "\"\"")
-        );
-
-        // Wrap DELETE+INSERT in a transaction for atomicity.
+        // Step 2: DELETE+INSERT in a transaction for atomicity.
         let t_phase = Instant::now();
         self.db
             .execute_batch("BEGIN")
             .map_err(|e| format!("duckdb begin: {}", e))?;
         let t_begin_ms = t_phase.elapsed().as_secs_f64() * 1000.0;
 
-        // Step 2b: DELETE
         let skip_delete = !has_non_inserts && !self.may_have_conflicts;
 
         let pk_where: Vec<String> = pk_cols
             .iter()
             .map(|c| format!("{target_ref}.{c} = compacted.{c}"))
             .collect();
-        // Scope DELETE to only rows from this source (fan-in safe).
         let source_scope = format!(
             " AND {target_ref}.\"_duckpipe_source\" = '{}'",
             self.source_label.replace('\'', "''")
@@ -608,14 +742,13 @@ impl FlushWorker {
             self.may_have_conflicts = false;
         }
 
-        // Step 2c: INSERT — inject _duckpipe_source as a literal (not stored in buffer)
+        // Step 3: INSERT non-delete rows with _duckpipe_source
         let t_phase = Instant::now();
-        let source_literal = format!("'{}'", self.source_label.replace('\'', "''"));
         let insert_sql = format!(
             "INSERT INTO {target_ref} ({cols}, \"_duckpipe_source\") \
              SELECT {cols}, {source_literal} FROM compacted WHERE _op_type IN (0, 1)",
             target_ref = target_ref,
-            cols = all_cols.join(", "),
+            cols = all_cols,
             source_literal = source_literal
         );
         self.db.execute_batch(&insert_sql).map_err(|e| {
@@ -630,7 +763,6 @@ impl FlushWorker {
             .map_err(|e| format!("duckdb commit: {}", e))?;
         let t_commit_ms = t_phase.elapsed().as_secs_f64() * 1000.0;
 
-        // Cleanup
         let t_phase = Instant::now();
         self.db
             .execute_batch("DROP TABLE IF EXISTS compacted; DROP TABLE IF EXISTS buffer;")
@@ -638,9 +770,6 @@ impl FlushWorker {
         self.buffer_exists = false;
         self.has_non_inserts = false;
         let t_cleanup_ms = t_phase.elapsed().as_secs_f64() * 1000.0;
-
-        // No need to restore buffer-phase memory limit — the worker is dropped
-        // after each flush cycle and recreated with buffer_memory_limit on next use.
 
         tracing::debug!(
             "DuckPipe perf: action=duckdb_flush target={} rows={} \
@@ -667,18 +796,33 @@ impl FlushWorker {
             self.may_have_conflicts,
             flush_start.elapsed().as_secs_f64() * 1000.0,
         );
+        Ok(())
+    }
 
-        let memory_bytes = query_memory_usage(&self.db);
-        let flush_duration_ms = flush_start.elapsed().as_millis() as i64;
+    /// Extract shared references needed by both flush paths:
+    /// `(target_ref, source_literal, all_cols_joined)`.
+    fn flush_refs(&self) -> Result<(String, String, String), String> {
+        let target_table = self
+            .target_table
+            .as_ref()
+            .ok_or("target_table not cached — ensure_buffer should have been called")?;
+        let lake_info = self.lake_info.as_ref().ok_or_else(|| {
+            "lake_info not available — ensure_buffer should have been called".to_string()
+        })?;
+        let all_cols = self
+            .cached_all_cols
+            .as_ref()
+            .ok_or("all_cols not cached — ensure_buffer should have been called")?;
 
-        Ok(DuckDbFlushResult {
-            target_key: target_key.to_string(),
-            mapping_id,
-            applied_count,
-            memory_bytes,
-            flush_duration_ms,
-            buffered_bytes,
-        })
+        let target_ref = format!(
+            "lake.\"{}\".\"{}\"",
+            lake_info.lake_schema.replace('"', "\"\""),
+            target_table.replace('"', "\"\"")
+        );
+        let source_literal = format!("'{}'", self.source_label.replace('\'', "''"));
+        let all_cols_joined = all_cols.join(", ");
+
+        Ok((target_ref, source_literal, all_cols_joined))
     }
 
     /// Drop the buffer table if it exists (used on shutdown/error).

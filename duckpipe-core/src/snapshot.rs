@@ -35,7 +35,7 @@ impl std::ops::Deref for DetachOnDrop {
 }
 use futures_util::StreamExt;
 
-use crate::types::{format_lsn, parse_lsn};
+use crate::types::{format_lsn, is_duckpipe_system_column, parse_lsn};
 
 /// Max chunk size in bytes before splitting to a new file (~500MB).
 const CHUNK_SIZE_BYTES: u64 = 500 * 1024 * 1024;
@@ -77,6 +77,7 @@ pub async fn process_snapshot_task(
     task_id: i32,
     group_name: &str,
     source_label: String,
+    sync_mode: String,
 ) -> Result<(u64, u64, u64), String> {
     let table_start = Instant::now();
 
@@ -164,6 +165,7 @@ pub async fn process_snapshot_task(
         let consumer_target_table = target_table.to_string();
         let consumer_timing = timing;
         let consumer_source_label = source_label.clone();
+        let consumer_sync_mode = sync_mode.clone();
 
         let consumer_handle = tokio::task::spawn_blocking(move || {
             run_duckdb_consumer(
@@ -174,6 +176,7 @@ pub async fn process_snapshot_task(
                 &consumer_target_table,
                 consumer_timing,
                 &consumer_source_label,
+                &consumer_sync_mode,
             )
         });
 
@@ -377,6 +380,7 @@ fn run_duckdb_consumer(
     target_table: &str,
     timing: bool,
     source_label: &str,
+    sync_mode: &str,
 ) -> Result<u64, String> {
     let t_start = if timing { Some(Instant::now()) } else { None };
 
@@ -442,11 +446,11 @@ fn run_duckdb_consumer(
         ));
     }
 
-    // Separate source data columns from the _duckpipe_source system column.
-    // CSV data from COPY only contains source columns; _duckpipe_source is added by duckpipe.
+    // Separate source data columns from duckpipe system columns.
+    // CSV data from COPY only contains source columns; system columns are added by duckpipe.
     let source_col_names: Vec<&String> = col_names
         .iter()
-        .filter(|n| n.to_lowercase() != "_duckpipe_source")
+        .filter(|n| !is_duckpipe_system_column(n))
         .collect();
     let quoted_source_cols: Vec<String> = source_col_names
         .iter()
@@ -491,16 +495,28 @@ fn run_duckdb_consumer(
                 chunk_count += 1;
                 let t_chunk = if timing { Some(Instant::now()) } else { None };
 
-                // Build INSERT: source columns from CSV + _duckpipe_source literal
+                // Build INSERT: source columns from CSV + system column literals
                 let source_value = format!("'{}'", source_label.replace('\'', "''"));
-                let insert_sql = format!(
-                    "INSERT INTO {} ({}) SELECT {}, {} FROM read_csv('{}', header=true, nullstr='__DUCKPIPE_NULL__')",
-                    target_ref,
-                    all_cols_list,
-                    source_cols_list,
-                    source_value,
-                    path.replace('\'', "''")
-                );
+                let insert_sql = if sync_mode == "append" {
+                    // Append mode: inject _duckpipe_op='I' and _duckpipe_lsn=0 for snapshot rows
+                    format!(
+                        "INSERT INTO {} ({}) SELECT {}, {}, 'I', 0 FROM read_csv('{}', header=true, nullstr='__DUCKPIPE_NULL__')",
+                        target_ref,
+                        all_cols_list,
+                        source_cols_list,
+                        source_value,
+                        path.replace('\'', "''")
+                    )
+                } else {
+                    format!(
+                        "INSERT INTO {} ({}) SELECT {}, {} FROM read_csv('{}', header=true, nullstr='__DUCKPIPE_NULL__')",
+                        target_ref,
+                        all_cols_list,
+                        source_cols_list,
+                        source_value,
+                        path.replace('\'', "''")
+                    )
+                };
 
                 let rows = db.execute(&insert_sql, []).map_err(|e| {
                     let _ = db.execute_batch("ROLLBACK");

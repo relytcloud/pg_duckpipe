@@ -134,7 +134,7 @@ impl<'a> MetadataClient<'a> {
             .query(
                 "SELECT id, source_schema, source_table, target_schema, target_table, \
                  state, snapshot_lsn::text, enabled, source_oid, error_message, \
-                 applied_lsn::text, source_label \
+                 applied_lsn::text, source_label, sync_mode \
                  FROM duckpipe.table_mappings \
                  WHERE group_id = $1 AND source_schema = $2 AND source_table = $3",
                 &[&group_id, &schema, &table],
@@ -160,6 +160,9 @@ impl<'a> MetadataClient<'a> {
         let applied_lsn_str: Option<String> = row.get(10);
         let applied_lsn = applied_lsn_str.map(|s| parse_lsn(&s)).unwrap_or(0);
         let source_label: String = row.get::<_, Option<String>>(11).unwrap_or_default();
+        let sync_mode: String = row
+            .get::<_, Option<String>>(12)
+            .unwrap_or_else(|| "upsert".to_string());
 
         Ok(Some(TableMapping {
             id,
@@ -174,6 +177,7 @@ impl<'a> MetadataClient<'a> {
             source_oid,
             error_message,
             source_label,
+            sync_mode,
         }))
     }
 
@@ -303,7 +307,7 @@ impl<'a> MetadataClient<'a> {
             .query(
                 "SELECT id, source_schema, source_table, target_schema, target_table, \
                  state, snapshot_lsn::text, enabled, source_oid, error_message, \
-                 applied_lsn::text, source_label \
+                 applied_lsn::text, source_label, sync_mode \
                  FROM duckpipe.table_mappings \
                  WHERE group_id = $1 AND state = 'ERRORED' AND enabled = true \
                  AND retry_at IS NOT NULL AND retry_at <= now()",
@@ -332,6 +336,9 @@ impl<'a> MetadataClient<'a> {
                 source_oid: row.get(8),
                 error_message: row.get(9),
                 source_label: row.get::<_, Option<String>>(11).unwrap_or_default(),
+                sync_mode: row
+                    .get::<_, Option<String>>(12)
+                    .unwrap_or_else(|| "upsert".to_string()),
             })
             .collect())
     }
@@ -400,7 +407,7 @@ impl<'a> MetadataClient<'a> {
             .query(
                 "SELECT id, source_schema, source_table, target_schema, target_table, \
                  state, snapshot_lsn::text, enabled, source_oid, error_message, \
-                 applied_lsn::text, source_label \
+                 applied_lsn::text, source_label, sync_mode \
                  FROM duckpipe.table_mappings \
                  WHERE group_id = $1 AND source_oid = $2",
                 &[&group_id, &source_oid],
@@ -431,6 +438,9 @@ impl<'a> MetadataClient<'a> {
             source_oid: row.get(8),
             error_message: row.get(9),
             source_label: row.get::<_, Option<String>>(11).unwrap_or_default(),
+            sync_mode: row
+                .get::<_, Option<String>>(12)
+                .unwrap_or_else(|| "upsert".to_string()),
         }))
     }
 
@@ -622,7 +632,7 @@ impl<'a> MetadataClient<'a> {
         let rows = self
             .client
             .query(
-                "SELECT id, source_schema, source_table, target_schema, target_table, source_label \
+                "SELECT id, source_schema, source_table, target_schema, target_table, source_label, sync_mode \
                  FROM duckpipe.table_mappings \
                  WHERE group_id = $1 AND state = 'SNAPSHOT' AND enabled = true",
                 &[&group_id],
@@ -638,6 +648,9 @@ impl<'a> MetadataClient<'a> {
                 target_schema: row.get(3),
                 target_table: row.get(4),
                 source_label: row.get::<_, Option<String>>(5).unwrap_or_default(),
+                sync_mode: row
+                    .get::<_, Option<String>>(6)
+                    .unwrap_or_else(|| "upsert".to_string()),
             })
             .collect())
     }
@@ -737,6 +750,7 @@ pub struct SnapshotTask {
     pub target_schema: String,
     pub target_table: String,
     pub source_label: String,
+    pub sync_mode: String,
 }
 
 /// Load column names and primary key attribute indices from any PG connection.
