@@ -733,6 +733,42 @@ fn add_table(
         None => PgConn::local(),
     };
 
+    // 2b. Verify PK exists — required for upsert mode (both local and remote).
+    //     Check early (before publication/slot creation) so a failed validation
+    //     does not leave orphaned replication infrastructure behind.
+    //     Append mode works without a PK: the changelog stores full row values
+    //     via REPLICA IDENTITY FULL (set below).
+    if sync_mode == "upsert" {
+        let pk_sql = format!(
+            "SELECT 1 FROM pg_class c \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             JOIN pg_index i ON i.indrelid = c.oid AND i.indisprimary \
+             WHERE n.nspname = {} AND c.relname = {}",
+            quote_literal(&schema),
+            quote_literal(&table)
+        );
+        let has_pk = match source.exists(&pk_sql) {
+            Ok(v) => v,
+            Err(e) => {
+                ereport!(
+                    ERROR,
+                    PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+                    format!("Failed to check primary key: {}", e)
+                );
+            }
+        };
+        if !has_pk {
+            ereport!(
+                ERROR,
+                PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+                format!(
+                    "table {}.{} has no primary key — use sync_mode => 'append' for tables without a primary key",
+                    schema, table
+                )
+            );
+        }
+    }
+
     // 3. Publication setup
     if !source.is_remote() {
         // Local-only: check if publication exists; if not, create slot + publication
@@ -939,35 +975,6 @@ fn add_table(
         }
         cols
     };
-
-    // 7. Verify PK exists (remote only — local CREATE PUBLICATION would fail without one)
-    if source.is_remote() {
-        let pk_sql = format!(
-            "SELECT 1 FROM pg_class c \
-             JOIN pg_namespace n ON n.oid = c.relnamespace \
-             JOIN pg_index i ON i.indrelid = c.oid AND i.indisprimary \
-             WHERE n.nspname = {} AND c.relname = {}",
-            quote_literal(&schema),
-            quote_literal(&table)
-        );
-        match source.exists(&pk_sql) {
-            Ok(true) => {}
-            Ok(false) => {
-                ereport!(
-                    ERROR,
-                    PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                    format!("table {}.{} on remote PG has no primary key", schema, table)
-                );
-            }
-            Err(e) => {
-                ereport!(
-                    ERROR,
-                    PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                    format!("Failed to check primary key: {}", e)
-                );
-            }
-        }
-    }
 
     // 8. Target creation + mapping INSERT (always local SPI)
     let local_result: Result<(), String> = Spi::connect_mut(|client| {
