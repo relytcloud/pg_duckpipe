@@ -298,6 +298,8 @@ pub struct FlushWorker {
     /// Queried once on the first flush after restart, then reused across subsequent
     /// flushes until all replayed WAL has been consumed. Zero means no dedup needed.
     append_dedup_lsn: i64,
+    /// Per-table temp directory for DuckDB spill files.
+    temp_dir: std::path::PathBuf,
 }
 
 impl FlushWorker {
@@ -305,17 +307,33 @@ impl FlushWorker {
     /// Performs setup: open in-memory DB, INSTALL+LOAD ducklake, ATTACH to PG.
     /// The initial memory limit is set to `duckdb_buffer_memory_mb` (low, for 100+ concurrent tables).
     /// During `flush_buffer()`, it's raised to `duckdb_flush_memory_mb` (high, for compaction + DuckLake writes).
+    ///
+    /// `temp_dir` is a per-table directory for DuckDB spill files. Created if it doesn't
+    /// exist, cleaned up on drop.
     pub fn new(
         pg_connstr: &str,
         ducklake_schema: &str,
         resolved_config: &ResolvedConfig,
         source_label: String,
         sync_mode: String,
+        temp_dir: std::path::PathBuf,
     ) -> Result<Self, String> {
         let db = open_ducklake_connection(pg_connstr, ducklake_schema)?;
 
+        // Create per-table temp directory for DuckDB spill files.
+        std::fs::create_dir_all(&temp_dir)
+            .map_err(|e| format!("create temp dir {:?}: {}", temp_dir, e))?;
+
         let buffer_memory_limit = format!("{}MB", resolved_config.duckdb_buffer_memory_mb);
         let flush_memory_limit = format!("{}MB", resolved_config.duckdb_flush_memory_mb);
+
+        // Point DuckDB spill files to the per-table temp directory.
+        let temp_dir_sql = format!(
+            "SET temp_directory = '{}';",
+            temp_dir.display().to_string().replace('\'', "''")
+        );
+        db.execute_batch(&temp_dir_sql)
+            .map_err(|e| format!("duckdb set temp_directory: {}", e))?;
 
         // Apply per-group DuckDB resource limits: buffer-phase memory (low) + threads
         let resource_sql = format!(
@@ -339,6 +357,7 @@ impl FlushWorker {
             source_label,
             sync_mode,
             append_dedup_lsn: 0,
+            temp_dir,
         })
     }
 
@@ -840,6 +859,7 @@ impl FlushWorker {
 impl Drop for FlushWorker {
     fn drop(&mut self) {
         // DETACH DuckLake before closing the connection to ensure clean state.
+        // DuckDB cleans up its own spill files when the connection closes.
         let _ = self.db.execute_batch("DETACH lake;");
     }
 }
