@@ -859,15 +859,8 @@ impl FlushWorker {
 impl Drop for FlushWorker {
     fn drop(&mut self) {
         // DETACH DuckLake before closing the connection to ensure clean state.
+        // DuckDB cleans up its own spill files when the connection closes.
         let _ = self.db.execute_batch("DETACH lake;");
-
-        // Clean up spill files left by DuckDB in the per-table temp directory.
-        // The directory itself is kept (cheap, avoids mkdir on next cycle).
-        if let Ok(entries) = std::fs::read_dir(&self.temp_dir) {
-            for entry in entries.flatten() {
-                let _ = std::fs::remove_file(entry.path());
-            }
-        }
     }
 }
 
