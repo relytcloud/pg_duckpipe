@@ -28,7 +28,7 @@ jobs:
     name: Build Docker image for Postgres ${{ matrix.postgres }} on ${{ matrix.runner }}
     strategy:
       matrix:
-        postgres: ["18"]
+        postgres: ["17", "18"]
         runner: ["ubuntu-24.04", "ubuntu-24.04-arm"]
 
     runs-on: ${{ matrix.runner }}
@@ -113,7 +113,7 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     strategy:
       matrix:
-        postgres: ["18"]
+        postgres: ["17", "18"]
 
     runs-on: ubuntu-24.04
     needs: docker_build
