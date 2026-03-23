@@ -148,7 +148,14 @@ async fn main() {
     };
 
     // Sync loop
-    run_sync_loop(&state, &config, &slot_params, poll_interval, &flush_temp_base).await;
+    run_sync_loop(
+        &state,
+        &config,
+        &slot_params,
+        poll_interval,
+        &flush_temp_base,
+    )
+    .await;
 }
 
 /// Pre-bind the daemon to a group at startup.
