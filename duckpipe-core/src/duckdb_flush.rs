@@ -294,6 +294,10 @@ pub struct FlushWorker {
     source_label: String,
     /// Sync mode: "upsert" (default) or "append" (immutable changelog).
     sync_mode: String,
+    /// Cached high-water `_duckpipe_lsn` from the target table (append mode only).
+    /// Queried once on the first flush after restart, then reused across subsequent
+    /// flushes until all replayed WAL has been consumed. Zero means no dedup needed.
+    append_dedup_lsn: i64,
 }
 
 impl FlushWorker {
@@ -334,6 +338,7 @@ impl FlushWorker {
             cached_fixed_row_bytes: 0,
             source_label,
             sync_mode,
+            append_dedup_lsn: 0,
         })
     }
 
@@ -564,6 +569,17 @@ impl FlushWorker {
 
     /// Append-mode flush: INSERT all buffered rows with metadata columns.
     /// No compaction, no DELETE — the target is an immutable changelog.
+    ///
+    /// Crash-recovery dedup: on the first flush after worker creation, queries
+    /// `MAX(_duckpipe_lsn)` from the target and caches it in `append_dedup_lsn`.
+    /// All subsequent flushes within this worker's lifetime add
+    /// `WHERE _lsn > {dedup_lsn}` to skip already-committed rows.
+    ///
+    /// The WHERE filter is on the small in-memory buffer table (not the target),
+    /// so the cost is negligible. Workers are dropped after each flush cycle and
+    /// recreated with a fresh `append_dedup_lsn = 0`, so the MAX query runs at
+    /// most once per flush cycle. In steady state (no crash), `MAX()` returns
+    /// a value below all incoming LSNs, so the WHERE clause filters nothing.
     fn flush_append(
         &mut self,
         target_key: &str,
@@ -572,23 +588,54 @@ impl FlushWorker {
     ) -> Result<(), String> {
         let (target_ref, source_literal, all_cols) = self.flush_refs()?;
 
+        // Query the target's high-water LSN once and cache it for this worker's
+        // lifetime. Reused across multiple flushes if the worker survives
+        // (e.g., drain_poll batching splits a large backlog into chunks).
+        if self.append_dedup_lsn == 0 && self.may_have_conflicts {
+            let sql = format!(
+                "SELECT COALESCE(MAX(\"_duckpipe_lsn\"), 0) FROM {} \
+                 WHERE \"_duckpipe_source\" = {}",
+                target_ref, source_literal
+            );
+            let mut stmt = self
+                .db
+                .prepare(&sql)
+                .map_err(|e| format!("dedup max_lsn prepare: {}", e))?;
+            self.append_dedup_lsn = stmt
+                .query_row([], |row| row.get(0))
+                .map_err(|e| format!("dedup max_lsn query: {}", e))?;
+            if self.append_dedup_lsn > 0 {
+                tracing::info!(
+                    "DuckPipe: append dedup for {} — high-water _lsn = {} (crash recovery)",
+                    target_key,
+                    self.append_dedup_lsn
+                );
+            }
+        }
+
+        let where_clause = if self.append_dedup_lsn > 0 {
+            format!(" WHERE _lsn > {}", self.append_dedup_lsn)
+        } else {
+            String::new()
+        };
+
         let t_phase = Instant::now();
         self.db
             .execute_batch("BEGIN")
             .map_err(|e| format!("duckdb begin: {}", e))?;
         let t_begin_ms = t_phase.elapsed().as_secs_f64() * 1000.0;
 
-        // Map _op_type integer to _duckpipe_op letter: 0→'I', 1→'U', 2→'D'
         let t_phase = Instant::now();
         let insert_sql = format!(
             "INSERT INTO {target_ref} ({cols}, \"_duckpipe_source\", \"_duckpipe_op\", \"_duckpipe_lsn\") \
              SELECT {cols}, {source_literal}, \
              CASE _op_type WHEN 0 THEN 'I' WHEN 1 THEN 'U' WHEN 2 THEN 'D' ELSE 'I' END, \
              _lsn \
-             FROM buffer ORDER BY _seq",
+             FROM buffer{where_clause} ORDER BY _seq",
             target_ref = target_ref,
             cols = all_cols,
-            source_literal = source_literal
+            source_literal = source_literal,
+            where_clause = where_clause
         );
         self.db.execute_batch(&insert_sql).map_err(|e| {
             let _ = self.db.execute_batch("ROLLBACK");
@@ -611,10 +658,11 @@ impl FlushWorker {
         let t_cleanup_ms = t_phase.elapsed().as_secs_f64() * 1000.0;
 
         tracing::info!(
-            "DuckPipe timing: action=duckdb_flush_append target={} rows={} \
+            "DuckPipe timing: action=duckdb_flush_append target={} rows={} dedup_lsn={} \
              begin_ms={:.1} insert_ms={:.1} commit_ms={:.1} cleanup_ms={:.1} total_ms={:.1}",
             target_key,
             applied_count,
+            self.append_dedup_lsn,
             t_begin_ms,
             t_insert_ms,
             t_commit_ms,

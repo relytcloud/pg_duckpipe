@@ -57,6 +57,8 @@ test: remove_table_lag
 test: jsonb_type
 # Append sync mode: immutable changelog with _duckpipe_op and _duckpipe_lsn
 test: append_mode
+# Append-mode crash recovery: dedup via MAX(_duckpipe_lsn) high-water mark
+test: append_crash_recovery
 # Remote sync: loopback TCP exercises tokio-postgres DDL path
 test: remote_sync
 # Transparent query routing: planner hook rewrites SELECTs to DuckLake targets
