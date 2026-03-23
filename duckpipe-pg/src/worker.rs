@@ -235,6 +235,18 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
         gid
     };
 
+    // Resolve per-table DuckDB spill directory under $PGDATA/pg_duckpipe/flush/.
+    let flush_temp_base = {
+        let data_dir = unsafe {
+            std::ffi::CStr::from_ptr(pg_sys::DataDir)
+                .to_str()
+                .unwrap_or("/tmp")
+        };
+        std::path::PathBuf::from(data_dir)
+            .join("pg_duckpipe")
+            .join("flush")
+    };
+
     // Create persistent flush coordinator (survives across cycles, cleared on panic)
     let resolved_config = read_resolved_config(&group_name);
     let mut coordinator = FlushCoordinator::new(
@@ -242,6 +254,7 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
         "ducklake".to_string(),
         group_name.clone(),
         resolved_config,
+        flush_temp_base,
     );
     let mut snapshot_manager = SnapshotManager::new();
 

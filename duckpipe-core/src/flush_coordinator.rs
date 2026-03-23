@@ -308,6 +308,9 @@ pub struct FlushCoordinator {
     result_rx: mpsc::Receiver<FlushThreadResult>,
     backpressure: Arc<BackpressureState>,
     resolved_config: ResolvedConfig,
+    /// Base directory for per-table DuckDB spill files.
+    /// Each flush thread gets `{temp_base_dir}/m{mapping_id}/`.
+    temp_base_dir: std::path::PathBuf,
     /// In-memory per-table applied (flushed) LSN, updated from flush thread results via mpsc.
     ///
     /// Used to compute `flushed_lsn` for `StandbyStatusUpdate` and PG `confirmed_lsn`
@@ -333,11 +336,16 @@ pub struct FlushCoordinator {
 
 impl FlushCoordinator {
     /// Create a new coordinator. No flush threads are spawned yet.
+    ///
+    /// `temp_base_dir` is the base directory for per-table DuckDB spill files
+    /// (e.g. `$PGDATA/pg_duckpipe/flush`). Each flush thread creates a subdirectory
+    /// `m{mapping_id}/` under this path.
     pub fn new(
         pg_connstr: String,
         ducklake_schema: String,
         group_name: String,
         resolved_config: ResolvedConfig,
+        temp_base_dir: std::path::PathBuf,
     ) -> Self {
         let (tx, rx) = mpsc::channel();
         let max_queued = resolved_config.max_queued_changes as i64;
@@ -356,6 +364,7 @@ impl FlushCoordinator {
                 max_queued,
             }),
             resolved_config,
+            temp_base_dir,
             per_table_lsn: HashMap::new(),
             per_table_memory: HashMap::new(),
             per_table_flush_count: HashMap::new(),
@@ -471,6 +480,7 @@ impl FlushCoordinator {
         let batch_threshold = self.resolved_config.flush_batch_threshold as usize;
         let interval_ms = self.resolved_config.flush_interval_ms as u64;
         let resolved_config = self.resolved_config.clone();
+        let temp_dir = self.temp_base_dir.join(format!("m{}", mapping_id));
 
         let join_handle = std::thread::Builder::new()
             .name(format!("duckpipe-flush-{}-m{}", target_key, mapping_id))
@@ -489,6 +499,7 @@ impl FlushCoordinator {
                     batch_threshold,
                     interval_ms,
                     resolved_config,
+                    temp_dir,
                 );
             })
             .expect("failed to spawn flush thread");
@@ -925,6 +936,7 @@ fn flush_thread_main(
     batch_threshold: usize,
     flush_interval_ms: u64,
     resolved_config: ResolvedConfig,
+    temp_dir: std::path::PathBuf,
 ) {
     // Each flush thread owns its own tokio runtime for async PG metadata updates.
     // This avoids deadlock with the main thread's current_thread runtime, since
@@ -1036,6 +1048,7 @@ fn flush_thread_main(
                         &resolved_config,
                         meta.source_label.clone(),
                         meta.sync_mode.clone(),
+                        temp_dir.clone(),
                     ) {
                         Ok(w) => worker = Some(w),
                         Err(e) => {

@@ -65,6 +65,12 @@ struct Args {
     /// Defaults to DUCKDB_LIB_DIR env var, then "/usr/local/lib".
     #[arg(long, env = "DUCKDB_LIB_DIR", default_value = "/usr/local/lib")]
     duckdb_lib_dir: String,
+
+    /// Base directory for per-table DuckDB spill files.
+    /// Each flush thread creates a subdirectory `m{mapping_id}/` under this path.
+    /// Defaults to `{system_temp}/duckpipe/flush`.
+    #[arg(long, env = "DUCKPIPE_TEMP_DIR")]
+    temp_dir: Option<String>,
 }
 
 #[tokio::main]
@@ -135,8 +141,14 @@ async fn main() {
 
     let poll_interval = Duration::from_millis(args.poll_interval as u64);
 
+    // Resolve DuckDB spill directory — CLI flag, env var, or system temp.
+    let flush_temp_base: std::path::PathBuf = match args.temp_dir {
+        Some(ref dir) => std::path::PathBuf::from(dir),
+        None => std::env::temp_dir().join("duckpipe").join("flush"),
+    };
+
     // Sync loop
-    run_sync_loop(&state, &config, &slot_params, poll_interval).await;
+    run_sync_loop(&state, &config, &slot_params, poll_interval, &flush_temp_base).await;
 }
 
 /// Pre-bind the daemon to a group at startup.
@@ -271,6 +283,7 @@ async fn run_sync_loop(
     config: &ServiceConfig,
     slot_params: &duckpipe_core::service::SlotConnectParams,
     poll_interval: Duration,
+    flush_temp_base: &std::path::Path,
 ) {
     loop {
         // Wait for group binding if not already bound.
@@ -295,6 +308,7 @@ async fn run_sync_loop(
             config.ducklake_schema.clone(),
             group_name.clone(),
             resolved_config,
+            flush_temp_base.to_path_buf(),
         );
         let mut snapshot_manager = SnapshotManager::new();
         let mut consumer: Option<SlotState> = None;
