@@ -20,7 +20,7 @@
 - [ ] Schema DDL sync — ALTER TABLE ADD/DROP COLUMN propagation
 - [ ] Staged storage — durable delta layer between WAL and DuckLake to decouple CDC from file proliferation
 - [ ] Explicit `Value` variants for more PG types (date, timestamp, uuid, numeric, interval, json)
-- [ ] Sync tables with no PK (ensure e2e EOS)
+- [x] Sync tables with no PK (append mode; upsert requires PK)
 - [ ] Column and row filtering — selective column sync and WHERE predicates on `add_table()`
 
 ### Monitoring / Observability

@@ -59,6 +59,8 @@ test: remove_table_lag
 test: jsonb_type
 # Append sync mode: immutable changelog with _duckpipe_op and _duckpipe_lsn
 test: append_mode
+# Append sync mode for tables with no primary key
+test: append_mode_no_pk
 # Append-mode crash recovery: dedup via MAX(_duckpipe_lsn) high-water mark
 test: append_crash_recovery
 # Remote sync: loopback TCP exercises tokio-postgres DDL path

@@ -4,7 +4,7 @@
 
 - PostgreSQL 14+ with `wal_level = logical`
 - `pg_duckdb` and `pg_duckpipe` in `shared_preload_libraries`
-- Source tables must have a PRIMARY KEY
+- Source tables must have a PRIMARY KEY for upsert mode (default). Tables without a PRIMARY KEY are supported in `append` sync mode.
 
 ## Quick Start
 

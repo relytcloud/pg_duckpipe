@@ -97,6 +97,17 @@ async fn ensure_coordinator_queue(
 ) -> Result<(), String> {
     let catalog_client = source_client.unwrap_or(meta.client());
 
+    // The pgoutput RELATION message always populates attnames (one per column).
+    // Use them directly — no catalog fallback needed.
+    if entry.attnames.is_empty() {
+        return Err(format!(
+            "RELATION message for {}.{} has no columns",
+            entry.nspname, entry.relname
+        ));
+    }
+    let attnames = &entry.attnames;
+    let atttypes = &entry.atttypes;
+
     // Load the *real* PK columns from pg_index on the first call, then cache.
     // With REPLICA IDENTITY FULL, pgoutput marks ALL columns as key (flags & 1),
     // so `entry.attkeys` would be [0, 1, ..., ncols-1].  Using that as
@@ -116,19 +127,17 @@ async fn ensure_coordinator_queue(
             crate::metadata::load_pk_metadata(catalog_client, &entry.nspname, &entry.relname)
                 .await
                 .map_err(|e| format!("load_batch_metadata (pk): {}", e))?;
-        *pk_key_attrs_cache = Some(attrs.clone());
-        attrs
-    };
-
-    let (attnames, atttypes) = if !entry.attnames.is_empty() {
-        (entry.attnames.clone(), entry.atttypes.clone())
-    } else {
-        let (names, _keys) =
-            crate::metadata::load_pk_metadata(catalog_client, &entry.nspname, &entry.relname)
-                .await
-                .map_err(|e| format!("load_batch_metadata: {}", e))?;
-        let types = vec![0u32; names.len()]; // unknown type → Text fallback
-        (names, types)
+        // No PK → fall back to all columns as key. This ensures DELETE rows in
+        // append-mode changelog carry full old-row values (via REPLICA IDENTITY
+        // FULL) instead of all NULLs. Upsert mode rejects no-PK tables at
+        // add_table() time, so this path is only hit for append mode.
+        let final_attrs = if attrs.is_empty() {
+            (0..attnames.len()).collect()
+        } else {
+            attrs
+        };
+        *pk_key_attrs_cache = Some(final_attrs.clone());
+        final_attrs
     };
 
     let paused = mapping.state == "SNAPSHOT";
@@ -136,9 +145,9 @@ async fn ensure_coordinator_queue(
         target_key,
         mapping.id,
         mapping.applied_lsn,
-        attnames,
+        attnames.clone(),
         key_attrs,
-        atttypes,
+        atttypes.clone(),
         paused,
         mapping.source_label.clone(),
         mapping.sync_mode.clone(),
