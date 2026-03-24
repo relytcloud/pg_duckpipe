@@ -55,7 +55,7 @@ Uses `docker-compose.soak.yml`. The sync engine runs as a PG background worker i
 
 | Container | Image | Role |
 |-----------|-------|------|
-| `db` | Built from `Dockerfile.db` | PostgreSQL + pg_duckdb + pg_ducklake + pg_duckpipe |
+| `db` | `pgducklake/pgduckpipe:18-main` | PostgreSQL + pg_duckdb + pg_ducklake + pg_duckpipe |
 | `bench` | Built from `Dockerfile.bench` | Sysbench load generator + monitor |
 
 ### Run
@@ -85,7 +85,7 @@ Uses `docker-compose.soak-daemon.yml`. The sync engine runs as a standalone daem
 
 | Container | Image | Role |
 |-----------|-------|------|
-| `db` | Built from `Dockerfile.db` | PostgreSQL + pg_duckdb + pg_ducklake + pg_duckpipe |
+| `db` | `pgducklake/pgduckpipe:18-main` | PostgreSQL + pg_duckdb + pg_ducklake + pg_duckpipe |
 | `daemon` | Built from `docker/Dockerfile.daemon` | Standalone duckpipe sync daemon |
 | `bench` | Built from `Dockerfile.bench` | Sysbench load generator + monitor |
 
@@ -281,33 +281,11 @@ Note: In-flight consistency checks during active workload will show FAIL (row co
 
 ## Troubleshooting
 
-### initdb fails with "access method ducklake does not exist"
-
-**Cause**: `pg_ducklake` in `shared_preload_libraries` during `initdb` tries to register the "ducklake" access method before `pg_catalog` is ready.
-
-**Fix**: `Dockerfile.db` does NOT set `shared_preload_libraries` in `postgresql.conf.sample`. Instead, docker-compose passes it via `command` override which only affects the server process, not `initdb`.
-
-### add_table fails with "Writing to DuckDB and Postgres tables in the same transaction"
-
-**Cause**: `duckpipe.add_table()` does `CREATE TABLE USING ducklake` (DuckDB write) + `INSERT INTO duckpipe.table_mappings` (PG write) in the same SPI transaction. Newer pg_duckdb versions reject cross-engine writes.
-
-**Fix**: `soak_test_daemon.py` uses `add_table_manual()` which splits these into separate transactions:
-1. Create replication slot + publication (PG)
-2. Set REPLICA IDENTITY FULL (PG)
-3. CREATE TABLE USING ducklake (DuckDB) — separate transaction
-4. INSERT INTO table_mappings (PG) — separate transaction
-
-### drop_group fails with "replication slot does not exist"
-
-**Cause**: `CREATE EXTENSION pg_duckpipe` auto-creates a "default" group. Calling `drop_group('default')` tries to drop the replication slot which doesn't exist yet.
-
-**Fix**: Don't call `drop_group()`. The daemon pre-binds to the auto-created group via `--group default`. If you need to remove it, use `DELETE FROM duckpipe.sync_groups WHERE name = 'default';` directly.
-
-### Daemon can't write to DuckLake data directory
-
-**Cause**: The daemon container runs DuckDB which needs to write Parquet files to the PG data directory owned by the `postgres` user.
-
-**Fix**: The daemon container runs as `user: root` and shares the `daemon_pgdata` volume with the db container.
+| Error | Fix |
+|-------|-----|
+| `add_table` fails with "Writing to DuckDB and Postgres tables in the same transaction" | Daemon mode uses `add_table_manual()` which splits DuckDB and PG writes into separate transactions |
+| `drop_group` fails with "replication slot does not exist" | Don't call `drop_group()` on the auto-created default group; the daemon pre-binds to it |
+| Daemon can't write to DuckLake data directory | Daemon container runs as root and shares the pgdata volume with db |
 
 ---
 
@@ -334,4 +312,4 @@ Note: In-flight consistency checks during active workload will show FAIL (row co
 - Always use `-v` in teardown to remove the database volume between runs.
 - The docker-compose files set `platform: linux/amd64`. Remove this line if running on an arm64 host with arm64 base images available.
 - First build on a clean machine takes 5-15 minutes due to Rust compilation. Docker cache speeds up subsequent builds.
-- The daemon compose requires the full repo (not just `benchmark/`) because it builds from `docker/Dockerfile.daemon` and `benchmark/soak/Dockerfile.db`.
+- The daemon compose requires the full repo (not just `benchmark/`) because it builds from `docker/Dockerfile.daemon`.
