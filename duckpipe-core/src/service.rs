@@ -97,21 +97,10 @@ async fn ensure_coordinator_queue(
 ) -> Result<(), String> {
     let catalog_client = source_client.unwrap_or(meta.client());
 
-    // Use the RELATION message's name (`entry.nspname`/`entry.relname`) for
-    // catalog lookups, not `mapping.source_table`.  After ALTER TABLE RENAME the
-    // in-memory mapping may still carry the old name (update_source_name writes
-    // to the DB but doesn't mutate the cached mapping struct), so a lookup by
-    // `mapping.source_table` would fail to find the renamed table in pg_class.
-    let (attnames, atttypes, prefetched_pk) = if !entry.attnames.is_empty() {
-        (entry.attnames.clone(), entry.atttypes.clone(), None)
-    } else {
-        let (names, keys) =
-            crate::metadata::load_pk_metadata(catalog_client, &entry.nspname, &entry.relname)
-                .await
-                .map_err(|e| format!("load_batch_metadata: {}", e))?;
-        let types = vec![0u32; names.len()]; // unknown type → Text fallback
-        (names, types, Some(keys))
-    };
+    // The pgoutput RELATION message always populates attnames (one per column).
+    // Use them directly — no catalog fallback needed.
+    let attnames = &entry.attnames;
+    let atttypes = &entry.atttypes;
 
     // Load the *real* PK columns from pg_index on the first call, then cache.
     // With REPLICA IDENTITY FULL, pgoutput marks ALL columns as key (flags & 1),
@@ -119,22 +108,19 @@ async fn ensure_coordinator_queue(
     // `key_attrs` causes the flush DELETE WHERE clause to match on ALL columns,
     // which is both wasteful and broken for types whose SQL literal format
     // doesn't round-trip (e.g., DECIMAL, TIMESTAMP).
+    //
+    // Use the RELATION message's name (`entry.nspname`/`entry.relname`) for the
+    // pg_index lookup, not `mapping.source_table`.  After ALTER TABLE RENAME the
+    // in-memory mapping may still carry the old name (update_source_name writes
+    // to the DB but doesn't mutate the cached mapping struct), so a lookup by
+    // `mapping.source_table` would fail to find the renamed table in pg_class.
     let key_attrs = if let Some(ref cached) = pk_key_attrs_cache {
         cached.clone()
     } else {
-        let attrs = match prefetched_pk {
-            Some(pk) => pk,
-            None => {
-                let (_, a) = crate::metadata::load_pk_metadata(
-                    catalog_client,
-                    &entry.nspname,
-                    &entry.relname,
-                )
+        let (_, attrs) =
+            crate::metadata::load_pk_metadata(catalog_client, &entry.nspname, &entry.relname)
                 .await
                 .map_err(|e| format!("load_batch_metadata (pk): {}", e))?;
-                a
-            }
-        };
         // No PK → fall back to all columns as key. This ensures DELETE rows in
         // append-mode changelog carry full old-row values (via REPLICA IDENTITY
         // FULL) instead of all NULLs. Upsert mode rejects no-PK tables at
@@ -153,9 +139,9 @@ async fn ensure_coordinator_queue(
         target_key,
         mapping.id,
         mapping.applied_lsn,
-        attnames,
+        attnames.clone(),
         key_attrs,
-        atttypes,
+        atttypes.clone(),
         paused,
         mapping.source_label.clone(),
         mapping.sync_mode.clone(),
