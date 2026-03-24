@@ -25,6 +25,8 @@ test: replica_identity_full
 test: mixed_dml
 # Composite primary keys (multi-column PK UPDATE/DELETE)
 test: composite_pk
+# Partitioned source table support (publish_via_partition_root)
+test: partitioned_table
 # Large single transaction (mid-txn flush triggers)
 test: large_transaction
 # Concurrent parallel flush across 5 tables (std::thread::scope)

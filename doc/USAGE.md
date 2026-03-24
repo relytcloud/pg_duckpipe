@@ -285,6 +285,53 @@ By default, `add_table('public.orders')` creates target `public.orders_ducklake`
 SELECT duckpipe.add_table('public.orders', 'analytics.orders_columnar');
 ```
 
+## Partitioned Tables
+
+pg_duckpipe supports partitioned source tables. When you call `add_table()` on a partitioned table, it:
+
+1. **Auto-detects** the table is partitioned (`relkind = 'p'`)
+2. **Sets `publish_via_partition_root = true`** on the publication so all partition changes appear under the parent table's identity in the WAL stream
+3. **Sets `REPLICA IDENTITY FULL`** on all existing child partitions (recursive, handles multi-level partitioning)
+
+All partition data flows to a **single DuckLake target** table.
+
+```sql
+-- Works with any partitioned table
+CREATE TABLE logs (
+    id serial, log_date date NOT NULL, message text,
+    PRIMARY KEY (id, log_date)
+) PARTITION BY RANGE (log_date);
+
+CREATE TABLE logs_2024 PARTITION OF logs FOR VALUES FROM ('2024-01-01') TO ('2025-01-01');
+CREATE TABLE logs_2025 PARTITION OF logs FOR VALUES FROM ('2025-01-01') TO ('2026-01-01');
+
+SELECT duckpipe.add_table('public.logs');
+-- All data from all partitions syncs to logs_ducklake
+```
+
+### New partitions
+
+New partitions auto-inherit publication membership (PostgreSQL handles this). However, you must set REPLICA IDENTITY on new partitions manually:
+
+```sql
+CREATE TABLE logs_2026 PARTITION OF logs FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');
+ALTER TABLE logs_2026 REPLICA IDENTITY FULL;
+```
+
+### Dropping old partitions
+
+When you drop an old partition, no WAL event is generated — DuckLake data is preserved. This makes partitioned tables ideal for the log-sink pattern: ingest into PG, sync to DuckLake for analytics, drop old partitions to reclaim PG storage.
+
+### Recommended: append mode
+
+For log-style partitioned tables, use `sync_mode => 'append'` for an immutable changelog. In append mode, TRUNCATE on partitions is ignored, preserving DuckLake data:
+
+```sql
+SELECT duckpipe.add_table('public.logs', sync_mode => 'append');
+```
+
+> **Note**: In upsert mode, truncating a single partition is reported as a parent-level TRUNCATE (due to `publish_via_partition_root`), which deletes **all** data from the DuckLake target — not just the truncated partition's data.
+
 ## Daemon REST API
 
 The standalone daemon (`duckpipe`) exposes an HTTP REST API on `--api-port` (default 8080). Key endpoints:
