@@ -4,8 +4,9 @@
 
 PostgreSQL extension for real-time CDC to pg_ducklake
 
+[![CI](https://github.com/relytcloud/pg_duckpipe/actions/workflows/ci.yaml/badge.svg)](https://github.com/relytcloud/pg_duckpipe/actions/workflows/ci.yaml)
 [![dockerhub](https://img.shields.io/docker/pulls/pgducklake/pgduckpipe?logo=docker)](https://hub.docker.com/r/pgducklake/pgduckpipe)
-[![License](https://img.shields.io/badge/License-MIT-blue)](https://github.com/YuweiXIAO/pg_duckpipe/blob/main/LICENSE)
+[![License](https://img.shields.io/badge/License-MIT-blue)](https://github.com/relytcloud/pg_duckpipe/blob/main/LICENSE)
 
 </div>
 
@@ -60,7 +61,7 @@ SELECT source_table, state, rows_synced FROM duckpipe.status();
 
 > The Docker image ships everything preconfigured. The notes below apply when installing from source.
 
-- **PostgreSQL 18** — currently the only tested version; older versions may work but are unsupported
+- **PostgreSQL 17 or 18** (tested in CI)
 - **pg_ducklake** (which bundles pg_duckdb and libduckdb) must be installed
 - `wal_level = logical` with sufficient `max_replication_slots` and `max_wal_senders`
 - Both extensions must be preloaded: `shared_preload_libraries = 'pg_duckdb, pg_duckpipe'`
@@ -84,6 +85,16 @@ Full breakdown (flush latency, phase timing, snapshot per-table, WAL cycles): [b
 ./benchmark/suite/bench_suite.sh --duration 10  # Quick smoke test
 ```
 
+## Architecture
+
+![pg_duckpipe pipeline](images/pipeline.png)
+
+pg_duckpipe streams WAL changes through a decoupled producer-consumer pipeline:
+
+- **Sync groups**: each group runs as an isolated bgworker process with its own replication slot — a slow table in one group cannot affect another
+- **Per-table flush threads**: each table gets a dedicated OS thread that drains its change queue and writes to DuckLake via DuckDB, enabling parallel flushes across tables
+- **Backpressure**: when queued changes exceed a threshold, the WAL consumer pauses until flush threads catch up, bounding memory usage
+
 ## Build & Test
 
 ### With Claude Code
@@ -95,7 +106,7 @@ If you use [Claude Code](https://claude.com/claude-code):
 
 ### Manual
 
-Requires PostgreSQL 18 and pg_ducklake to be installed first. Set `PG_CONFIG` to point to your installation:
+Requires PostgreSQL 17+ and pg_ducklake to be installed first. Set `PG_CONFIG` to point to your installation:
 
 ```bash
 PG_CONFIG=/path/to/pg_config make install   # Build and install the extension
@@ -116,6 +127,3 @@ make check-regression TEST=api              # Run a single test
 | [doc/DESIGN_V2.md](doc/DESIGN_V2.md) | Historical v2 design notes |
 | [benchmark/README.md](benchmark/README.md) | Benchmark harness |
 
-## License
-
-[MIT](LICENSE)
