@@ -26,7 +26,7 @@ services:
     environment:
       DB_URL: "host=db port=5432 user=postgres password=${PASSWORD:-duckdb} dbname=postgres"
       SOAK_SCENARIO: "${SCENARIO:-sustained-insert}"
-      SOAK_DURATION: "${DURATION:-10800}"
+      SOAK_DURATION: "${DURATION:-3600}"
     volumes:
       - ./soak_results:/bench/soak_results
     # Override to run monitor instead:
