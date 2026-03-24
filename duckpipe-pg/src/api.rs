@@ -814,16 +814,32 @@ fn add_table(
         );
     }
 
-    // 5. Get source OID
-    let source_oid_sql = format!(
-        "SELECT c.oid::bigint FROM pg_class c \
+    // 5. Get source OID + relkind in one round-trip
+    let source_meta_sql = format!(
+        "SELECT c.oid::text, c.relkind::text FROM pg_class c \
          JOIN pg_namespace n ON n.oid = c.relnamespace \
          WHERE n.nspname = {} AND c.relname = {}",
         quote_literal(&schema),
         quote_literal(&table)
     );
-    let source_oid = match source.query_i64(&source_oid_sql) {
-        Ok(v) => v,
+    let (source_oid, is_partitioned) = match source.query_string_pairs(&source_meta_sql) {
+        Ok(rows) if !rows.is_empty() => {
+            let oid: i64 = rows[0].0.parse().unwrap_or_else(|e| {
+                ereport!(
+                    ERROR,
+                    PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+                    format!("Failed to parse source OID: {}", e)
+                );
+            });
+            (oid, rows[0].1 == "p")
+        }
+        Ok(_) => {
+            ereport!(
+                ERROR,
+                PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+                format!("table {}.{} not found in pg_class", schema, table)
+            );
+        }
         Err(e) => {
             ereport!(
                 ERROR,
@@ -832,6 +848,64 @@ fn add_table(
             );
         }
     };
+
+    if is_partitioned {
+        // Set publish_via_partition_root so pgoutput reports all partition changes
+        // under the parent table's identity. Idempotent and harmless for
+        // non-partitioned tables already in the publication.
+        let set_pub_sql = format!(
+            "ALTER PUBLICATION {} SET (publish_via_partition_root = true)",
+            quote_ident(&publication)
+        );
+        if let Err(e) = source.execute(&set_pub_sql) {
+            ereport!(
+                ERROR,
+                PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+                format!("Failed to set publish_via_partition_root: {}", e)
+            );
+        }
+
+        // Set REPLICA IDENTITY FULL on all child partitions in a single DO block
+        // (one round-trip even for remote sources). The parent ALTER (step 4) only
+        // affects the parent catalog entry — pgoutput checks the partition that
+        // holds the physical row.
+        let do_block = format!(
+            "DO $duckpipe$ \
+             DECLARE r RECORD; \
+             BEGIN \
+               FOR r IN \
+                 WITH RECURSIVE parts AS ( \
+                   SELECT inhrelid FROM pg_inherits WHERE inhparent = {} \
+                   UNION ALL \
+                   SELECT i.inhrelid FROM pg_inherits i \
+                   JOIN parts p ON i.inhparent = p.inhrelid \
+                 ) \
+                 SELECT n.nspname, c.relname \
+                 FROM parts p \
+                 JOIN pg_class c ON c.oid = p.inhrelid \
+                 JOIN pg_namespace n ON n.oid = c.relnamespace \
+               LOOP \
+                 EXECUTE format('ALTER TABLE %I.%I REPLICA IDENTITY FULL', r.nspname, r.relname); \
+               END LOOP; \
+             END $duckpipe$",
+            source_oid
+        );
+        if let Err(e) = source.execute(&do_block) {
+            ereport!(
+                ERROR,
+                PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+                format!(
+                    "Failed to set REPLICA IDENTITY FULL on partitions of {}.{}: {}",
+                    schema, table, e
+                )
+            );
+        }
+
+        notice!(
+            "Partitioned table {}.{}: set publish_via_partition_root and REPLICA IDENTITY FULL on partitions",
+            schema, table
+        );
+    }
 
     // 6. Column definitions (introspect for both local and remote — needed for PG→DuckDB type mapping)
     let col_defs: Vec<(String, String)> = {
