@@ -1,0 +1,28 @@
+# Debug override: from-source build with core dumps and gdb.
+# Usage:
+#   docker compose -f docker-compose.soak.yml -f docker-compose.soak-debug.yml up -d --build
+services:
+  db:
+    image: !reset null
+    build:
+      context: ../..
+      dockerfile: benchmark/soak/Dockerfile.db
+    command: >-
+      -c shared_preload_libraries=pg_duckdb,pg_ducklake,pg_duckpipe
+      -c wal_level=logical
+      -c max_replication_slots=10
+      -c max_wal_senders=10
+      -c duckdb.unsafe_allow_mixed_transactions=on
+    cap_add:
+      - SYS_PTRACE
+    ulimits:
+      core:
+        soft: -1
+        hard: -1
+    volumes:
+      - soak_pgdata:/var/lib/postgresql
+      - soak_coredumps:/var/coredumps
+    restart: unless-stopped
+
+volumes:
+  soak_coredumps:

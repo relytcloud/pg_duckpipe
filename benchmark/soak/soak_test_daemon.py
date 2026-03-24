@@ -35,6 +35,10 @@ from lib import (
 from soak_test import (
     SoakState,
     SCENARIOS,
+    CSV_FIELDS,
+    aggregate_shm_metrics,
+    update_state_metrics,
+    build_metrics_row,
     run_sysbench_continuous,
     consistency_loop,
     display_loop,
@@ -74,22 +78,6 @@ def http_post(url, data=None, timeout=30):
         return 0, {'error': str(e)}
 
 
-def http_delete(url, timeout=30):
-    """HTTP DELETE, return (status_code, parsed JSON or None)."""
-    try:
-        req = urllib.request.Request(url, method='DELETE')
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.status, json.loads(resp.read().decode())
-    except urllib.error.HTTPError as e:
-        resp_body = e.read().decode() if e.fp else ''
-        try:
-            return e.code, json.loads(resp_body)
-        except (json.JSONDecodeError, ValueError):
-            return e.code, {'error': resp_body}
-    except Exception as e:
-        return 0, {'error': str(e)}
-
-
 # ==============================================================================
 # Daemon API Wrappers
 # ==============================================================================
@@ -102,27 +90,6 @@ def wait_for_daemon(daemon_url, timeout=120):
         if data and data.get('status') == 'ok':
             return True
         time.sleep(1)
-    return False
-
-
-def daemon_create_group(daemon_url, name):
-    """Create a sync group via REST API."""
-    code, data = http_post(f"{daemon_url}/groups", {"name": name})
-    if code == 200:
-        return True
-    print(f"[!] Failed to create group '{name}': {code} {data}")
-    return False
-
-
-def daemon_add_table(daemon_url, source_table, copy_data=True):
-    """Add a table via REST API."""
-    code, data = http_post(f"{daemon_url}/tables", {
-        "source_table": source_table,
-        "copy_data": copy_data,
-    })
-    if code == 200:
-        return True
-    print(f"[!] Failed to add table '{source_table}': {code} {data}")
     return False
 
 
@@ -344,92 +311,25 @@ def monitor_loop_daemon(state, db_params, daemon_url, args, csv_writer, csv_file
                 })
 
             # --- Daemon API: GET /metrics ---
-            total_mem = 0
-            total_flushes = 0
-            flush_durations = []
-            metrics = daemon_get_metrics(daemon_url)
-            if metrics and 'tables' in metrics:
-                for t in metrics['tables']:
-                    total_mem += t.get('duckdb_memory_bytes', 0)
-                    total_flushes += t.get('flush_count', 0)
-                    fd = t.get('flush_duration_ms', 0)
-                    if fd > 0:
-                        flush_durations.append(fd)
+            total_mem, total_flushes, flush_durations = aggregate_shm_metrics(
+                daemon_get_metrics(daemon_url)
+            )
 
             # --- SQL: WAL lag + slot size (only 2 SQL calls) ---
             wal_lag = get_total_lag_bytes(db_params)
             slot_wal = get_wal_slot_size_bytes(db_params)
 
-            # Compute sync rate
-            with state.lock:
-                delta = total_rows - state.prev_rows_synced
-                rate = delta / poll_interval if poll_interval > 0 else 0
-                state.sync_rate = rate
-                state.prev_rows_synced = total_rows
-
-                state.wal_lag_bytes = wal_lag
-                state.queued_changes = queued
-                state.is_backpressured = bp
-                state.slot_retained_wal_bytes = slot_wal
-                state.total_rows_synced = total_rows
-                state.table_statuses = table_statuses
-
-                # SHM metrics
-                state.total_duckdb_memory_bytes = total_mem
-                flush_delta = total_flushes - state.prev_flush_count
-                state.flush_rate = flush_delta / poll_interval if poll_interval > 0 else 0
-                state.prev_flush_count = total_flushes
-                state.total_flush_count = total_flushes
-                state.avg_flush_duration_ms = (
-                    sum(flush_durations) / len(flush_durations) if flush_durations else 0
-                )
-
-                if wal_lag > state.peak_lag_bytes:
-                    state.peak_lag_bytes = wal_lag
-                state.lag_samples.append(wal_lag)
-
-                if elapsed > poll_interval:
-                    state.avg_sync_rate = total_rows / elapsed
-
-            # Count states
-            streaming = sum(1 for t in table_statuses if t['state'] == 'STREAMING')
-            errored = sum(1 for t in table_statuses if t['state'] == 'ERRORED')
-            snapshot = sum(1 for t in table_statuses if t['state'] == 'SNAPSHOT')
-            catchup = sum(1 for t in table_statuses if t['state'] == 'CATCHUP')
-            max_failures = max((t['consecutive_failures'] for t in table_statuses), default=0)
-
-            with state.lock:
-                last_check = state.consistency_checks[-1] if state.consistency_checks else None
-                consistency_result = last_check[1] if last_check else ""
-                event_str = state.events[-1][1] if state.events else ""
+            # Update shared state
+            delta, rate = update_state_metrics(
+                state, total_rows, total_mem, total_flushes, flush_durations,
+                wal_lag, queued, bp, slot_wal, table_statuses, poll_interval, elapsed,
+            )
 
             # Write CSV row
-            ts = datetime.datetime.now().isoformat()
-            row = {
-                'timestamp': ts,
-                'elapsed_s': f"{elapsed:.0f}",
-                'sysbench_tps': f"{state.sysbench_tps:.1f}",
-                'total_rows_synced': total_rows,
-                'rows_synced_delta': delta,
-                'sync_rate_rows_s': f"{rate:.0f}",
-                'wal_lag_bytes': wal_lag,
-                'wal_lag_mb': f"{wal_lag / 1048576:.2f}",
-                'queued_changes': queued,
-                'is_backpressured': bp,
-                'slot_retained_wal_bytes': slot_wal,
-                'duckdb_memory_bytes': total_mem,
-                'duckdb_memory_mb': f"{total_mem / 1048576:.1f}",
-                'flush_count': total_flushes,
-                'flush_rate_s': f"{state.flush_rate:.1f}",
-                'avg_flush_duration_ms': f"{state.avg_flush_duration_ms:.0f}",
-                'tables_streaming': streaming,
-                'tables_errored': errored,
-                'tables_snapshot': snapshot,
-                'tables_catchup': catchup,
-                'max_consecutive_failures': max_failures,
-                'consistency_check_result': consistency_result,
-                'event': event_str,
-            }
+            row = build_metrics_row(
+                state, total_rows, delta, rate, wal_lag, queued, bp, slot_wal,
+                total_mem, total_flushes, table_statuses, elapsed,
+            )
             csv_writer.writerow(row)
             csv_file.flush()
 
@@ -529,17 +429,8 @@ def main():
 
     # Open CSV
     csv_path = os.path.join(args.output_dir, "metrics.csv")
-    csv_fields = [
-        'timestamp', 'elapsed_s', 'sysbench_tps', 'total_rows_synced',
-        'rows_synced_delta', 'sync_rate_rows_s', 'wal_lag_bytes', 'wal_lag_mb',
-        'queued_changes', 'is_backpressured', 'slot_retained_wal_bytes',
-        'duckdb_memory_bytes', 'duckdb_memory_mb', 'flush_count',
-        'flush_rate_s', 'avg_flush_duration_ms',
-        'tables_streaming', 'tables_errored', 'tables_snapshot', 'tables_catchup',
-        'max_consecutive_failures', 'consistency_check_result', 'event',
-    ]
     csv_file = open(csv_path, 'w', newline='')
-    csv_writer = csv.DictWriter(csv_file, fieldnames=csv_fields)
+    csv_writer = csv.DictWriter(csv_file, fieldnames=CSV_FIELDS)
     csv_writer.writeheader()
 
     # Events log
