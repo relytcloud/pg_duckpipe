@@ -659,14 +659,20 @@ def prepare(db_params, args):
             sys.exit(1)
 
 
-def final_consistency_check(state, db_params, args):
-    """Wait for catch-up and run a final consistency check."""
+def final_consistency_check(state, db_params, args, get_queued=None):
+    """Wait for catch-up and run a final consistency check.
+
+    get_queued: callable returning current queued change count.
+                Defaults to SQL-based get_total_queued_changes(db_params).
+    """
+    if get_queued is None:
+        get_queued = lambda: get_total_queued_changes(db_params)
+
     state.add_event("Final: waiting for catch-up...")
 
     deadline = time.time() + 300
     while time.time() < deadline:
-        queued = get_total_queued_changes(db_params)
-        if queued == 0:
+        if get_queued() == 0:
             break
         time.sleep(2)
 

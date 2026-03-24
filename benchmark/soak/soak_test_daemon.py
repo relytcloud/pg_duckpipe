@@ -30,7 +30,6 @@ from lib import (
     get_total_lag_bytes,
     get_wal_slot_size_bytes,
     wait_for_db_ready,
-    verify_table_consistency_full,
 )
 from soak_test import (
     SoakState,
@@ -43,6 +42,7 @@ from soak_test import (
     consistency_loop,
     display_loop,
     format_duration,
+    final_consistency_check,
 )
 
 # ==============================================================================
@@ -346,32 +346,13 @@ def monitor_loop_daemon(state, db_params, daemon_url, args, csv_writer, csv_file
 # Final Consistency (Daemon Mode)
 # ==============================================================================
 
-def final_consistency_check_daemon(state, db_params, daemon_url, args):
-    """Wait for daemon queues to drain, then run final consistency check."""
-    state.add_event("Final: waiting for catch-up...")
-
-    deadline = time.time() + 300
-    while time.time() < deadline:
-        status = daemon_get_status(daemon_url)
-        if status:
-            worker = status.get('worker') or {}
-            queued = worker.get('total_queued_changes', 0)
-            if queued == 0:
-                break
-        time.sleep(2)
-
-    time.sleep(5)
-
-    state.add_event("Final: running consistency check...")
-    mismatches = verify_table_consistency_full(db_params, args.tables)
-    result = "PASS" if not mismatches else f"FAIL ({len(mismatches)} mismatches)"
-
-    with state.lock:
-        state.consistency_checks.append(("final", result, mismatches))
-        state.last_consistency_time = time.time()
-
-    state.add_event(f"Final consistency: {result}")
-    return result, mismatches
+def _daemon_get_queued(daemon_url):
+    """Get queued change count via daemon REST API."""
+    status = daemon_get_status(daemon_url)
+    if status:
+        worker = (status.get('worker') or {})
+        return worker.get('total_queued_changes', 0)
+    return 1  # non-zero to keep waiting
 
 
 # ==============================================================================
@@ -497,8 +478,9 @@ def main():
     print("\n\n[*] Shutting down...")
 
     # Final consistency check (via daemon API for queue drain)
-    final_result, final_mismatches = final_consistency_check_daemon(
-        state, db_params, daemon_url, args
+    final_result, final_mismatches = final_consistency_check(
+        state, db_params, args,
+        get_queued=lambda: _daemon_get_queued(daemon_url),
     )
 
     # Write events log
