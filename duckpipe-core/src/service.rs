@@ -99,12 +99,12 @@ async fn ensure_coordinator_queue(
 
     // The pgoutput RELATION message always populates attnames (one per column).
     // Use them directly — no catalog fallback needed.
-    debug_assert!(
-        !entry.attnames.is_empty(),
-        "RELATION message for {}.{} has no columns",
-        entry.nspname,
-        entry.relname
-    );
+    if entry.attnames.is_empty() {
+        return Err(format!(
+            "RELATION message for {}.{} has no columns",
+            entry.nspname, entry.relname
+        ));
+    }
     let attnames = &entry.attnames;
     let atttypes = &entry.atttypes;
 
