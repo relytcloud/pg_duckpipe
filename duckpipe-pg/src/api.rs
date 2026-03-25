@@ -1944,43 +1944,6 @@ fn status() -> TableIterator<
 }
 
 #[pg_extern(sql = "
-CREATE FUNCTION duckpipe.set_routing(source_table TEXT, enabled BOOLEAN)
-RETURNS void
-AS 'MODULE_PATHNAME', '@FUNCTION_NAME@'
-LANGUAGE C STRICT;
-REVOKE ALL ON FUNCTION duckpipe.set_routing(TEXT, BOOLEAN) FROM PUBLIC;
-")]
-fn set_routing(source_table: &str, enabled: bool) {
-    let (schema, table) = parse_source_table(source_table);
-
-    Spi::connect_mut(|client| {
-        let args = unsafe {
-            [
-                DatumWithOid::new(enabled, PgBuiltInOids::BOOLOID.value()),
-                DatumWithOid::new(schema.as_str(), PgBuiltInOids::TEXTOID.value()),
-                DatumWithOid::new(table.as_str(), PgBuiltInOids::TEXTOID.value()),
-            ]
-        };
-        let result = client
-            .update(
-                "UPDATE duckpipe.table_mappings \
-                 SET config = config || jsonb_build_object('routing_enabled', $1::boolean) \
-                 WHERE source_schema = $2 AND source_table = $3",
-                None,
-                &args,
-            )
-            .expect("failed to update routing_enabled");
-        if result.len() == 0 {
-            pgrx::error!(
-                "table {}.{} not found in duckpipe.table_mappings",
-                schema,
-                table
-            );
-        }
-    });
-}
-
-#[pg_extern(sql = "
 CREATE FUNCTION duckpipe.set_table_config(
     source_table TEXT,
     key TEXT,

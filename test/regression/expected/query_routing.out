@@ -188,9 +188,9 @@ NOTICE:  duckpipe: routing public.qr_customers → public.qr_customers_ducklake
 -- =======================================================================
 SET duckpipe.query_routing = 'on';
 -- Disable routing for this table
-SELECT duckpipe.set_routing('public.qr_orders', false);
- set_routing 
--------------
+SELECT duckpipe.set_table_config('public.qr_orders', 'routing_enabled', 'false');
+ set_table_config 
+------------------
  
 (1 row)
 
@@ -225,9 +225,9 @@ SELECT count(*) AS disabled_count FROM qr_orders;
 (1 row)
 
 -- Re-enable routing
-SELECT duckpipe.set_routing('public.qr_orders', true);
- set_routing 
--------------
+SELECT duckpipe.set_table_config('public.qr_orders', 'routing_enabled', 'true');
+ set_table_config 
+------------------
  
 (1 row)
 

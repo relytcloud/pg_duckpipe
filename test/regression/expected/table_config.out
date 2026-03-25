@@ -74,10 +74,10 @@ SELECT duckpipe.get_table_config('tc_orders', 'routing_enabled');
  false
 (1 row)
 
--- 5. set_routing() backward compat writes to config JSONB
-SELECT duckpipe.set_routing('tc_orders', true);
- set_routing 
--------------
+-- 5. Re-enable routing via set_table_config
+SELECT duckpipe.set_table_config('tc_orders', 'routing_enabled', 'true');
+ set_table_config 
+------------------
  
 (1 row)
 

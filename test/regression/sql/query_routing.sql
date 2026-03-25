@@ -111,7 +111,7 @@ JOIN qr_customers c ON c.order_id = o.id;
 SET duckpipe.query_routing = 'on';
 
 -- Disable routing for this table
-SELECT duckpipe.set_routing('public.qr_orders', false);
+SELECT duckpipe.set_table_config('public.qr_orders', 'routing_enabled', 'false');
 
 -- Wait for routing cache to expire (TTL=5s)
 SELECT pg_sleep(6);
@@ -128,7 +128,7 @@ WHERE source_table = 'public.qr_orders';
 SELECT count(*) AS disabled_count FROM qr_orders;
 
 -- Re-enable routing
-SELECT duckpipe.set_routing('public.qr_orders', true);
+SELECT duckpipe.set_table_config('public.qr_orders', 'routing_enabled', 'true');
 
 -- Wait for routing cache to expire (TTL=5s)
 SELECT pg_sleep(6);

@@ -497,7 +497,7 @@ struct RoutingEntry {
 
 /// Cache TTL in seconds.  The SPI refresh is cheap (~1ms catalog lookup)
 /// but we avoid running it on every query.  5s is a good balance between
-/// responsiveness (set_routing takes effect within 5s) and overhead.
+/// responsiveness (set_table_config takes effect within 5s) and overhead.
 const CACHE_TTL_SECS: u64 = 5;
 
 static mut ROUTING_CACHE: RoutingCache = RoutingCache {

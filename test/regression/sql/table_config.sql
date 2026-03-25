@@ -25,8 +25,8 @@ SELECT duckpipe.get_table_config('tc_orders', 'flush_interval_ms');
 SELECT duckpipe.set_table_config('tc_orders', 'routing_enabled', 'false');
 SELECT duckpipe.get_table_config('tc_orders', 'routing_enabled');
 
--- 5. set_routing() backward compat writes to config JSONB
-SELECT duckpipe.set_routing('tc_orders', true);
+-- 5. Re-enable routing via set_table_config
+SELECT duckpipe.set_table_config('tc_orders', 'routing_enabled', 'true');
 SELECT duckpipe.get_table_config('tc_orders', 'routing_enabled');
 
 -- 6. Verify tables() shows routing_enabled from config
