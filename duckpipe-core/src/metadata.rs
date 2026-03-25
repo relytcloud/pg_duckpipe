@@ -2,9 +2,45 @@
 
 use std::collections::HashMap;
 
-use tokio_postgres::Client;
+use tokio_postgres::{Client, Row};
 
-use crate::types::{format_lsn, parse_lsn, GroupConfig, GroupMode, SyncGroup, TableMapping};
+use crate::types::{
+    format_lsn, parse_lsn, GroupConfig, GroupMode, SyncGroup, TableConfig, TableMapping,
+};
+
+/// Parse a `tokio_postgres::Row` from the standard 14-column TableMapping SELECT into a `TableMapping`.
+/// Column order: id, source_schema, source_table, target_schema, target_table,
+///               state, snapshot_lsn::text, enabled, source_oid, error_message,
+///               applied_lsn::text, source_label, sync_mode, config::text
+fn table_mapping_from_row(row: &Row) -> TableMapping {
+    TableMapping {
+        id: row.get(0),
+        source_schema: row.get(1),
+        source_table: row.get(2),
+        target_schema: row.get(3),
+        target_table: row.get(4),
+        state: row.get(5),
+        snapshot_lsn: row
+            .get::<_, Option<String>>(6)
+            .map(|s| parse_lsn(&s))
+            .unwrap_or(0),
+        enabled: row.get(7),
+        source_oid: row.get(8),
+        error_message: row.get(9),
+        applied_lsn: row
+            .get::<_, Option<String>>(10)
+            .map(|s| parse_lsn(&s))
+            .unwrap_or(0),
+        source_label: row.get::<_, Option<String>>(11).unwrap_or_default(),
+        sync_mode: row
+            .get::<_, Option<String>>(12)
+            .unwrap_or_else(|| "upsert".to_string()),
+        config: row
+            .get::<_, Option<String>>(13)
+            .and_then(|s| TableConfig::from_json_str(&s).ok())
+            .unwrap_or_default(),
+    }
+}
 
 /// Maximum consecutive failures before transitioning to ERRORED with backoff.
 pub const ERRORED_THRESHOLD: i32 = 3;
@@ -134,7 +170,7 @@ impl<'a> MetadataClient<'a> {
             .query(
                 "SELECT id, source_schema, source_table, target_schema, target_table, \
                  state, snapshot_lsn::text, enabled, source_oid, error_message, \
-                 applied_lsn::text, source_label, sync_mode \
+                 applied_lsn::text, source_label, sync_mode, config::text \
                  FROM duckpipe.table_mappings \
                  WHERE group_id = $1 AND source_schema = $2 AND source_table = $3",
                 &[&group_id, &schema, &table],
@@ -145,40 +181,7 @@ impl<'a> MetadataClient<'a> {
             return Ok(None);
         }
 
-        let row = &rows[0];
-        let id: i32 = row.get(0);
-        let source_schema: String = row.get(1);
-        let source_table: String = row.get(2);
-        let target_schema: String = row.get(3);
-        let target_table: String = row.get(4);
-        let state: String = row.get(5);
-        let snapshot_lsn_str: Option<String> = row.get(6);
-        let snapshot_lsn = snapshot_lsn_str.map(|s| parse_lsn(&s)).unwrap_or(0);
-        let enabled: bool = row.get(7);
-        let source_oid: Option<i64> = row.get(8);
-        let error_message: Option<String> = row.get(9);
-        let applied_lsn_str: Option<String> = row.get(10);
-        let applied_lsn = applied_lsn_str.map(|s| parse_lsn(&s)).unwrap_or(0);
-        let source_label: String = row.get::<_, Option<String>>(11).unwrap_or_default();
-        let sync_mode: String = row
-            .get::<_, Option<String>>(12)
-            .unwrap_or_else(|| "upsert".to_string());
-
-        Ok(Some(TableMapping {
-            id,
-            source_schema,
-            source_table,
-            target_schema,
-            target_table,
-            state,
-            snapshot_lsn,
-            applied_lsn,
-            enabled,
-            source_oid,
-            error_message,
-            source_label,
-            sync_mode,
-        }))
+        Ok(Some(table_mapping_from_row(&rows[0])))
     }
 
     /// Transition a table to ERRORED state with an error message.
@@ -307,7 +310,7 @@ impl<'a> MetadataClient<'a> {
             .query(
                 "SELECT id, source_schema, source_table, target_schema, target_table, \
                  state, snapshot_lsn::text, enabled, source_oid, error_message, \
-                 applied_lsn::text, source_label, sync_mode \
+                 applied_lsn::text, source_label, sync_mode, config::text \
                  FROM duckpipe.table_mappings \
                  WHERE group_id = $1 AND state = 'ERRORED' AND enabled = true \
                  AND retry_at IS NOT NULL AND retry_at <= now()",
@@ -315,32 +318,7 @@ impl<'a> MetadataClient<'a> {
             )
             .await?;
 
-        Ok(rows
-            .iter()
-            .map(|row| TableMapping {
-                id: row.get(0),
-                source_schema: row.get(1),
-                source_table: row.get(2),
-                target_schema: row.get(3),
-                target_table: row.get(4),
-                state: row.get(5),
-                snapshot_lsn: row
-                    .get::<_, Option<String>>(6)
-                    .map(|s| parse_lsn(&s))
-                    .unwrap_or(0),
-                applied_lsn: row
-                    .get::<_, Option<String>>(10)
-                    .map(|s| parse_lsn(&s))
-                    .unwrap_or(0),
-                enabled: row.get(7),
-                source_oid: row.get(8),
-                error_message: row.get(9),
-                source_label: row.get::<_, Option<String>>(11).unwrap_or_default(),
-                sync_mode: row
-                    .get::<_, Option<String>>(12)
-                    .unwrap_or_else(|| "upsert".to_string()),
-            })
-            .collect())
+        Ok(rows.iter().map(table_mapping_from_row).collect())
     }
 
     /// Auto-retry: transition ERRORED table back to SNAPSHOT (if never snapshotted) or
@@ -407,7 +385,7 @@ impl<'a> MetadataClient<'a> {
             .query(
                 "SELECT id, source_schema, source_table, target_schema, target_table, \
                  state, snapshot_lsn::text, enabled, source_oid, error_message, \
-                 applied_lsn::text, source_label, sync_mode \
+                 applied_lsn::text, source_label, sync_mode, config::text \
                  FROM duckpipe.table_mappings \
                  WHERE group_id = $1 AND source_oid = $2",
                 &[&group_id, &source_oid],
@@ -418,30 +396,7 @@ impl<'a> MetadataClient<'a> {
             return Ok(None);
         }
 
-        let row = &rows[0];
-        Ok(Some(TableMapping {
-            id: row.get(0),
-            source_schema: row.get(1),
-            source_table: row.get(2),
-            target_schema: row.get(3),
-            target_table: row.get(4),
-            state: row.get(5),
-            snapshot_lsn: row
-                .get::<_, Option<String>>(6)
-                .map(|s| parse_lsn(&s))
-                .unwrap_or(0),
-            applied_lsn: row
-                .get::<_, Option<String>>(10)
-                .map(|s| parse_lsn(&s))
-                .unwrap_or(0),
-            enabled: row.get(7),
-            source_oid: row.get(8),
-            error_message: row.get(9),
-            source_label: row.get::<_, Option<String>>(11).unwrap_or_default(),
-            sync_mode: row
-                .get::<_, Option<String>>(12)
-                .unwrap_or_else(|| "upsert".to_string()),
-        }))
+        Ok(Some(table_mapping_from_row(&rows[0])))
     }
 
     /// Update per-table applied_lsn after a successful flush.

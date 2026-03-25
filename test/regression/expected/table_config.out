@@ -1,0 +1,181 @@
+-- Test per-table configuration system
+-- Tests config CRUD, validation, and 4-tier resolution (defaults ← global ← group ← table).
+-- Requires a table already added to duckpipe (uses the default sync group).
+-- Setup: create and add a test table
+CREATE TABLE tc_orders (id INT PRIMARY KEY, amount INT);
+SELECT duckpipe.add_table('tc_orders');
+ add_table 
+-----------
+ 
+(1 row)
+
+SELECT pg_sleep(0.5);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+-- 1. get_table_config() returns JSON with all table config keys
+SELECT duckpipe.get_table_config('tc_orders')::jsonb ? 'routing_enabled' AS has_routing;
+ has_routing 
+-------------
+ t
+(1 row)
+
+SELECT duckpipe.get_table_config('tc_orders')::jsonb ? 'flush_interval_ms' AS has_flush_interval;
+ has_flush_interval 
+--------------------
+ t
+(1 row)
+
+-- 2. get_table_config(key) returns resolved values
+SELECT duckpipe.get_table_config('tc_orders', 'routing_enabled');
+ get_table_config 
+------------------
+ true
+(1 row)
+
+-- flush_interval_ms should match the global config (may differ from hardcoded default)
+SELECT duckpipe.get_table_config('tc_orders', 'flush_interval_ms') = duckpipe.get_config('flush_interval_ms') AS flush_matches_global;
+ flush_matches_global 
+----------------------
+ t
+(1 row)
+
+SELECT duckpipe.get_table_config('tc_orders', 'duckdb_threads') = duckpipe.get_config('duckdb_threads') AS threads_matches_global;
+ threads_matches_global 
+------------------------
+ t
+(1 row)
+
+-- 3. set_table_config() persists int key
+SELECT duckpipe.set_table_config('tc_orders', 'flush_interval_ms', '2000');
+ set_table_config 
+------------------
+ 
+(1 row)
+
+SELECT duckpipe.get_table_config('tc_orders', 'flush_interval_ms');
+ get_table_config 
+------------------
+ 2000
+(1 row)
+
+-- 4. set_table_config() persists bool key
+SELECT duckpipe.set_table_config('tc_orders', 'routing_enabled', 'false');
+ set_table_config 
+------------------
+ 
+(1 row)
+
+SELECT duckpipe.get_table_config('tc_orders', 'routing_enabled');
+ get_table_config 
+------------------
+ false
+(1 row)
+
+-- 5. set_routing() backward compat writes to config JSONB
+SELECT duckpipe.set_routing('tc_orders', true);
+ set_routing 
+-------------
+ 
+(1 row)
+
+SELECT duckpipe.get_table_config('tc_orders', 'routing_enabled');
+ get_table_config 
+------------------
+ true
+(1 row)
+
+-- 6. Verify tables() shows routing_enabled from config
+SELECT source_table, routing_enabled FROM duckpipe.tables()
+    WHERE source_table = 'public.tc_orders';
+   source_table   | routing_enabled 
+------------------+-----------------
+ public.tc_orders | t
+(1 row)
+
+-- 7. Verify status() shows routing_enabled from config
+SELECT source_table, routing_enabled FROM duckpipe.status()
+    WHERE source_table = 'public.tc_orders';
+   source_table   | routing_enabled 
+------------------+-----------------
+ public.tc_orders | t
+(1 row)
+
+-- 8. Group override flows through to table (set group, verify table sees it)
+SELECT duckpipe.set_group_config('default', 'duckdb_threads', '8');
+ set_group_config 
+------------------
+ 
+(1 row)
+
+SELECT duckpipe.get_table_config('tc_orders', 'duckdb_threads');
+ get_table_config 
+------------------
+ 8
+(1 row)
+
+-- 9. Table override takes precedence over group
+SELECT duckpipe.set_table_config('tc_orders', 'duckdb_threads', '2');
+ set_table_config 
+------------------
+ 
+(1 row)
+
+SELECT duckpipe.get_table_config('tc_orders', 'duckdb_threads');
+ get_table_config 
+------------------
+ 2
+(1 row)
+
+-- 10. Verify config column has the overrides
+SELECT config FROM duckpipe.table_mappings
+    WHERE source_table = 'tc_orders';
+                                  config                                   
+---------------------------------------------------------------------------
+ {"duckdb_threads": 2, "routing_enabled": true, "flush_interval_ms": 2000}
+(1 row)
+
+-- 11. Invalid key errors
+DO $$ BEGIN PERFORM duckpipe.set_table_config('tc_orders', 'nonexistent_key', '123'); EXCEPTION WHEN OTHERS THEN RAISE NOTICE 'set_table_config: got expected error'; END $$;
+NOTICE:  set_table_config: got expected error
+-- 12. Invalid value errors
+SELECT duckpipe.set_table_config('tc_orders', 'flush_interval_ms', 'not_a_number');
+ERROR:  'flush_interval_ms' must be an integer, got 'not_a_number'
+SELECT duckpipe.set_table_config('tc_orders', 'flush_interval_ms', '-1');
+ERROR:  'flush_interval_ms' must be positive, got -1
+SELECT duckpipe.set_table_config('tc_orders', 'routing_enabled', 'maybe');
+ERROR:  'routing_enabled' must be true or false, got 'maybe'
+-- 13. Nonexistent table errors
+DO $$ BEGIN PERFORM duckpipe.set_table_config('nonexistent_table', 'duckdb_threads', '2'); EXCEPTION WHEN OTHERS THEN RAISE NOTICE 'set_table_config: got expected error for nonexistent'; END $$;
+NOTICE:  set_table_config: got expected error for nonexistent
+-- 14. Resolved JSON shows all keys with correct resolution
+SELECT duckpipe.get_table_config('tc_orders')::jsonb->>'duckdb_threads' AS threads;
+ threads 
+---------
+ 2
+(1 row)
+
+SELECT duckpipe.get_table_config('tc_orders')::jsonb->>'flush_interval_ms' AS flush_ms;
+ flush_ms 
+----------
+ 2000
+(1 row)
+
+-- Cleanup
+SELECT duckpipe.remove_table('tc_orders');
+WARNING:  Group 'default' has no remaining tables — its replication slot is still holding WAL. Run SELECT duckpipe.drop_group('default') to release it.
+ remove_table 
+--------------
+ 
+(1 row)
+
+SELECT pg_sleep(0.5);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+UPDATE duckpipe.sync_groups SET config = '{}'::jsonb WHERE name = 'default';
+DROP TABLE tc_orders CASCADE;

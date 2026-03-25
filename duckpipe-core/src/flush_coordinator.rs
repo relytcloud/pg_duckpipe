@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use crate::duckdb_flush::FlushWorker;
 use crate::flush_worker;
 use crate::metadata::ERRORED_THRESHOLD;
-use crate::types::{Change, ResolvedConfig};
+use crate::types::{Change, ResolvedConfig, TableConfig};
 
 /// In-memory group-level metrics from FlushCoordinator.
 #[derive(Clone, Copy, Default)]
@@ -410,6 +410,7 @@ impl FlushCoordinator {
         paused: bool,
         source_label: String,
         sync_mode: String,
+        table_config: &TableConfig,
     ) {
         // Seed in-memory LSN from the persistent PG value if we haven't seen this table yet.
         // `or_insert` preserves any higher value already tracked from a completed flush.
@@ -477,9 +478,10 @@ impl FlushCoordinator {
         let group_name = self.group_name.clone();
         let bp = Arc::clone(&self.backpressure);
         let fg = Arc::clone(&self.flush_gate);
-        let batch_threshold = self.resolved_config.flush_batch_threshold as usize;
-        let interval_ms = self.resolved_config.flush_interval_ms as u64;
-        let resolved_config = self.resolved_config.clone();
+        let effective_config = self.resolved_config.resolve_for_table(table_config);
+        let batch_threshold = effective_config.flush_batch_threshold as usize;
+        let interval_ms = effective_config.flush_interval_ms as u64;
+        let resolved_config = effective_config;
         let temp_dir = self.temp_base_dir.join(format!("m{}", mapping_id));
 
         let join_handle = std::thread::Builder::new()

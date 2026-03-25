@@ -524,7 +524,7 @@ impl RoutingCache {
         let mut entries = HashMap::new();
 
         // Single SPI query: OID mappings + PK columns via LEFT JOIN.
-        // Fetches STREAMING, enabled, routing_enabled tables with their PK attnums.
+        // Fetches STREAMING, enabled tables with routing_enabled from config JSONB.
         let rows: Vec<(i64, i64, Option<i16>)> = Spi::connect(|client| {
             let mut result_rows = Vec::new();
             let result = client.select(
@@ -539,7 +539,8 @@ impl RoutingCache {
                      FROM pg_index i \
                      WHERE i.indisprimary AND i.indrelid = tm.source_oid::oid \
                  ) pk ON true \
-                 WHERE tm.state = 'STREAMING' AND tm.enabled AND tm.routing_enabled \
+                 WHERE tm.state = 'STREAMING' AND tm.enabled \
+                   AND COALESCE((tm.config->>'routing_enabled')::boolean, true) \
                    AND tm.source_oid IS NOT NULL",
                 None,
                 &[],
