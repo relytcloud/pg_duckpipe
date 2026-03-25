@@ -29,12 +29,12 @@ SELECT duckpipe.get_table_config('tc_orders', 'routing_enabled');
 SELECT duckpipe.set_table_config('tc_orders', 'routing_enabled', 'true');
 SELECT duckpipe.get_table_config('tc_orders', 'routing_enabled');
 
--- 6. Verify tables() shows routing_enabled from config
-SELECT source_table, routing_enabled FROM duckpipe.tables()
+-- 6. Verify tables() works (routing_enabled is now in get_table_config only)
+SELECT source_table, enabled FROM duckpipe.tables()
     WHERE source_table = 'public.tc_orders';
 
--- 7. Verify status() shows routing_enabled from config
-SELECT source_table, routing_enabled FROM duckpipe.status()
+-- 7. Verify status() works
+SELECT source_table, enabled FROM duckpipe.status()
     WHERE source_table = 'public.tc_orders';
 
 -- 8. Group override flows through to table (set group, verify table sees it)

@@ -201,20 +201,11 @@ SELECT pg_sleep(6);
  
 (1 row)
 
--- Verify tables() shows routing_enabled = false
-SELECT source_table, routing_enabled FROM duckpipe.tables()
-WHERE source_table = 'public.qr_orders';
-   source_table   | routing_enabled 
-------------------+-----------------
- public.qr_orders | f
-(1 row)
-
--- Verify status() shows routing_enabled = false
-SELECT source_table, routing_enabled FROM duckpipe.status()
-WHERE source_table = 'public.qr_orders';
-   source_table   | routing_enabled 
-------------------+-----------------
- public.qr_orders | f
+-- Verify routing_enabled = false via get_table_config
+SELECT duckpipe.get_table_config('public.qr_orders', 'routing_enabled');
+ get_table_config 
+------------------
+ false
 (1 row)
 
 -- This should NOT emit a routing NOTICE (routing disabled for table)

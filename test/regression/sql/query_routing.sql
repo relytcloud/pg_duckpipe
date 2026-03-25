@@ -116,13 +116,8 @@ SELECT duckpipe.set_table_config('public.qr_orders', 'routing_enabled', 'false')
 -- Wait for routing cache to expire (TTL=5s)
 SELECT pg_sleep(6);
 
--- Verify tables() shows routing_enabled = false
-SELECT source_table, routing_enabled FROM duckpipe.tables()
-WHERE source_table = 'public.qr_orders';
-
--- Verify status() shows routing_enabled = false
-SELECT source_table, routing_enabled FROM duckpipe.status()
-WHERE source_table = 'public.qr_orders';
+-- Verify routing_enabled = false via get_table_config
+SELECT duckpipe.get_table_config('public.qr_orders', 'routing_enabled');
 
 -- This should NOT emit a routing NOTICE (routing disabled for table)
 SELECT count(*) AS disabled_count FROM qr_orders;
