@@ -14,7 +14,7 @@
 # Nothing is installed on your system outside of the Docker
 # image and associated volume.
 #
-# To uninstall, just run: docker rm -f duckpipe && docker volume rm duckpipe_data
+# To uninstall, just run: docker rm -f duckpipe
 # ---------------------------------------------------------
 
 # Exit on subcommand errors
@@ -28,7 +28,6 @@ for arg in "$@"; do
 done
 
 CONTAINER_NAME="${DUCKPIPE_CONTAINER_NAME:-duckpipe}"
-VOLUME_NAME="${DUCKPIPE_VOLUME_NAME:-duckpipe_data}"
 IMAGE="${DUCKPIPE_IMAGE:-pgducklake/pgduckpipe:18-main}"
 PG_USER="${DUCKPIPE_PG_USER:-postgres}"
 PG_PORT="${DUCKPIPE_PG_PORT:-15432}"
@@ -64,8 +63,8 @@ fi
 LOG=$(mktemp)
 trap 'rm -f "$LOG"' EXIT
 
-print_connect_cmd() {
-  printf "    %sPGPASSWORD=%s psql -h localhost -p %s -U %s -d %s%s\n" "$CYAN" "$PG_PASSWORD" "$PG_PORT" "$PG_USER" "$PG_DATABASE" "$RESET"
+print_docker_exec_cmd() {
+  printf "    %sdocker exec -it %s psql -U %s -d %s%s\n" "$CYAN" "$CONTAINER_NAME" "$PG_USER" "$PG_DATABASE" "$RESET"
 }
 
 run_with_spinner() {
@@ -114,12 +113,12 @@ echo "  Run transactional and analytical workloads in a single database."
 echo ""
 echo "  This script will:"
 echo "    1. Pull the latest pg_duckpipe Docker image (includes pg_duckdb + pg_ducklake)"
-echo "    2. Start a container named '$CONTAINER_NAME' with a persistent volume ($VOLUME_NAME)"
+echo "    2. Start a container named '$CONTAINER_NAME'"
 echo "    3. Expose PostgreSQL on port $PG_PORT"
 echo "    4. Drop you into a psql session"
 echo ""
 echo "  Nothing is installed on your system outside of Docker."
-echo "  To uninstall later: docker rm -f $CONTAINER_NAME && docker volume rm $VOLUME_NAME"
+echo "  To uninstall later: docker rm -f $CONTAINER_NAME"
 echo ""
 echo "  Tip: Run with -y or --yes to skip this prompt next time."
 echo ""
@@ -151,7 +150,7 @@ if docker ps -a --format '{{.Names}}' | grep -q "^$CONTAINER_NAME$"; then
     printf "  %spg_duckpipe is already running.%s\n" "$GREEN" "$RESET"
     echo ""
     echo "  To connect, run:"
-    print_connect_cmd
+    print_docker_exec_cmd
     echo ""
   else
     printf "  %sFound existing pg_duckpipe container (stopped).%s\n" "$BOLD" "$RESET"
@@ -160,12 +159,6 @@ if docker ps -a --format '{{.Names}}' | grep -q "^$CONTAINER_NAME$"; then
   fi
   exit 0
 else
-  if docker volume ls --format '{{.Name}}' | grep -q "^$VOLUME_NAME$"; then
-    printf "  %sError: Found existing %s volume, exiting...%s\n" "$RED" "$VOLUME_NAME" "$RESET" >&2
-    echo ""
-    exit 1
-  fi
-
   run_with_spinner "Pulling pg_duckpipe Docker image" docker pull "$IMAGE"
 
   run_with_spinner "Starting pg_duckpipe" docker run -d \
@@ -173,7 +166,6 @@ else
     -e POSTGRES_USER="$PG_USER" \
     -e POSTGRES_PASSWORD="$PG_PASSWORD" \
     -e POSTGRES_DB="$PG_DATABASE" \
-    -v "$VOLUME_NAME:/var/lib/postgresql/" \
     -p "$PG_PORT":5432 \
     "$IMAGE"
 fi
@@ -200,9 +192,9 @@ printf "  Password: %s%s%s\n" "$BOLD" "$PG_PASSWORD" "$RESET"
 printf "  %sSave this password -- it won't be shown again.%s\n" "$RED" "$RESET"
 echo ""
 echo "  To reconnect later, run:"
-print_connect_cmd
+print_docker_exec_cmd
 echo ""
-printf "  To connect from another tool, use port %s%s%s (you'll need the password above).\n" "$BOLD" "$PG_PORT" "$RESET"
+printf "  To connect from another tool (e.g. DBeaver), use port %s%s%s with the password above.\n" "$BOLD" "$PG_PORT" "$RESET"
 echo ""
 printf "  Get started with the docs: %shttps://github.com/relytcloud/pg_duckpipe#quick-start%s\n" "$CYAN" "$RESET"
 echo ""
