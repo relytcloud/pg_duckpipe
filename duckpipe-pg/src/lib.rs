@@ -54,6 +54,7 @@ pub struct GroupMetricsSlot {
     pub active_flushes: i32,
     pub gate_wait_avg_ms: i64,
     pub gate_timeouts: i64,
+    pub pending_lsn: i64,
 }
 
 #[derive(Copy, Clone)]
@@ -81,6 +82,7 @@ impl Default for SharedMetrics {
                 active_flushes: 0,
                 gate_wait_avg_ms: 0,
                 gate_timeouts: 0,
+                pending_lsn: 0,
             }; MAX_METRICS_GROUPS],
         }
     }
@@ -122,6 +124,7 @@ pub fn write_shmem_metrics(group: &GroupMetrics, tables: &[TableMetrics]) {
             slot.active_flushes = group.active_flushes;
             slot.gate_wait_avg_ms = group.gate_wait_avg_ms;
             slot.gate_timeouts = group.gate_timeouts;
+            slot.pending_lsn = group.pending_lsn as i64;
             found_group = true;
             break;
         }
@@ -133,6 +136,7 @@ pub fn write_shmem_metrics(group: &GroupMetrics, tables: &[TableMetrics]) {
                 active_flushes: group.active_flushes,
                 gate_wait_avg_ms: group.gate_wait_avg_ms,
                 gate_timeouts: group.gate_timeouts,
+                pending_lsn: group.pending_lsn as i64,
             };
             found_group = true;
             break;
@@ -213,6 +217,7 @@ pub fn clear_shmem_group_slot(group_id: i32) {
                 active_flushes: 0,
                 gate_wait_avg_ms: 0,
                 gate_timeouts: 0,
+                pending_lsn: 0,
             };
             return;
         }
@@ -272,10 +277,68 @@ pub fn read_shmem_group_metrics() -> std::collections::HashMap<i32, GroupMetrics
                     active_flushes: s.active_flushes,
                     gate_wait_avg_ms: s.gate_wait_avg_ms,
                     gate_timeouts: s.gate_timeouts,
+                    pending_lsn: s.pending_lsn as u64,
                 },
             )
         })
         .collect()
+}
+
+/// Read all active table and group metrics from shared memory in a single
+/// lock acquisition, ensuring a consistent snapshot across both collections.
+pub fn read_shmem_all_metrics() -> (
+    std::collections::HashMap<i32, TableMetrics>,
+    std::collections::HashMap<i32, GroupMetrics>,
+) {
+    if !shmem_available() {
+        pgrx::notice!(
+            "pg_duckpipe: shared-memory metrics unavailable \
+             (not in shared_preload_libraries); metrics will show defaults"
+        );
+        return (
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+        );
+    }
+    let shm = METRICS_SHM.share();
+    let tables = shm
+        .tables
+        .iter()
+        .filter(|s| s.mapping_id != 0)
+        .map(|s| {
+            (
+                s.mapping_id,
+                TableMetrics {
+                    mapping_id: s.mapping_id,
+                    queued_changes: s.queued_changes,
+                    duckdb_memory_bytes: s.duckdb_memory_bytes,
+                    flush_count: s.flush_count,
+                    flush_duration_ms: s.flush_duration_ms,
+                    avg_row_bytes: s.avg_row_bytes,
+                },
+            )
+        })
+        .collect();
+    let groups = shm
+        .groups
+        .iter()
+        .filter(|s| s.group_id != 0)
+        .map(|s| {
+            (
+                s.group_id,
+                GroupMetrics {
+                    group_id: s.group_id,
+                    total_queued_changes: s.total_queued_changes,
+                    is_backpressured: s.is_backpressured != 0,
+                    active_flushes: s.active_flushes,
+                    gate_wait_avg_ms: s.gate_wait_avg_ms,
+                    gate_timeouts: s.gate_timeouts,
+                    pending_lsn: s.pending_lsn as u64,
+                },
+            )
+        })
+        .collect();
+    (tables, groups)
 }
 
 // ---------------------------------------------------------------------------

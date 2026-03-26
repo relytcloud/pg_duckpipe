@@ -29,6 +29,7 @@ pub struct GroupMetrics {
     pub active_flushes: i32,
     pub gate_wait_avg_ms: i64,
     pub gate_timeouts: i64,
+    pub pending_lsn: u64,
 }
 
 /// In-memory per-table metrics from FlushCoordinator.

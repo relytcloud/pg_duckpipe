@@ -349,7 +349,7 @@ async fn run_sync_loop(
                 }
                 result = service::run_group_sync_cycle(config, &group_name, &mut coordinator, slot_params, &mut consumer, &mut snapshot_manager) => {
                     match result {
-                        Ok(any_work) => {
+                        Ok((any_work, pending_lsn)) => {
                             // Update cached metrics for HTTP /metrics endpoint
                             {
                                 let mut cache = state.metrics_cache.lock().await;
@@ -362,6 +362,7 @@ async fn run_sync_loop(
                                     active_flushes: coordinator.active_flush_count() as i32,
                                     gate_wait_avg_ms: gs.avg_wait_ms,
                                     gate_timeouts: gs.timeout_count,
+                                    pending_lsn,
                                 };
                             }
 
