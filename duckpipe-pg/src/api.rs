@@ -1932,8 +1932,11 @@ fn status() -> TableIterator<
                     .unwrap_or(0);
 
                 // flush_lag: how far flush threads are behind the WAL consumer.
+                // Zero queued changes means the table is caught up — nothing to flush.
                 let flush_lag_bytes: Option<i64> = if pending_lsn == 0 || applied_lsn_u64 == 0 {
                     None
+                } else if queued_changes == 0 {
+                    Some(0)
                 } else {
                     Some(pending_lsn.saturating_sub(applied_lsn_u64) as i64)
                 };
