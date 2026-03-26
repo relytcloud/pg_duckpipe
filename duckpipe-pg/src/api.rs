@@ -1912,17 +1912,24 @@ fn status() -> TableIterator<
                     .unwrap_or(0);
 
                 // Lag = WAL head (SHM) - last flushed (metadata); None when either is unknown.
-                let applied_lsn_u64 = applied_lsn
-                    .as_ref()
-                    .map(|s| duckpipe_core::types::parse_lsn(s))
-                    .unwrap_or(0);
-                let replication_lag_bytes: Option<i64> =
+                // A table with zero queued changes is effectively caught up — report 0 lag.
+                let replication_lag_bytes: Option<i64> = if queued_changes == 0 {
+                    shm_group_map
+                        .get(&group_id)
+                        .map(|gm| if gm.pending_lsn == 0 { None } else { Some(0) })
+                        .unwrap_or(None)
+                } else {
+                    let applied_lsn_u64 = applied_lsn
+                        .as_ref()
+                        .map(|s| duckpipe_core::types::parse_lsn(s))
+                        .unwrap_or(0);
                     shm_group_map.get(&group_id).and_then(|gm| {
                         if gm.pending_lsn == 0 || applied_lsn_u64 == 0 {
                             return None;
                         }
                         Some(gm.pending_lsn.saturating_sub(applied_lsn_u64) as i64)
-                    });
+                    })
+                };
 
                 rows.push((
                     sync_group,
