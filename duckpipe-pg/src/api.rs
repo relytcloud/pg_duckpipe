@@ -2239,11 +2239,20 @@ fn metrics() -> String {
     let mut group_entries = Vec::new();
 
     Spi::connect(|client| {
+        // Current WAL position for source_lag_bytes on local groups.
+        let current_wal_lsn: u64 = client
+            .select("SELECT pg_current_wal_lsn()::text", None, &[])
+            .ok()
+            .and_then(|t| t.into_iter().next())
+            .and_then(|r| r.get::<String>(1).ok().flatten())
+            .map(|s| duckpipe_core::types::parse_lsn(&s))
+            .unwrap_or(0);
+
         // Tables
         let result = client.select(
             "SELECT g.name, m.source_schema || '.' || m.source_table, \
              m.state, m.rows_synced, m.consecutive_failures, \
-             m.snapshot_duration_ms, m.snapshot_rows, m.applied_lsn::text, m.id \
+             m.snapshot_duration_ms, m.snapshot_rows, m.applied_lsn::text, m.id, m.group_id \
              FROM duckpipe.table_mappings m \
              JOIN duckpipe.sync_groups g ON m.group_id = g.id \
              ORDER BY g.name, m.source_schema, m.source_table",
@@ -2261,15 +2270,33 @@ fn metrics() -> String {
                 let snapshot_rows: Option<i64> = row.get(7).unwrap();
                 let applied_lsn: Option<String> = row.get(8).unwrap();
                 let mapping_id: i32 = row.get::<i32>(9).unwrap().unwrap_or(0);
+                let group_id: i32 = row.get::<i32>(10).unwrap().unwrap_or(0);
 
                 let tm = shm_table_map.get(&mapping_id).copied().unwrap_or_default();
+
+                let pending_lsn = shm_group_map
+                    .get(&group_id)
+                    .map(|g| g.pending_lsn)
+                    .unwrap_or(0);
+                let applied_lsn_u64 = applied_lsn
+                    .as_ref()
+                    .map(|s| duckpipe_core::types::parse_lsn(s))
+                    .unwrap_or(0);
+                let flush_lag_bytes: Option<i64> = if pending_lsn == 0 || applied_lsn_u64 == 0 {
+                    None
+                } else if tm.queued_changes == 0 {
+                    Some(0)
+                } else {
+                    Some(pending_lsn.saturating_sub(applied_lsn_u64) as i64)
+                };
 
                 table_entries.push(format!(
                     "{{\"group\":{},\"source_table\":{},\"state\":{},\"rows_synced\":{},\
                      \"queued_changes\":{},\"duckdb_memory_bytes\":{},\
                      \"consecutive_failures\":{},\"flush_count\":{},\"flush_duration_ms\":{},\
                      \"avg_row_bytes\":{},\
-                     \"snapshot_duration_ms\":{},\"snapshot_rows\":{},\"applied_lsn\":{}}}",
+                     \"snapshot_duration_ms\":{},\"snapshot_rows\":{},\"applied_lsn\":{},\
+                     \"flush_lag_bytes\":{}}}",
                     json_str(&group_name),
                     json_str(&source_table),
                     json_str(&state),
@@ -2283,13 +2310,15 @@ fn metrics() -> String {
                     json_opt_i64(snapshot_duration_ms),
                     json_opt_i64(snapshot_rows),
                     json_opt_str(applied_lsn.as_deref()),
+                    json_opt_i64(flush_lag_bytes),
                 ));
             }
         }
 
         // Groups
         let result = client.select(
-            "SELECT g.id, g.name FROM duckpipe.sync_groups g ORDER BY g.name",
+            "SELECT g.id, g.name, (g.conninfo IS NULL) as is_local \
+             FROM duckpipe.sync_groups g ORDER BY g.name",
             None,
             &[],
         );
@@ -2297,18 +2326,28 @@ fn metrics() -> String {
             for row in tuptable {
                 let group_id: i32 = row.get::<i32>(1).unwrap().unwrap_or(0);
                 let name: String = row.get::<String>(2).unwrap().unwrap_or_default();
+                let is_local: bool = row.get::<bool>(3).unwrap().unwrap_or(false);
 
                 let gm = shm_group_map.get(&group_id).copied().unwrap_or_default();
 
+                let pending_lsn = gm.pending_lsn;
+                let source_lag_bytes: Option<i64> =
+                    if is_local && current_wal_lsn != 0 && pending_lsn != 0 {
+                        Some(current_wal_lsn.saturating_sub(pending_lsn) as i64)
+                    } else {
+                        None
+                    };
+
                 group_entries.push(format!(
                     "{{\"name\":{},\"total_queued_changes\":{},\"is_backpressured\":{},\"active_flushes\":{},\
-                     \"gate_wait_avg_ms\":{},\"gate_timeouts\":{}}}",
+                     \"gate_wait_avg_ms\":{},\"gate_timeouts\":{},\"source_lag_bytes\":{}}}",
                     json_str(&name),
                     gm.total_queued_changes,
                     gm.is_backpressured,
                     gm.active_flushes,
                     gm.gate_wait_avg_ms,
                     gm.gate_timeouts,
+                    json_opt_i64(source_lag_bytes),
                 ));
             }
         }
