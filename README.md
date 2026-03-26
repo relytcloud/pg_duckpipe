@@ -25,17 +25,10 @@ PostgreSQL extension for real-time CDC to pg_ducklake
 ## Quick Start
 
 ```bash
-# Start PostgreSQL with pg_duckpipe (includes pg_duckdb + pg_ducklake)
-docker run -d --name duckpipe \
-  -p 15432:5432 \
-  -e POSTGRES_PASSWORD=duckdb \
-  pgducklake/pgduckpipe:18-main
-
-# Connect
-PGPASSWORD=duckdb psql -h localhost -p 15432 -U postgres
+curl -sSfL https://raw.githubusercontent.com/relytcloud/pg_duckpipe/main/install.sh | bash
 ```
 
-Create a table, add it to sync, insert some rows, and query the columnar copy:
+This pulls the Docker image, starts PostgreSQL with all extensions loaded, and drops you into psql. Then try:
 
 ```sql
 -- Create a source table (must have a primary key)
