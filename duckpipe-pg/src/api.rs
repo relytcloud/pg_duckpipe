@@ -1840,7 +1840,8 @@ CREATE FUNCTION duckpipe.status() RETURNS TABLE(
     snapshot_duration_ms BIGINT,
     snapshot_rows BIGINT,
     source_label TEXT,
-    replication_lag_bytes BIGINT
+    flush_lag_bytes BIGINT,
+    source_lag_bytes BIGINT
 )
 AS 'MODULE_PATHNAME', '@FUNCTION_NAME@'
 LANGUAGE C STRICT SECURITY DEFINER;
@@ -1863,7 +1864,8 @@ fn status() -> TableIterator<
         name!(snapshot_duration_ms, Option<i64>),
         name!(snapshot_rows, Option<i64>),
         name!(source_label, Option<String>),
-        name!(replication_lag_bytes, Option<i64>),
+        name!(flush_lag_bytes, Option<i64>),
+        name!(source_lag_bytes, Option<i64>),
     ),
 > {
     let (shm_map, shm_group_map) = crate::read_shmem_all_metrics();
@@ -1871,6 +1873,15 @@ fn status() -> TableIterator<
     let mut rows = Vec::new();
 
     Spi::connect(|client| {
+        // Get current WAL position once for source_lag_bytes on local groups.
+        let current_wal_lsn: u64 = client
+            .select("SELECT pg_current_wal_lsn()::text", None, &[])
+            .ok()
+            .and_then(|t| t.into_iter().next())
+            .and_then(|r| r.get::<String>(1).ok().flatten())
+            .map(|s| duckpipe_core::types::parse_lsn(&s))
+            .unwrap_or(0);
+
         let result = client.select(
             "SELECT g.name as sync_group, \
              m.source_schema || '.' || m.source_table as source_table, \
@@ -1879,7 +1890,8 @@ fn status() -> TableIterator<
              m.rows_synced, m.last_sync_at, \
              m.error_message, m.consecutive_failures, m.retry_at, m.applied_lsn::text, \
              m.snapshot_duration_ms, m.snapshot_rows, m.id, m.source_label, \
-             m.group_id \
+             m.group_id, \
+             (g.conninfo IS NULL) as is_local \
              FROM duckpipe.table_mappings m \
              JOIN duckpipe.sync_groups g ON m.group_id = g.id \
              ORDER BY g.name, m.source_schema, m.source_table",
@@ -1905,31 +1917,35 @@ fn status() -> TableIterator<
                 let mapping_id: i32 = row.get::<i32>(14).unwrap().unwrap_or(0);
                 let source_label: Option<String> = row.get(15).unwrap();
                 let group_id: i32 = row.get::<i32>(16).unwrap().unwrap_or(0);
+                let is_local: bool = row.get::<bool>(17).unwrap().unwrap_or(false);
 
                 let queued_changes = shm_map
                     .get(&mapping_id)
                     .map(|m| m.queued_changes)
                     .unwrap_or(0);
 
-                // Lag = WAL head (SHM) - last flushed (metadata); None when either is unknown.
-                // A table with zero queued changes is effectively caught up — report 0 lag.
-                let replication_lag_bytes: Option<i64> = if queued_changes == 0 {
-                    shm_group_map
-                        .get(&group_id)
-                        .map(|gm| if gm.pending_lsn == 0 { None } else { Some(0) })
-                        .unwrap_or(None)
+                let gm = shm_group_map.get(&group_id);
+                let pending_lsn = gm.map(|g| g.pending_lsn).unwrap_or(0);
+                let applied_lsn_u64 = applied_lsn
+                    .as_ref()
+                    .map(|s| duckpipe_core::types::parse_lsn(s))
+                    .unwrap_or(0);
+
+                // flush_lag: how far flush threads are behind the WAL consumer.
+                let flush_lag_bytes: Option<i64> = if pending_lsn == 0 || applied_lsn_u64 == 0 {
+                    None
                 } else {
-                    let applied_lsn_u64 = applied_lsn
-                        .as_ref()
-                        .map(|s| duckpipe_core::types::parse_lsn(s))
-                        .unwrap_or(0);
-                    shm_group_map.get(&group_id).and_then(|gm| {
-                        if gm.pending_lsn == 0 || applied_lsn_u64 == 0 {
-                            return None;
-                        }
-                        Some(gm.pending_lsn.saturating_sub(applied_lsn_u64) as i64)
-                    })
+                    Some(pending_lsn.saturating_sub(applied_lsn_u64) as i64)
                 };
+
+                // source_lag: how far WAL consumer is behind the source.
+                // Local: pg_current_wal_lsn() - pending_lsn. Remote: NULL (no access).
+                let source_lag_bytes: Option<i64> =
+                    if is_local && current_wal_lsn != 0 && pending_lsn != 0 {
+                        Some(current_wal_lsn.saturating_sub(pending_lsn) as i64)
+                    } else {
+                        None
+                    };
 
                 rows.push((
                     sync_group,
@@ -1947,7 +1963,8 @@ fn status() -> TableIterator<
                     snapshot_duration_ms,
                     snapshot_rows,
                     source_label,
-                    replication_lag_bytes,
+                    flush_lag_bytes,
+                    source_lag_bytes,
                 ));
             }
         }
