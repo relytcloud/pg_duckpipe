@@ -1,5 +1,43 @@
 use serde::{Deserialize, Serialize};
 
+/// Shared validation for config key-value pairs against a `&[(&str, &str)]` table.
+fn validate_config_value(
+    valid_keys: &[(&str, &str)],
+    label: &str,
+    key: &str,
+    value: &str,
+) -> Result<(), String> {
+    let entry = valid_keys.iter().find(|(k, _)| *k == key).ok_or_else(|| {
+        format!(
+            "unknown {} key: '{}'. Valid keys: {}",
+            label,
+            key,
+            valid_keys
+                .iter()
+                .map(|(k, _)| *k)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    })?;
+    match entry.1 {
+        "int" => {
+            let v = value
+                .parse::<i32>()
+                .map_err(|_| format!("'{}' must be an integer, got '{}'", key, value))?;
+            if v <= 0 {
+                return Err(format!("'{}' must be positive, got {}", key, v));
+            }
+        }
+        "bool" => {
+            value
+                .parse::<bool>()
+                .map_err(|_| format!("'{}' must be true or false, got '{}'", key, value))?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 /// Known config keys with their validation rules.
 const VALID_CONFIG_KEYS: &[(&str, &str)] = &[
     ("drain_poll_ms", "int"),
@@ -92,35 +130,90 @@ impl GroupConfig {
         }
     }
 
-    /// Validate a key-value pair. Returns Ok(()) if valid, Err with message if not.
     pub fn validate_key(key: &str, value: &str) -> Result<(), String> {
-        let entry = VALID_CONFIG_KEYS
-            .iter()
-            .find(|(k, _)| *k == key)
-            .ok_or_else(|| {
-                format!(
-                    "unknown config key: '{}'. Valid keys: {}",
-                    key,
-                    VALID_CONFIG_KEYS
-                        .iter()
-                        .map(|(k, _)| *k)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            })?;
-        match entry.1 {
-            "int" => {
-                let v = value
-                    .parse::<i32>()
-                    .map_err(|_| format!("'{}' must be an integer, got '{}'", key, value))?;
-                if v <= 0 {
-                    return Err(format!("'{}' must be positive, got {}", key, v));
-                }
+        validate_config_value(VALID_CONFIG_KEYS, "config", key, value)
+    }
+
+    pub fn is_known_key(key: &str) -> bool {
+        VALID_CONFIG_KEYS.iter().any(|(k, _)| *k == key)
+    }
+}
+
+/// Known per-table config keys with their validation rules.
+const VALID_TABLE_CONFIG_KEYS: &[(&str, &str)] = &[
+    ("duckdb_flush_memory_mb", "int"),
+    ("duckdb_threads", "int"),
+    ("flush_batch_threshold", "int"),
+    ("flush_interval_ms", "int"),
+    ("routing_enabled", "bool"),
+];
+
+/// Per-table config overrides (stored in table_mappings.config JSONB).
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct TableConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub routing_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flush_interval_ms: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flush_batch_threshold: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duckdb_threads: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duckdb_flush_memory_mb: Option<i32>,
+}
+
+impl TableConfig {
+    pub fn from_json_str(s: &str) -> Result<Self, String> {
+        serde_json::from_str(s).map_err(|e| format!("invalid table config JSON: {}", e))
+    }
+
+    pub fn to_json_string(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|_| "{}".to_string())
+    }
+
+    /// Set a single key. Returns Err if the key is unknown or the value is invalid.
+    pub fn set_key(&mut self, key: &str, value: &str) -> Result<(), String> {
+        Self::validate_key(key, value)?;
+        match key {
+            "routing_enabled" => {
+                self.routing_enabled = Some(value.parse::<bool>().unwrap());
             }
-            // No "string" type keys any more — all config keys are "int"
-            _ => {}
+            "flush_interval_ms" => {
+                self.flush_interval_ms = Some(value.parse::<i32>().unwrap());
+            }
+            "flush_batch_threshold" => {
+                self.flush_batch_threshold = Some(value.parse::<i32>().unwrap());
+            }
+            "duckdb_threads" => {
+                self.duckdb_threads = Some(value.parse::<i32>().unwrap());
+            }
+            "duckdb_flush_memory_mb" => {
+                self.duckdb_flush_memory_mb = Some(value.parse::<i32>().unwrap());
+            }
+            _ => return Err(format!("unknown table config key: '{}'", key)),
         }
         Ok(())
+    }
+
+    /// Get a single key's value as a string. Returns None if unset or unknown.
+    pub fn get_key(&self, key: &str) -> Option<String> {
+        match key {
+            "routing_enabled" => self.routing_enabled.map(|v| v.to_string()),
+            "flush_interval_ms" => self.flush_interval_ms.map(|v| v.to_string()),
+            "flush_batch_threshold" => self.flush_batch_threshold.map(|v| v.to_string()),
+            "duckdb_threads" => self.duckdb_threads.map(|v| v.to_string()),
+            "duckdb_flush_memory_mb" => self.duckdb_flush_memory_mb.map(|v| v.to_string()),
+            _ => None,
+        }
+    }
+
+    pub fn validate_key(key: &str, value: &str) -> Result<(), String> {
+        validate_config_value(VALID_TABLE_CONFIG_KEYS, "table config", key, value)
+    }
+
+    pub fn is_known_key(key: &str) -> bool {
+        VALID_TABLE_CONFIG_KEYS.iter().any(|(k, _)| *k == key)
     }
 }
 
@@ -179,6 +272,26 @@ impl ResolvedConfig {
             "max_concurrent_flushes" => Some(self.max_concurrent_flushes.to_string()),
             "max_queued_changes" => Some(self.max_queued_changes.to_string()),
             _ => None,
+        }
+    }
+
+    /// Apply per-table overrides on top of an already-resolved group config.
+    /// Only keys present in TableConfig are overridable at the table level.
+    pub fn resolve_for_table(&self, table: &TableConfig) -> Self {
+        ResolvedConfig {
+            flush_interval_ms: table.flush_interval_ms.unwrap_or(self.flush_interval_ms),
+            flush_batch_threshold: table
+                .flush_batch_threshold
+                .unwrap_or(self.flush_batch_threshold),
+            duckdb_threads: table.duckdb_threads.unwrap_or(self.duckdb_threads),
+            duckdb_flush_memory_mb: table
+                .duckdb_flush_memory_mb
+                .unwrap_or(self.duckdb_flush_memory_mb),
+            // Non-overridable fields pass through unchanged
+            drain_poll_ms: self.drain_poll_ms,
+            duckdb_buffer_memory_mb: self.duckdb_buffer_memory_mb,
+            max_concurrent_flushes: self.max_concurrent_flushes,
+            max_queued_changes: self.max_queued_changes,
         }
     }
 
@@ -358,6 +471,8 @@ pub struct TableMapping {
     pub error_message: Option<String>,
     pub source_label: String,
     pub sync_mode: String,
+    /// Per-table config overrides (from table_mappings.config JSONB column).
+    pub config: TableConfig,
 }
 
 /// Returns true if `name` is a duckpipe-managed system column (case-insensitive).

@@ -2,7 +2,7 @@ use pgrx::datum::{DatumWithOid, TimestampWithTimeZone};
 use pgrx::prelude::*;
 
 use duckpipe_core::listen;
-use duckpipe_core::types::{is_duckpipe_system_column, GroupConfig, ResolvedConfig};
+use duckpipe_core::types::{is_duckpipe_system_column, GroupConfig, ResolvedConfig, TableConfig};
 
 use crate::DATA_INLINING_ROW_LIMIT;
 
@@ -1757,7 +1757,6 @@ CREATE FUNCTION duckpipe.tables() RETURNS TABLE(
     target_table TEXT,
     sync_group TEXT,
     enabled BOOLEAN,
-    routing_enabled BOOLEAN,
     rows_synced BIGINT,
     last_sync TIMESTAMPTZ,
     source_label TEXT,
@@ -1773,7 +1772,6 @@ fn tables() -> TableIterator<
         name!(target_table, String),
         name!(sync_group, String),
         name!(enabled, bool),
-        name!(routing_enabled, bool),
         name!(rows_synced, i64),
         name!(last_sync, Option<TimestampWithTimeZone>),
         name!(source_label, Option<String>),
@@ -1786,7 +1784,8 @@ fn tables() -> TableIterator<
         let result = client.select(
             "SELECT m.source_schema || '.' || m.source_table as source_table, \
              m.target_schema || '.' || m.target_table as target_table, \
-             g.name as sync_group, m.enabled, m.routing_enabled, m.rows_synced, m.last_sync_at, \
+             g.name as sync_group, m.enabled, \
+             m.rows_synced, m.last_sync_at, \
              m.source_label, \
              (COUNT(*) OVER (PARTITION BY m.target_schema, m.target_table))::int4 as source_count \
              FROM duckpipe.table_mappings m \
@@ -1802,18 +1801,16 @@ fn tables() -> TableIterator<
                 let target_table: String = row.get(2).unwrap().unwrap();
                 let sync_group: String = row.get(3).unwrap().unwrap();
                 let enabled: bool = row.get(4).unwrap().unwrap();
-                let routing_enabled: bool = row.get(5).unwrap().unwrap_or(true);
-                let rows_synced: i64 = row.get(6).unwrap().unwrap();
-                let last_sync: Option<TimestampWithTimeZone> = row.get(7).unwrap();
-                let source_label: Option<String> = row.get(8).unwrap();
-                let source_count: i32 = row.get::<i32>(9).unwrap().unwrap_or(1);
+                let rows_synced: i64 = row.get(5).unwrap().unwrap();
+                let last_sync: Option<TimestampWithTimeZone> = row.get(6).unwrap();
+                let source_label: Option<String> = row.get(7).unwrap();
+                let source_count: i32 = row.get::<i32>(8).unwrap().unwrap_or(1);
 
                 rows.push((
                     source_table,
                     target_table,
                     sync_group,
                     enabled,
-                    routing_enabled,
                     rows_synced,
                     last_sync,
                     source_label,
@@ -1833,7 +1830,6 @@ CREATE FUNCTION duckpipe.status() RETURNS TABLE(
     target_table TEXT,
     state TEXT,
     enabled BOOLEAN,
-    routing_enabled BOOLEAN,
     rows_synced BIGINT,
     queued_changes BIGINT,
     last_sync TIMESTAMPTZ,
@@ -1856,7 +1852,6 @@ fn status() -> TableIterator<
         name!(target_table, String),
         name!(state, String),
         name!(enabled, bool),
-        name!(routing_enabled, bool),
         name!(rows_synced, i64),
         name!(queued_changes, i64),
         name!(last_sync, Option<TimestampWithTimeZone>),
@@ -1879,7 +1874,8 @@ fn status() -> TableIterator<
             "SELECT g.name as sync_group, \
              m.source_schema || '.' || m.source_table as source_table, \
              m.target_schema || '.' || m.target_table as target_table, \
-             m.state, m.enabled, m.routing_enabled, m.rows_synced, m.last_sync_at, \
+             m.state, m.enabled, \
+             m.rows_synced, m.last_sync_at, \
              m.error_message, m.consecutive_failures, m.retry_at, m.applied_lsn::text, \
              m.snapshot_duration_ms, m.snapshot_rows, m.id, m.source_label \
              FROM duckpipe.table_mappings m \
@@ -1896,17 +1892,16 @@ fn status() -> TableIterator<
                 let target_table: String = row.get(3).unwrap().unwrap();
                 let state: String = row.get(4).unwrap().unwrap();
                 let enabled: bool = row.get(5).unwrap().unwrap();
-                let routing_enabled: bool = row.get(6).unwrap().unwrap_or(true);
-                let rows_synced: i64 = row.get(7).unwrap().unwrap();
-                let last_sync: Option<TimestampWithTimeZone> = row.get(8).unwrap();
-                let error_message: Option<String> = row.get(9).unwrap();
-                let consecutive_failures: i32 = row.get::<i32>(10).unwrap().unwrap_or(0);
-                let retry_at: Option<TimestampWithTimeZone> = row.get(11).unwrap();
-                let applied_lsn: Option<String> = row.get(12).unwrap();
-                let snapshot_duration_ms: Option<i64> = row.get(13).unwrap();
-                let snapshot_rows: Option<i64> = row.get(14).unwrap();
-                let mapping_id: i32 = row.get::<i32>(15).unwrap().unwrap_or(0);
-                let source_label: Option<String> = row.get(16).unwrap();
+                let rows_synced: i64 = row.get(6).unwrap().unwrap();
+                let last_sync: Option<TimestampWithTimeZone> = row.get(7).unwrap();
+                let error_message: Option<String> = row.get(8).unwrap();
+                let consecutive_failures: i32 = row.get::<i32>(9).unwrap().unwrap_or(0);
+                let retry_at: Option<TimestampWithTimeZone> = row.get(10).unwrap();
+                let applied_lsn: Option<String> = row.get(11).unwrap();
+                let snapshot_duration_ms: Option<i64> = row.get(12).unwrap();
+                let snapshot_rows: Option<i64> = row.get(13).unwrap();
+                let mapping_id: i32 = row.get::<i32>(14).unwrap().unwrap_or(0);
+                let source_label: Option<String> = row.get(15).unwrap();
 
                 // Read queued_changes from SHM
                 let queued_changes = shm_map
@@ -1920,7 +1915,6 @@ fn status() -> TableIterator<
                     target_table,
                     state,
                     enabled,
-                    routing_enabled,
                     rows_synced,
                     queued_changes,
                     last_sync,
@@ -1940,39 +1934,167 @@ fn status() -> TableIterator<
 }
 
 #[pg_extern(sql = "
-CREATE FUNCTION duckpipe.set_routing(source_table TEXT, enabled BOOLEAN)
-RETURNS void
+CREATE FUNCTION duckpipe.set_table_config(
+    source_table TEXT,
+    key TEXT,
+    value TEXT
+) RETURNS void
 AS 'MODULE_PATHNAME', '@FUNCTION_NAME@'
 LANGUAGE C STRICT;
-REVOKE ALL ON FUNCTION duckpipe.set_routing(TEXT, BOOLEAN) FROM PUBLIC;
+REVOKE ALL ON FUNCTION duckpipe.set_table_config(TEXT, TEXT, TEXT) FROM PUBLIC;
 ")]
-fn set_routing(source_table: &str, enabled: bool) {
+fn set_table_config(source_table: &str, key: &str, value: &str) {
+    if let Err(e) = TableConfig::validate_key(key, value) {
+        pgrx::error!("{}", e);
+    }
+
     let (schema, table) = parse_source_table(source_table);
 
     Spi::connect_mut(|client| {
+        // Lock the row to prevent concurrent read-modify-write race
         let args = unsafe {
             [
-                DatumWithOid::new(enabled, PgBuiltInOids::BOOLOID.value()),
                 DatumWithOid::new(schema.as_str(), PgBuiltInOids::TEXTOID.value()),
                 DatumWithOid::new(table.as_str(), PgBuiltInOids::TEXTOID.value()),
             ]
         };
         let result = client
             .update(
-                "UPDATE duckpipe.table_mappings SET routing_enabled = $1 \
-                 WHERE source_schema = $2 AND source_table = $3",
-                None,
+                "SELECT config::text FROM duckpipe.table_mappings \
+                 WHERE source_schema = $1 AND source_table = $2 FOR UPDATE",
+                Some(1),
                 &args,
             )
-            .expect("failed to update routing_enabled");
-        if result.len() == 0 {
+            .unwrap();
+        let mut found = false;
+        let mut config = TableConfig::default();
+        for row in result {
+            found = true;
+            if let Some(config_str) = row.get::<String>(1).unwrap() {
+                config = TableConfig::from_json_str(&config_str).unwrap_or_default();
+            }
+        }
+        if !found {
             pgrx::error!(
                 "table {}.{} not found in duckpipe.table_mappings",
                 schema,
                 table
             );
         }
+
+        config.set_key(key, value).unwrap();
+        let config_json = config.to_json_string();
+
+        let update_args = unsafe {
+            [
+                DatumWithOid::new(config_json.as_str(), PgBuiltInOids::TEXTOID.value()),
+                DatumWithOid::new(schema.as_str(), PgBuiltInOids::TEXTOID.value()),
+                DatumWithOid::new(table.as_str(), PgBuiltInOids::TEXTOID.value()),
+            ]
+        };
+        client
+            .update(
+                "UPDATE duckpipe.table_mappings SET config = $1::jsonb \
+                 WHERE source_schema = $2 AND source_table = $3",
+                None,
+                &update_args,
+            )
+            .unwrap();
     });
+}
+
+#[pg_extern(sql = "
+CREATE FUNCTION duckpipe.get_table_config(
+    source_table TEXT,
+    key TEXT DEFAULT NULL
+) RETURNS TEXT
+AS 'MODULE_PATHNAME', '@FUNCTION_NAME@'
+LANGUAGE C SECURITY DEFINER;
+REVOKE ALL ON FUNCTION duckpipe.get_table_config(TEXT, TEXT) FROM PUBLIC;
+")]
+fn get_table_config(source_table: &str, key: default!(Option<&str>, "NULL")) -> Option<String> {
+    let (schema, table) = parse_source_table(source_table);
+
+    Spi::connect(|client| {
+        // Read global config
+        let global_result = client
+            .select("SELECT key, value FROM duckpipe.global_config", None, &[])
+            .unwrap();
+        let mut kv_rows: Vec<(String, String)> = Vec::new();
+        for row in global_result {
+            let k: String = row.get::<String>(1).unwrap().unwrap_or_default();
+            let v: String = row.get::<String>(2).unwrap().unwrap_or_default();
+            kv_rows.push((k, v));
+        }
+        let global = GroupConfig::from_kv_rows(&kv_rows);
+
+        // Read per-group config for this table's group
+        let table_args = unsafe {
+            [
+                DatumWithOid::new(schema.as_str(), PgBuiltInOids::TEXTOID.value()),
+                DatumWithOid::new(table.as_str(), PgBuiltInOids::TEXTOID.value()),
+            ]
+        };
+        let result = client
+            .select(
+                "SELECT g.config::text, m.config::text \
+                 FROM duckpipe.table_mappings m \
+                 JOIN duckpipe.sync_groups g ON m.group_id = g.id \
+                 WHERE m.source_schema = $1 AND m.source_table = $2",
+                Some(1),
+                &table_args,
+            )
+            .unwrap();
+        let mut found = false;
+        let mut group_config = GroupConfig::default();
+        let mut table_config = TableConfig::default();
+        for row in result {
+            found = true;
+            if let Some(g_str) = row.get::<String>(1).unwrap() {
+                group_config = GroupConfig::from_json_str(&g_str).unwrap_or_default();
+            }
+            if let Some(t_str) = row.get::<String>(2).unwrap() {
+                table_config = TableConfig::from_json_str(&t_str).unwrap_or_default();
+            }
+        }
+        if !found {
+            pgrx::error!(
+                "table {}.{} not found in duckpipe.table_mappings",
+                schema,
+                table
+            );
+        }
+
+        let resolved =
+            ResolvedConfig::resolve(&global, &group_config).resolve_for_table(&table_config);
+
+        match key {
+            Some(k) => {
+                // routing_enabled is table-only, not in ResolvedConfig
+                if k == "routing_enabled" {
+                    Some(table_config.routing_enabled.unwrap_or(true).to_string())
+                } else if let Some(v) = resolved.get_key(k) {
+                    Some(v)
+                } else if !TableConfig::is_known_key(k) && !GroupConfig::is_known_key(k) {
+                    pgrx::error!("unknown config key: '{}'", k);
+                } else {
+                    // Valid group-level key not overridable at table level
+                    resolved.get_key(k)
+                }
+            }
+            None => {
+                // Return all resolved table config as JSON via serde
+                let response = TableConfig {
+                    routing_enabled: Some(table_config.routing_enabled.unwrap_or(true)),
+                    flush_interval_ms: Some(resolved.flush_interval_ms),
+                    flush_batch_threshold: Some(resolved.flush_batch_threshold),
+                    duckdb_threads: Some(resolved.duckdb_threads),
+                    duckdb_flush_memory_mb: Some(resolved.duckdb_flush_memory_mb),
+                };
+                Some(response.to_json_string())
+            }
+        }
+    })
 }
 
 #[pg_extern(sql = "

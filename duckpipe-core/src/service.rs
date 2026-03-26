@@ -151,6 +151,7 @@ async fn ensure_coordinator_queue(
         paused,
         mapping.source_label.clone(),
         mapping.sync_mode.clone(),
+        &mapping.config,
     );
     Ok(())
 }

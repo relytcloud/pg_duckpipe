@@ -40,7 +40,7 @@ CREATE TABLE duckpipe.table_mappings (
     snapshot_rows        BIGINT,
     source_label    TEXT,
     sync_mode       TEXT NOT NULL DEFAULT 'upsert' CHECK (sync_mode IN ('upsert', 'append')),
-    routing_enabled      BOOLEAN DEFAULT true,
+    config          JSONB NOT NULL DEFAULT '{}'::jsonb,
     UNIQUE(group_id, source_schema, source_table),
     UNIQUE(group_id, source_oid)
 );
