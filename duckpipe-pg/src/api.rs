@@ -733,7 +733,35 @@ fn add_table(
         None => PgConn::local(),
     };
 
-    // 2b. Verify PK exists — required for upsert mode (both local and remote).
+    // 2b. Verify source table exists (both local and remote).
+    //     Check early so we report "does not exist" instead of the misleading
+    //     "no primary key" error that the PK check would produce.
+    let table_exists_sql = format!(
+        "SELECT 1 FROM pg_class c \
+         JOIN pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = {} AND c.relname = {}",
+        quote_literal(&schema),
+        quote_literal(&table)
+    );
+    match source.exists(&table_exists_sql) {
+        Ok(true) => {}
+        Ok(false) => {
+            ereport!(
+                ERROR,
+                PgSqlErrorCode::ERRCODE_UNDEFINED_TABLE,
+                format!("table {}.{} does not exist", schema, table)
+            );
+        }
+        Err(e) => {
+            ereport!(
+                ERROR,
+                PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+                format!("Failed to check table existence: {}", e)
+            );
+        }
+    }
+
+    // 2c. Verify PK exists — required for upsert mode (both local and remote).
     //     Check early (before publication/slot creation) so a failed validation
     //     does not leave orphaned replication infrastructure behind.
     //     Append mode works without a PK: the changelog stores full row values

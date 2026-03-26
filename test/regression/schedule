@@ -8,6 +8,8 @@ test: metrics
 test: sync_group_mode
 test: group_config
 test: table_config
+# Nonexistent table: proper error message instead of misleading "no primary key"
+test: nonexistent_table
 # Access control: target table grants, function privileges
 test: acl
 # Streaming CDC tests (require background worker)
