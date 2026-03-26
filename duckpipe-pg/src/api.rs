@@ -1839,7 +1839,8 @@ CREATE FUNCTION duckpipe.status() RETURNS TABLE(
     applied_lsn TEXT,
     snapshot_duration_ms BIGINT,
     snapshot_rows BIGINT,
-    source_label TEXT
+    source_label TEXT,
+    replication_lag_bytes BIGINT
 )
 AS 'MODULE_PATHNAME', '@FUNCTION_NAME@'
 LANGUAGE C STRICT SECURITY DEFINER;
@@ -1862,10 +1863,10 @@ fn status() -> TableIterator<
         name!(snapshot_duration_ms, Option<i64>),
         name!(snapshot_rows, Option<i64>),
         name!(source_label, Option<String>),
+        name!(replication_lag_bytes, Option<i64>),
     ),
 > {
-    // Read SHM metrics keyed by mapping_id (for queued_changes)
-    let shm_map = crate::read_shmem_table_metrics();
+    let (shm_map, shm_group_map) = crate::read_shmem_all_metrics();
 
     let mut rows = Vec::new();
 
@@ -1877,7 +1878,8 @@ fn status() -> TableIterator<
              m.state, m.enabled, \
              m.rows_synced, m.last_sync_at, \
              m.error_message, m.consecutive_failures, m.retry_at, m.applied_lsn::text, \
-             m.snapshot_duration_ms, m.snapshot_rows, m.id, m.source_label \
+             m.snapshot_duration_ms, m.snapshot_rows, m.id, m.source_label, \
+             m.group_id \
              FROM duckpipe.table_mappings m \
              JOIN duckpipe.sync_groups g ON m.group_id = g.id \
              ORDER BY g.name, m.source_schema, m.source_table",
@@ -1902,12 +1904,25 @@ fn status() -> TableIterator<
                 let snapshot_rows: Option<i64> = row.get(13).unwrap();
                 let mapping_id: i32 = row.get::<i32>(14).unwrap().unwrap_or(0);
                 let source_label: Option<String> = row.get(15).unwrap();
+                let group_id: i32 = row.get::<i32>(16).unwrap().unwrap_or(0);
 
-                // Read queued_changes from SHM
                 let queued_changes = shm_map
                     .get(&mapping_id)
                     .map(|m| m.queued_changes)
                     .unwrap_or(0);
+
+                // Lag = WAL head (SHM) - last flushed (metadata); None when either is unknown.
+                let applied_lsn_u64 = applied_lsn
+                    .as_ref()
+                    .map(|s| duckpipe_core::types::parse_lsn(s))
+                    .unwrap_or(0);
+                let replication_lag_bytes: Option<i64> =
+                    shm_group_map.get(&group_id).and_then(|gm| {
+                        if gm.pending_lsn == 0 || applied_lsn_u64 == 0 {
+                            return None;
+                        }
+                        Some(gm.pending_lsn.saturating_sub(applied_lsn_u64) as i64)
+                    });
 
                 rows.push((
                     sync_group,
@@ -1925,6 +1940,7 @@ fn status() -> TableIterator<
                     snapshot_duration_ms,
                     snapshot_rows,
                     source_label,
+                    replication_lag_bytes,
                 ));
             }
         }
@@ -2160,9 +2176,7 @@ AS 'MODULE_PATHNAME', '@FUNCTION_NAME@'
 LANGUAGE C STRICT SECURITY DEFINER;
 ")]
 fn metrics() -> String {
-    // Read in-memory metrics from SHM (already keyed by id)
-    let shm_table_map = crate::read_shmem_table_metrics();
-    let shm_group_map = crate::read_shmem_group_metrics();
+    let (shm_table_map, shm_group_map) = crate::read_shmem_all_metrics();
 
     // Query persisted metrics from PG
     let mut table_entries = Vec::new();

@@ -877,7 +877,8 @@ async fn connect_slot_consumer(
 /// the standalone daemon (`--group` flag).
 ///
 /// `consumer` is `Option<SlotState>` (at most one slot per group).
-/// Returns whether any work was done.
+/// Returns (any_work, pending_lsn) — whether any work was done and the latest
+/// LSN received from the WAL stream (used for replication lag tracking).
 pub async fn run_group_sync_cycle(
     config: &ServiceConfig,
     group_name: &str,
@@ -885,7 +886,7 @@ pub async fn run_group_sync_cycle(
     slot_params: &SlotConnectParams,
     consumer: &mut Option<SlotState>,
     snapshot_manager: &mut SnapshotManager,
-) -> Result<bool, String> {
+) -> Result<(bool, u64), String> {
     // Establish metadata connection (short-lived per cycle)
     let meta_app_name = crate::connstr::app_name(group_name, "meta");
     let (client, conn_handle) =
@@ -905,7 +906,7 @@ pub async fn run_group_sync_cycle(
         None => {
             drop(client);
             let _ = conn_handle.await;
-            return Ok(false);
+            return Ok((false, 0));
         }
     };
 
@@ -1180,5 +1181,5 @@ pub async fn run_group_sync_cycle(
     drop(client);
     let _ = conn_handle.await;
 
-    Ok(any_work)
+    Ok((any_work, group.pending_lsn))
 }
