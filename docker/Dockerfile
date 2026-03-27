@@ -1,12 +1,12 @@
 ARG PG_VERSION=18
-ARG DUCKLAKE_COMMIT=c6b2fd9408431cd86f720fba276774d2bcf23eff
+ARG PGDUCKLAKE_COMMIT=d5dd63073b9512b05f8a7ee6ebd79ff5b50b1028
 
 ###############################################################################
 ### DUCKLAKE-BUILDER — clone + build pg_duckdb + libduckdb + pg_ducklake
 ###############################################################################
 FROM postgres:${PG_VERSION}-bookworm AS ducklake-builder
 ARG PG_VERSION
-ARG DUCKLAKE_COMMIT
+ARG PGDUCKLAKE_COMMIT
 
 # C++ build deps for DuckDB + pg_duckdb + pg_ducklake.
 RUN apt-get update -qq && \
@@ -31,7 +31,7 @@ RUN apt-get update -qq && \
 WORKDIR /build/pg_ducklake
 RUN git init . && \
     git remote add origin https://github.com/relytcloud/pg_ducklake.git && \
-    git fetch --depth 1 origin ${DUCKLAKE_COMMIT} && \
+    git fetch --depth 1 origin ${PGDUCKLAKE_COMMIT} && \
     git checkout FETCH_HEAD && \
     git submodule update --init --recursive --depth 1
 

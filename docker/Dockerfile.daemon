@@ -1,15 +1,15 @@
 # _BUILDER_PG is internal — not a CI matrix dimension.
 # The daemon is PG-version-agnostic; we only borrow libduckdb.so at build time.
 ARG _BUILDER_PG=18
-ARG DUCKDB_VERSION=v1.5.0
-ARG DUCKLAKE_COMMIT=c6b2fd9408431cd86f720fba276774d2bcf23eff
+ARG DUCKDB_VERSION=v1.5.1
+ARG PGDUCKLAKE_COMMIT=d5dd63073b9512b05f8a7ee6ebd79ff5b50b1028
 
 ###############################################################################
 ### DUCKLAKE-BUILDER — clone pg_ducklake + build libduckdb.so
 ###############################################################################
 FROM postgres:${_BUILDER_PG}-bookworm AS ducklake-builder
 ARG _BUILDER_PG
-ARG DUCKLAKE_COMMIT
+ARG PGDUCKLAKE_COMMIT
 
 # Minimal C++ build deps (no clang/libclang — pgrx is not used for the daemon)
 RUN apt-get update -qq && \
@@ -27,7 +27,7 @@ RUN apt-get update -qq && \
 WORKDIR /build/pg_ducklake
 RUN git init . && \
     git remote add origin https://github.com/relytcloud/pg_ducklake.git && \
-    git fetch --depth 1 origin ${DUCKLAKE_COMMIT} && \
+    git fetch --depth 1 origin ${PGDUCKLAKE_COMMIT} && \
     git checkout FETCH_HEAD && \
     git submodule update --init --recursive --depth 1
 

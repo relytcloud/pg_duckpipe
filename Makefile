@@ -28,7 +28,7 @@ build: check-cargo-pgrx
 # Build ducklake.duckdb_extension and install to pkglibdir.
 # Skips if already present. Clones pg_ducklake on demand if DUCKLAKE_REPO is not set.
 DUCKLAKE_GIT_URL ?= https://github.com/relytcloud/pg_ducklake.git
-DUCKLAKE_COMMIT  ?= c6b2fd9408431cd86f720fba276774d2bcf23eff
+PGDUCKLAKE_COMMIT  ?= d5dd63073b9512b05f8a7ee6ebd79ff5b50b1028
 
 install-ducklake-ext:
 	@if [ -f "$(PG_LIB)/ducklake.duckdb_extension" ] && [ "$${FORCE:-0}" != "1" ]; then \
@@ -39,11 +39,11 @@ install-ducklake-ext:
 			if [ -d deps/pg_ducklake ]; then \
 				echo "==> Using existing deps/pg_ducklake"; \
 			else \
-				echo "==> Cloning pg_ducklake @ $(DUCKLAKE_COMMIT) into deps/ ..."; \
+				echo "==> Cloning pg_ducklake @ $(PGDUCKLAKE_COMMIT) into deps/ ..."; \
 				mkdir -p deps && \
 				git init deps/pg_ducklake && \
 				git -C deps/pg_ducklake remote add origin "$(DUCKLAKE_GIT_URL)" && \
-				git -C deps/pg_ducklake fetch --depth 1 origin "$(DUCKLAKE_COMMIT)" && \
+				git -C deps/pg_ducklake fetch --depth 1 origin "$(PGDUCKLAKE_COMMIT)" && \
 				git -C deps/pg_ducklake checkout FETCH_HEAD && \
 				git -C deps/pg_ducklake submodule update --init --recursive --depth 1; \
 			fi; \

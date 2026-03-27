@@ -40,8 +40,20 @@ if [ ! -d "${DUCKLAKE_SRC}" ]; then
     echo "ERROR: ${DUCKLAKE_SRC} not found. Is DUCKLAKE_REPO a pg_ducklake checkout?"
     exit 1
 fi
-if [ ! -f "${DUCKLAKE_SRC}/duckdb/CMakeLists.txt" ]; then
-    echo "ERROR: ${DUCKLAKE_SRC}/duckdb/ is empty. Run 'git submodule update --init --recursive' in pg_ducklake."
+
+# DuckDB source: ducklake's own duckdb/ submodule, or the shared copy in pg_duckdb.
+# After pg_ducklake migrated ducklake from submodule to subtree, the nested
+# duckdb submodule is no longer initialised — symlink to the shared copy.
+DUCKDB_SRC="${DUCKLAKE_SRC}/duckdb"
+SHARED_DUCKDB="${REPO}/third_party/pg_duckdb/third_party/duckdb"
+if [ ! -f "${DUCKDB_SRC}/CMakeLists.txt" ] && [ -f "${SHARED_DUCKDB}/CMakeLists.txt" ]; then
+    echo "==> Symlinking shared DuckDB source into ducklake/duckdb ..."
+    ln -sfn "${SHARED_DUCKDB}" "${DUCKDB_SRC}"
+fi
+
+if [ ! -f "${DUCKDB_SRC}/CMakeLists.txt" ]; then
+    echo "ERROR: DuckDB source not found at ${DUCKDB_SRC} or ${SHARED_DUCKDB}."
+    echo "Run 'git submodule update --init --recursive' in pg_ducklake."
     exit 1
 fi
 cd "${DUCKLAKE_SRC}"
