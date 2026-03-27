@@ -7,11 +7,11 @@ variable "PG_VERSION" {
 }
 
 variable "DUCKDB_VERSION" {
-  default = "v1.5.0"
+  default = "v1.5.1"
 }
 
-variable "DUCKLAKE_COMMIT" {
-  default = "c6b2fd9408431cd86f720fba276774d2bcf23eff"
+variable "PGDUCKLAKE_COMMIT" {
+  default = "d5dd63073b9512b05f8a7ee6ebd79ff5b50b1028"
 }
 
 # Base target: defines build args, target stage, and default tag.
@@ -20,7 +20,7 @@ target "pg_duckpipe" {
   dockerfile = "docker/Dockerfile"
   args = {
     PG_VERSION      = "${PG_VERSION}"
-    DUCKLAKE_COMMIT = "${DUCKLAKE_COMMIT}"
+    PGDUCKLAKE_COMMIT = "${PGDUCKLAKE_COMMIT}"
   }
   target = "output"
   tags   = ["${REPO}:${PG_VERSION}-dev"]
@@ -45,7 +45,7 @@ target "duckpipe_daemon" {
   dockerfile = "docker/Dockerfile.daemon"
   args = {
     DUCKDB_VERSION  = "${DUCKDB_VERSION}"
-    DUCKLAKE_COMMIT = "${DUCKLAKE_COMMIT}"
+    PGDUCKLAKE_COMMIT = "${PGDUCKLAKE_COMMIT}"
   }
   target = "runtime"
   tags   = ["pgducklake/duckpipe-daemon:dev"]
