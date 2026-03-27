@@ -74,11 +74,10 @@ SELECT pg_sleep(10);
 
 SELECT * FROM public.ddl_test_ducklake ORDER BY id;
 
--- Diagnostic: DuckLake column definitions
-SELECT column_id, column_name, column_type, begin_snapshot, end_snapshot
-FROM ducklake.ducklake_column ORDER BY column_id;
--- Schema version mappings
-SELECT * FROM ducklake.ducklake_schema_versions ORDER BY begin_snapshot;
+-- Verify final schema: x was dropped, y remains, score was renamed from b
+SELECT column_name FROM information_schema.columns
+WHERE table_name = 'ddl_test_ducklake' AND table_schema = 'public'
+ORDER BY ordinal_position;
 
 -- ============================================================
 -- Cleanup
