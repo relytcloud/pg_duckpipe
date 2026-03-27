@@ -1222,10 +1222,7 @@ fn flush_thread_main(
                 //
                 worker = None; // DETACH DuckLake before PG DDL
                 if let Err(e) = rt.block_on(apply_ddl_commands(
-                    &commands,
-                    target_oid,
-                    pg_connstr,
-                    group_name,
+                    &commands, target_oid, pg_connstr, group_name,
                 )) {
                     tracing::error!(
                         "pg_duckpipe: DDL sync failed for {}: {}",
@@ -1530,4 +1527,3 @@ async fn apply_ddl_commands(
 
     Ok(())
 }
-
