@@ -1216,7 +1216,11 @@ fn flush_thread_main(
                     pending_local.store(0, Ordering::Relaxed);
                 }
 
-                // 2. Apply DDL to DuckLake target via PG connection
+                // 2. Apply DDL via pg_ducklake ALTER TABLE.
+                //    The DDL must go through PG so that both the PG catalog
+                //    (pg_attribute) and the DuckLake catalog are updated.
+                //
+                worker = None; // DETACH DuckLake before PG DDL
                 if let Err(e) = rt.block_on(apply_ddl_commands(
                     &commands,
                     target_oid,
@@ -1514,7 +1518,7 @@ async fn apply_ddl_commands(
                 )
             }
         };
-        tracing::info!("pg_duckpipe: DDL sync: {}", sql);
+        tracing::info!("pg_duckpipe: DDL sync (PG): {}", sql);
         client
             .execute(&sql, &[])
             .await
@@ -1526,3 +1530,4 @@ async fn apply_ddl_commands(
 
     Ok(())
 }
+

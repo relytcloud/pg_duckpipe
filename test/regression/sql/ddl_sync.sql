@@ -59,6 +59,28 @@ SELECT pg_sleep(3);
 SELECT * FROM public.ddl_test_ducklake ORDER BY id;
 
 -- ============================================================
+-- TEST 4: Multiple consecutive DDLs with interleaved DML
+-- All issued without waiting — barriers queue in VecDeque and
+-- each batch must be flushed with the correct schema version.
+-- ============================================================
+ALTER TABLE ddl_test ADD COLUMN x text;
+INSERT INTO ddl_test VALUES (5, 300, 'v1');
+ALTER TABLE ddl_test ADD COLUMN y integer;
+INSERT INTO ddl_test VALUES (6, 400, 'v2', 10);
+ALTER TABLE ddl_test DROP COLUMN x;
+INSERT INTO ddl_test VALUES (7, 500, 20);
+
+SELECT pg_sleep(10);
+
+SELECT * FROM public.ddl_test_ducklake ORDER BY id;
+
+-- Diagnostic: DuckLake column definitions
+SELECT column_id, column_name, column_type, begin_snapshot, end_snapshot
+FROM ducklake.ducklake_column ORDER BY column_id;
+-- Schema version mappings
+SELECT * FROM ducklake.ducklake_schema_versions ORDER BY begin_snapshot;
+
+-- ============================================================
 -- Cleanup
 -- ============================================================
 SELECT duckpipe.remove_table('public.ddl_test', false);

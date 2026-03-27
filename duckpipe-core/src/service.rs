@@ -360,6 +360,7 @@ async fn process_one_wal_message(
                                 key_attrs: new_key_attrs,
                                 atttypes: new_entry.atttypes.clone(),
                                 source_label: mapping.source_label.clone(),
+                                sync_mode: mapping.sync_mode.clone(),
                             };
 
                             coordinator.set_pending_ddl(
