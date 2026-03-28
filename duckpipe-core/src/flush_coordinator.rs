@@ -5,8 +5,8 @@
 //! - Handle PG metadata updates (applied_lsn, metrics, error state) independently
 //! - Backpressure via AtomicI64 total_queued prevents unbounded memory growth
 //!
-//! `drain_and_wait_all()` is retained for shutdown. `drain_and_wait_table()` is
-//! used for TRUNCATE (must flush before DELETE).
+//! `drain_and_wait_all()` is retained for shutdown. TRUNCATE uses the same
+//! non-blocking barrier queue as DDL (see `DdlCommand::Truncate`).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -55,7 +55,7 @@ pub struct QueueMeta {
     pub sync_mode: String,
 }
 
-/// DDL command to apply to the DuckLake target table.
+/// Barrier command: DDL (ADD/DROP/RENAME COLUMN) or TRUNCATE (DELETE by source).
 #[derive(Debug, Clone)]
 pub enum DdlCommand {
     AddColumn {
@@ -74,10 +74,13 @@ pub enum DdlCommand {
         old_type: String,
         new_type: String,
     },
+    Truncate {
+        source_label: String,
+    },
 }
 
-/// DDL barrier: set by the WAL consumer when a schema change is detected.
-/// The flush thread drains old-schema changes, flushes, applies DDL, then continues.
+/// Barrier: set by the WAL consumer when a schema change or TRUNCATE is detected.
+/// The flush thread drains old changes, flushes, applies commands, then continues.
 pub struct PendingDdl {
     pub commands: Vec<DdlCommand>,
     pub new_meta: QueueMeta,
@@ -604,6 +607,14 @@ impl FlushCoordinator {
         }
     }
 
+    /// Clone the current QueueMeta for a table (used to construct barriers
+    /// where the schema is unchanged, e.g. TRUNCATE).
+    pub fn get_meta(&self, mapping_id: i32) -> Option<QueueMeta> {
+        self.threads
+            .get(&mapping_id)
+            .map(|entry| entry.queue_handle.inner.lock().unwrap().meta.clone())
+    }
+
     /// Check if backpressure should pause WAL consumption.
     /// Excludes changes queued for paused (SNAPSHOT) tables so that buffered
     /// snapshot WAL changes don't block streaming for other tables.
@@ -798,28 +809,6 @@ impl FlushCoordinator {
             .retain(|id, _| active_mapping_ids.contains(id));
         self.per_table_avg_row_bytes
             .retain(|id, _| active_mapping_ids.contains(id));
-    }
-
-    /// Per-table synchronous drain: signal one flush thread to drain, wait for completion.
-    /// Used for TRUNCATE — must flush pending changes before DELETE.
-    pub fn drain_and_wait_table(&mut self, mapping_id: i32) {
-        if let Some(entry) = self.threads.get(&mapping_id) {
-            // Reset drain_complete flag
-            {
-                let mut done = entry.drain_complete.0.lock().unwrap();
-                *done = false;
-            }
-            entry.control.drain_requested.store(true, Ordering::Release);
-            entry.queue_handle.condvar.notify_one();
-
-            // Wait for completion
-            let (lock, cvar) = &*entry.drain_complete;
-            let guard = lock.lock().unwrap();
-            let _guard = cvar
-                .wait_timeout_while(guard, Duration::from_secs(30), |done| !*done)
-                .unwrap()
-                .0;
-        }
     }
 
     /// Synchronous barrier: signal all flush threads to drain their queues,
@@ -1208,7 +1197,7 @@ fn flush_thread_main(
                 guard.meta = new_meta.clone();
                 drop(guard);
 
-                // 1. Flush old-schema buffer if any data is buffered
+                // 1. Flush old buffer if any data is buffered
                 if buffered_count > 0 {
                     if let Some(meta) = buffered_meta.as_ref() {
                         do_flush_buffer(
@@ -1229,20 +1218,17 @@ fn flush_thread_main(
                     pending_local.store(0, Ordering::Relaxed);
                 }
 
-                // 2. Apply DDL via pg_ducklake ALTER TABLE.
-                //    The DDL must go through PG so that both the PG catalog
-                //    (pg_attribute) and the DuckLake catalog are updated.
-                //
-                worker = None; // DETACH DuckLake before PG DDL
+                // 2. Apply barrier commands via PG.
+                worker = None;
                 if let Err(e) = rt.block_on(apply_ddl_commands(
                     &commands, target_oid, pg_connstr, group_name,
                 )) {
                     tracing::error!(
-                        "pg_duckpipe: DDL sync failed for {}: {}",
+                        "pg_duckpipe: barrier command failed for {}: {}",
                         new_meta.target_key,
                         e
                     );
-                    let error_msg = format!("DDL sync failed: {}", e);
+                    let error_msg = format!("barrier command failed: {}", e);
                     // For unsupported DDL (e.g. ALTER COLUMN TYPE), transition to
                     // ERRORED immediately (threshold=1) instead of waiting for 3 failures.
                     let threshold = if commands
@@ -1275,7 +1261,7 @@ fn flush_thread_main(
                 next_seq = 0;
                 buffered_lsn = 0;
                 last_flush = Instant::now();
-                continue; // process new-schema changes on next iteration
+                continue; // process post_changes on next iteration
             } else {
                 drop(guard);
             }
@@ -1552,12 +1538,19 @@ async fn apply_ddl_commands(
                     new_name.replace('"', "\"\""),
                 )
             }
+            DdlCommand::Truncate { source_label } => {
+                format!(
+                    "DELETE FROM {} WHERE \"_duckpipe_source\" = '{}'",
+                    target_ref,
+                    source_label.replace('\'', "''"),
+                )
+            }
         };
-        tracing::info!("pg_duckpipe: DDL sync (PG): {}", sql);
+        tracing::info!("pg_duckpipe: barrier exec (PG): {}", sql);
         client
             .execute(&sql, &[])
             .await
-            .map_err(|e| format!("DDL exec '{}': {}", sql, e))?;
+            .map_err(|e| format!("barrier exec '{}': {}", sql, e))?;
     }
 
     drop(client);
