@@ -16,6 +16,12 @@ PostgreSQL extension for real-time CDC to pg_ducklake
 
 ![pg_duckpipe architecture](images/arch.png)
 
+<div align="center">
+<table><tr><td>
+<img src="images/demo.gif" alt="pg_duckpipe demo" width="800">
+</td></tr></table>
+</div>
+
 ## Key Features
 
 - **One-command setup**: `duckpipe.add_table()` creates the columnar target and starts syncing automatically
