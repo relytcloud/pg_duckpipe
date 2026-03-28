@@ -501,6 +501,29 @@ pub fn fixed_bytes_for_oid(oid: u32) -> usize {
     }
 }
 
+/// Map PostgreSQL type OID to a human-readable type name for error messages.
+pub fn pg_oid_to_type_name(oid: u32) -> String {
+    match oid {
+        16 => "boolean",
+        20 => "bigint",
+        21 => "smallint",
+        23 => "integer",
+        25 => "text",
+        700 => "real",
+        701 => "double precision",
+        1043 => "varchar",
+        1700 => "numeric",
+        1114 => "timestamp",
+        1184 => "timestamptz",
+        1082 => "date",
+        2950 => "uuid",
+        114 => "json",
+        3802 => "jsonb",
+        _ => return format!("oid:{}", oid),
+    }
+    .to_string()
+}
+
 /// Map PostgreSQL type name to DuckDB-compatible type for DDL statements.
 pub fn map_pg_type_for_duckdb(pg_type: &str) -> String {
     match pg_type {

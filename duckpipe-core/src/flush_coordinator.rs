@@ -58,9 +58,22 @@ pub struct QueueMeta {
 /// DDL command to apply to the DuckLake target table.
 #[derive(Debug, Clone)]
 pub enum DdlCommand {
-    AddColumn { col_name: String, col_type: String },
-    DropColumn { col_name: String },
-    RenameColumn { old_name: String, new_name: String },
+    AddColumn {
+        col_name: String,
+        col_type: String,
+    },
+    DropColumn {
+        col_name: String,
+    },
+    RenameColumn {
+        old_name: String,
+        new_name: String,
+    },
+    UnsupportedAlterColumnType {
+        col_name: String,
+        old_type: String,
+        new_type: String,
+    },
 }
 
 /// DDL barrier: set by the WAL consumer when a schema change is detected.
@@ -1229,15 +1242,29 @@ fn flush_thread_main(
                         new_meta.target_key,
                         e
                     );
-                    report_flush_error(
-                        &result_tx,
-                        &rt,
+                    let error_msg = format!("DDL sync failed: {}", e);
+                    // For unsupported DDL (e.g. ALTER COLUMN TYPE), transition to
+                    // ERRORED immediately (threshold=1) instead of waiting for 3 failures.
+                    let threshold = if commands
+                        .iter()
+                        .any(|c| matches!(c, DdlCommand::UnsupportedAlterColumnType { .. }))
+                    {
+                        1
+                    } else {
+                        ERRORED_THRESHOLD
+                    };
+                    let _ = result_tx.send(FlushThreadResult::Error {
+                        target_key: new_meta.target_key.clone(),
+                        mapping_id: new_meta.mapping_id,
+                        error: error_msg.clone(),
+                    });
+                    let _ = rt.block_on(flush_worker::update_error_state(
                         pg_connstr,
-                        group_name,
-                        &new_meta.target_key,
                         new_meta.mapping_id,
-                        &format!("DDL sync failed: {}", e),
-                    );
+                        &error_msg,
+                        threshold,
+                        group_name,
+                    ));
                 }
 
                 // 3. Reset FlushWorker (forces re-discovery of lake_info)
@@ -1491,6 +1518,17 @@ async fn apply_ddl_commands(
 
     for cmd in commands {
         let sql = match cmd {
+            DdlCommand::UnsupportedAlterColumnType {
+                col_name,
+                old_type,
+                new_type,
+            } => {
+                return Err(format!(
+                    "ALTER COLUMN TYPE on \"{}\" ({} → {}) is not supported by DDL sync. \
+                     Run SELECT duckpipe.resync('schema.table') to re-snapshot the table.",
+                    col_name, old_type, new_type
+                ));
+            }
             DdlCommand::AddColumn { col_name, col_type } => {
                 format!(
                     "ALTER TABLE {} ADD COLUMN \"{}\" {}",

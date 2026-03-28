@@ -80,6 +80,18 @@ WHERE table_name = 'ddl_test_ducklake' AND table_schema = 'public'
 ORDER BY ordinal_position;
 
 -- ============================================================
+-- TEST 5: ALTER COLUMN TYPE → pipeline errors with resync hint
+-- ============================================================
+ALTER TABLE ddl_test ALTER COLUMN score TYPE bigint;
+INSERT INTO ddl_test VALUES (8, 600, 30);
+
+SELECT pg_sleep(5);
+
+-- Table should be ERRORED with ALTER COLUMN TYPE message
+SELECT state, error_message LIKE '%ALTER COLUMN TYPE%' AS has_type_error
+FROM duckpipe.table_mappings WHERE source_table = 'ddl_test';
+
+-- ============================================================
 -- Cleanup
 -- ============================================================
 SELECT duckpipe.remove_table('public.ddl_test', false);

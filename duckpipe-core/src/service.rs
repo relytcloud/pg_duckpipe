@@ -216,11 +216,35 @@ async fn detect_schema_changes(
     let removed: HashSet<&str> = old_names.difference(&new_names).copied().collect();
     let added: HashSet<&str> = new_names.difference(&old_names).copied().collect();
 
+    let mut changes = Vec::new();
+
+    // Detect ALTER COLUMN TYPE: same name, different type OID.
+    for (i, new_name) in new.attnames.iter().enumerate() {
+        if let Some(old_pos) = old.attnames.iter().position(|n| n == new_name) {
+            if old_pos < old.atttypes.len()
+                && i < new.atttypes.len()
+                && old.atttypes[old_pos] != new.atttypes[i]
+            {
+                let old_type = crate::types::pg_oid_to_type_name(old.atttypes[old_pos]);
+                let new_type = crate::types::pg_oid_to_type_name(new.atttypes[i]);
+                changes.push(DdlCommand::UnsupportedAlterColumnType {
+                    col_name: new_name.clone(),
+                    old_type,
+                    new_type,
+                });
+            }
+        }
+    }
+    if changes
+        .iter()
+        .any(|c| matches!(c, DdlCommand::UnsupportedAlterColumnType { .. }))
+    {
+        return Ok(changes); // Skip ADD/DROP/RENAME — table will error
+    }
+
     if removed.is_empty() && added.is_empty() {
         return Ok(Vec::new());
     }
-
-    let mut changes = Vec::new();
 
     if !removed.is_empty() && !added.is_empty() {
         // Mixed: try to detect renames by position matching.
