@@ -17,7 +17,9 @@ PostgreSQL extension for real-time CDC to pg_ducklake
 ![pg_duckpipe architecture](images/arch.png)
 
 <div align="center">
-<img src="images/demo.gif" alt="pg_duckpipe demo" width="80%" style="border: 1px solid #e1e4e8; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.12);">
+<table><tr><td>
+<img src="images/demo.gif" alt="pg_duckpipe demo" width="800">
+</td></tr></table>
 </div>
 
 ## Key Features
