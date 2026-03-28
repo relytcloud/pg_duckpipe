@@ -684,7 +684,8 @@ async fn process_one_wal_message(
             return Ok(true);
         }
         'T' => {
-            // TRUNCATE — flush per-table pending queues, then DELETE all from targets.
+            // TRUNCATE — enqueue a barrier so the flush thread drains pending
+            // changes, then executes DELETE FROM on the target (non-blocking).
             // Uses DELETE FROM instead of TRUNCATE because DuckLake tables
             // (via pg_duckdb) silently ignore TRUNCATE — it succeeds but
             // doesn't actually remove rows.
@@ -704,23 +705,24 @@ async fn process_one_wal_message(
                                     mapping.source_schema,
                                     mapping.source_table
                                 );
-                            } else {
-                                coordinator.drain_and_wait_table(mapping.id);
-                                // Scope DELETE by _duckpipe_source (always set)
-                                let delete_sql = format!(
-                                    "DELETE FROM \"{}\".\"{}\" WHERE \"_duckpipe_source\" = '{}'",
-                                    mapping.target_schema.replace('"', "\"\""),
-                                    mapping.target_table.replace('"', "\"\""),
-                                    mapping.source_label.replace('\'', "''")
+                            } else if let Some(meta) = coordinator.get_meta(mapping.id) {
+                                coordinator.set_pending_ddl(
+                                    mapping.id,
+                                    PendingDdl {
+                                        commands: vec![DdlCommand::Truncate {
+                                            source_label: mapping.source_label.clone(),
+                                        }],
+                                        new_meta: meta,
+                                        target_oid: mapping.target_oid,
+                                        post_changes: Vec::new(),
+                                    },
                                 );
-                                if let Err(e) = client.execute(&delete_sql, &[]).await {
-                                    tracing::error!(
-                                        "pg_duckpipe: failed to clear target table {}.{}: {}",
-                                        mapping.target_schema,
-                                        mapping.target_table,
-                                        e
-                                    );
-                                }
+                            } else {
+                                tracing::warn!(
+                                    "pg_duckpipe: TRUNCATE on {}.{} — no flush queue yet, skipping",
+                                    mapping.source_schema,
+                                    mapping.source_table
+                                );
                             }
                         }
                     }

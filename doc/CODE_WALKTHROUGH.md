@@ -517,7 +517,7 @@ Fairness: threads take a ticket on arrival and wait in strict FIFO order — no 
 - `ensure_queue(target_key, mapping_id, attnames, key_attrs, atttypes)` — create queue + spawn flush thread if new (or respawn if dead); passes `Arc<FlushGate>` to thread
 - `push_change(target_key, change)` — lock queue, push change, notify condvar, increment backpressure counter
 - `is_backpressured() -> bool` — true when total_queued >= max_queued
-- `drain_and_wait_table(target_key)` — per-table synchronous drain (used for TRUNCATE)
+- `get_meta(mapping_id) -> Option<QueueMeta>` — clone current queue metadata (used to build TRUNCATE barriers)
 - `drain_and_wait_all() -> Vec<FlushThreadResult>` — synchronous barrier (retained for shutdown only)
 - `collect_results() -> Vec<FlushThreadResult>` — non-blocking drain of mpsc result channel
 - `set_max_concurrent_flushes(n)` — dynamically update gate limit (for runtime GUC changes)
@@ -643,7 +643,7 @@ Iterates over `(lsn, data)` tuples, parsing each pgoutput binary message:
 | `'D'` (DELETE) | Decode old key values, push `Delete` change |
 | `'B'` (BEGIN) | Parse but no action (LSN tracked from COMMIT) |
 | `'C'` (COMMIT) | Update `group.pending_lsn = end_lsn` |
-| `'T'` (TRUNCATE) | Per-table drain (`drain_and_wait_table`), then `DELETE FROM` each target table |
+| `'T'` (TRUNCATE) | Enqueue barrier (`DdlCommand::Truncate`); flush thread drains then executes `DELETE FROM` |
 
 After the message loop:
 1. `coordinator.collect_results()` — non-blocking drain of flush results for error logging (no synchronous barrier)
@@ -660,7 +660,7 @@ After the message loop:
 - On failure: `FlushWorker` is dropped (lazily recreated), flush thread records error in PG, transitions to ERRORED after 3 consecutive failures
 - Per-table error isolation: one table failing doesn't block others
 - Backpressure: WAL consumer pauses when total queued changes exceed `max_queued_changes`
-- TRUNCATE: uses `drain_and_wait_table()` for per-table synchronous drain before DELETE
+- TRUNCATE: non-blocking barrier queue (same as DDL); flush thread drains pending changes then executes DELETE
 - Crash safety: replication slot only advances past what all tables have durably flushed (confirmed_lsn = min(applied_lsn) read from PG)
 
 ### 5.1. Schema DDL Sync
