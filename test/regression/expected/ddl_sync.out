@@ -1,0 +1,204 @@
+-- Test automatic DDL propagation from source to DuckLake target tables.
+--
+-- Schema changes (ADD/DROP/RENAME COLUMN) are detected via RELATION message
+-- diffing and applied to the target table through a non-blocking queue barrier.
+-- Set fast flush for regression tests (default 5s is too slow for pg_sleep waits)
+SELECT duckpipe.set_config('flush_interval_ms', '1000');
+ set_config 
+------------
+ 
+(1 row)
+
+SELECT duckpipe.set_config('flush_batch_threshold', '10000');
+ set_config 
+------------
+ 
+(1 row)
+
+SET client_min_messages = warning;
+SELECT duckpipe.stop_worker();
+ stop_worker 
+-------------
+ 
+(1 row)
+
+RESET client_min_messages;
+-- Use a dedicated group to avoid stale replication slot from prior tests
+SELECT duckpipe.create_group('ddl_grp');
+ create_group 
+--------------
+ ddl_grp
+(1 row)
+
+SET client_min_messages = warning;
+SELECT duckpipe.start_worker();
+ start_worker 
+--------------
+ 
+(1 row)
+
+RESET client_min_messages;
+CREATE TABLE ddl_test (id int primary key, a text);
+SELECT duckpipe.add_table('public.ddl_test', NULL, 'ddl_grp', false);
+ add_table 
+-----------
+ 
+(1 row)
+
+-- Initial data
+INSERT INTO ddl_test VALUES (1, 'hello');
+SELECT pg_sleep(2);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+SELECT * FROM public.ddl_test_ducklake ORDER BY id;
+ id |   a   |    _duckpipe_source     
+----+-------+-------------------------
+  1 | hello | ddl_grp/public.ddl_test
+(1 row)
+
+-- ============================================================
+-- TEST 1: ADD COLUMN
+-- ============================================================
+ALTER TABLE ddl_test ADD COLUMN b integer;
+INSERT INTO ddl_test VALUES (2, 'world', 42);
+SELECT pg_sleep(3);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+SELECT * FROM public.ddl_test_ducklake ORDER BY id;
+ id |   a   |    _duckpipe_source     | b  
+----+-------+-------------------------+----
+  1 | hello | ddl_grp/public.ddl_test |   
+  2 | world | ddl_grp/public.ddl_test | 42
+(2 rows)
+
+-- ============================================================
+-- TEST 2: DROP COLUMN
+-- ============================================================
+ALTER TABLE ddl_test DROP COLUMN a;
+INSERT INTO ddl_test VALUES (3, 100);
+SELECT pg_sleep(3);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+SELECT * FROM public.ddl_test_ducklake ORDER BY id;
+ id |    _duckpipe_source     |  b  
+----+-------------------------+-----
+  1 | ddl_grp/public.ddl_test |    
+  2 | ddl_grp/public.ddl_test |  42
+  3 | ddl_grp/public.ddl_test | 100
+(3 rows)
+
+-- ============================================================
+-- TEST 3: RENAME COLUMN
+-- ============================================================
+ALTER TABLE ddl_test RENAME COLUMN b TO score;
+INSERT INTO ddl_test VALUES (4, 200);
+SELECT pg_sleep(3);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+SELECT * FROM public.ddl_test_ducklake ORDER BY id;
+ id |    _duckpipe_source     | score 
+----+-------------------------+-------
+  1 | ddl_grp/public.ddl_test |      
+  2 | ddl_grp/public.ddl_test |    42
+  3 | ddl_grp/public.ddl_test |   100
+  4 | ddl_grp/public.ddl_test |   200
+(4 rows)
+
+-- ============================================================
+-- TEST 4: Multiple consecutive DDLs with interleaved DML
+-- All issued without waiting — barriers queue in VecDeque and
+-- each batch must be flushed with the correct schema version.
+-- ============================================================
+ALTER TABLE ddl_test ADD COLUMN x text;
+INSERT INTO ddl_test VALUES (5, 300, 'v1');
+ALTER TABLE ddl_test ADD COLUMN y integer;
+INSERT INTO ddl_test VALUES (6, 400, 'v2', 10);
+ALTER TABLE ddl_test DROP COLUMN x;
+INSERT INTO ddl_test VALUES (7, 500, 20);
+SELECT pg_sleep(10);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+SELECT * FROM public.ddl_test_ducklake ORDER BY id;
+ id |    _duckpipe_source     | score | y  
+----+-------------------------+-------+----
+  1 | ddl_grp/public.ddl_test |       |   
+  2 | ddl_grp/public.ddl_test |    42 |   
+  3 | ddl_grp/public.ddl_test |   100 |   
+  4 | ddl_grp/public.ddl_test |   200 |   
+  5 | ddl_grp/public.ddl_test |   300 |   
+  6 | ddl_grp/public.ddl_test |   400 | 10
+  7 | ddl_grp/public.ddl_test |   500 | 20
+(7 rows)
+
+-- Verify final schema: x was dropped, y remains, score was renamed from b
+SELECT column_name FROM information_schema.columns
+WHERE table_name = 'ddl_test_ducklake' AND table_schema = 'public'
+ORDER BY ordinal_position;
+   column_name    
+------------------
+ id
+ _duckpipe_source
+ score
+ y
+(4 rows)
+
+-- ============================================================
+-- TEST 5: ALTER COLUMN TYPE → pipeline errors with resync hint
+-- ============================================================
+ALTER TABLE ddl_test ALTER COLUMN score TYPE bigint;
+INSERT INTO ddl_test VALUES (8, 600, 30);
+SELECT pg_sleep(5);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+-- Table should be ERRORED with ALTER COLUMN TYPE message
+SELECT state, error_message LIKE '%ALTER COLUMN TYPE%' AS has_type_error
+FROM duckpipe.table_mappings WHERE source_table = 'ddl_test';
+  state  | has_type_error 
+---------+----------------
+ ERRORED | t
+(1 row)
+
+-- ============================================================
+-- Cleanup
+-- ============================================================
+SELECT duckpipe.remove_table('public.ddl_test', false);
+WARNING:  Group 'ddl_grp' has no remaining tables — its replication slot is still holding WAL. Run SELECT duckpipe.drop_group('ddl_grp') to release it.
+ remove_table 
+--------------
+ 
+(1 row)
+
+SELECT duckpipe.drop_group('ddl_grp');
+ drop_group 
+------------
+ 
+(1 row)
+
+DROP TABLE public.ddl_test_ducklake;
+DROP TABLE ddl_test;
+SET client_min_messages = warning;
+SELECT duckpipe.stop_worker();
+ stop_worker 
+-------------
+ 
+(1 row)
+
+RESET client_min_messages;

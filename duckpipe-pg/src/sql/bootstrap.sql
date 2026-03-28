@@ -33,6 +33,7 @@ CREATE TABLE duckpipe.table_mappings (
     last_sync_at    TIMESTAMPTZ,
     created_at      TIMESTAMPTZ DEFAULT NOW(),
     source_oid      BIGINT,
+    target_oid      BIGINT,
     error_message   TEXT,
     retry_at        TIMESTAMPTZ,
     consecutive_failures INTEGER DEFAULT 0,

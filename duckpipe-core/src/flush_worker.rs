@@ -73,6 +73,8 @@ pub async fn update_error_state(
 }
 
 /// Clear error state on successful flush: reset consecutive_failures and error_message.
+/// Skips tables in ERRORED state — those retain their error_message for user visibility
+/// and are recovered only through the auto-retry mechanism or manual resync.
 pub async fn clear_error_on_success(
     connstr: &str,
     mapping_id: i32,
@@ -83,9 +85,15 @@ pub async fn clear_error_on_success(
         .await
         .map_err(|e| format!("clear_error connect: {}", e))?;
 
-    let meta = MetadataClient::new(&client);
-    let _ = meta.clear_consecutive_failures(mapping_id).await;
-    let _ = meta.record_error_message(mapping_id, "").await;
+    client
+        .execute(
+            "UPDATE duckpipe.table_mappings \
+             SET consecutive_failures = 0, error_message = '' \
+             WHERE id = $1 AND state != 'ERRORED'",
+            &[&mapping_id],
+        )
+        .await
+        .map_err(|e| format!("clear_error: {}", e))?;
 
     drop(client);
     let _ = conn_handle.await;

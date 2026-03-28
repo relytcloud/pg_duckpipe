@@ -16,8 +16,9 @@
 - [ ] Mixed DML replication lag 50-100x append — WAL amplification + Parquet-scan DELETE phase
 
 ### Features
+- [x] Schema DDL sync — ALTER TABLE ADD/DROP/RENAME COLUMN propagation (OID-based target resolution)
+- [ ] TRUNCATE as DDL barrier — route TRUNCATE through the DDL barrier queue (DELETE FROM target), removing drain logic from the WAL consumer side
 - [ ] Per-table config JSONB column on `table_mappings` — consolidate `routing_enabled` and future per-table settings into a single `config JSONB` column (like `sync_groups.config`), avoid schema sprawl
-- [ ] Schema DDL sync — ALTER TABLE ADD/DROP COLUMN propagation
 - [ ] Staged storage — durable delta layer between WAL and DuckLake to decouple CDC from file proliferation
 - [ ] Explicit `Value` variants for more PG types (date, timestamp, uuid, numeric, interval, json)
 - [x] Sync tables with no PK (append mode; upsert requires PK)

@@ -15,7 +15,9 @@ use tokio_postgres::Client;
 use crate::decoder::{
     extract_key_values, parse_relation_message, parse_tuple_data, read_byte, read_i32, read_i64,
 };
-use crate::flush_coordinator::{FlushCoordinator, FlushThreadResult};
+use crate::flush_coordinator::{
+    DdlCommand, FlushCoordinator, FlushThreadResult, PendingDdl, QueueMeta,
+};
 use crate::metadata::{compute_backoff_secs, MetadataClient, ERRORED_THRESHOLD};
 use crate::slot_consumer::SlotConsumer;
 use crate::snapshot_manager::SnapshotManager;
@@ -194,6 +196,133 @@ fn fill_toast_columns(
         .collect()
 }
 
+/// Detect column-level schema changes between old and new RELATION entries.
+///
+/// Algorithm:
+/// 1. Compute sets of column names in old and new entries
+/// 2. Pure ADD: names in new but not in old → query catalog for type
+/// 3. Pure DROP: names in old but not in new
+/// 4. Mixed (possible RENAME): match by position (same index, same type OID)
+async fn detect_schema_changes(
+    old: &RelCacheEntry,
+    new: &RelCacheEntry,
+    catalog_client: &Client,
+) -> Result<Vec<DdlCommand>, String> {
+    use std::collections::HashSet;
+
+    let old_names: HashSet<&str> = old.attnames.iter().map(|s| s.as_str()).collect();
+    let new_names: HashSet<&str> = new.attnames.iter().map(|s| s.as_str()).collect();
+
+    let removed: HashSet<&str> = old_names.difference(&new_names).copied().collect();
+    let added: HashSet<&str> = new_names.difference(&old_names).copied().collect();
+
+    let mut changes = Vec::new();
+
+    // Detect ALTER COLUMN TYPE: same name, different type OID.
+    for (i, new_name) in new.attnames.iter().enumerate() {
+        if let Some(old_pos) = old.attnames.iter().position(|n| n == new_name) {
+            if old_pos < old.atttypes.len()
+                && i < new.atttypes.len()
+                && old.atttypes[old_pos] != new.atttypes[i]
+            {
+                let old_type = crate::types::pg_oid_to_type_name(old.atttypes[old_pos]);
+                let new_type = crate::types::pg_oid_to_type_name(new.atttypes[i]);
+                changes.push(DdlCommand::UnsupportedAlterColumnType {
+                    col_name: new_name.clone(),
+                    old_type,
+                    new_type,
+                });
+            }
+        }
+    }
+    if changes
+        .iter()
+        .any(|c| matches!(c, DdlCommand::UnsupportedAlterColumnType { .. }))
+    {
+        return Ok(changes); // Skip ADD/DROP/RENAME — table will error
+    }
+
+    if removed.is_empty() && added.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    if !removed.is_empty() && !added.is_empty() {
+        // Mixed: try to detect renames by position matching.
+        // A rename keeps the same position and same type OID but changes the name.
+        let mut matched_old: HashSet<&str> = HashSet::new();
+        let mut matched_new: HashSet<&str> = HashSet::new();
+
+        let max_pos = old.attnames.len().min(new.attnames.len());
+        for i in 0..max_pos {
+            let old_name = &old.attnames[i];
+            let new_name = &new.attnames[i];
+            if removed.contains(old_name.as_str())
+                && added.contains(new_name.as_str())
+                && i < old.atttypes.len()
+                && i < new.atttypes.len()
+                && old.atttypes[i] == new.atttypes[i]
+            {
+                changes.push(DdlCommand::RenameColumn {
+                    old_name: old_name.clone(),
+                    new_name: new_name.clone(),
+                });
+                matched_old.insert(old_name.as_str());
+                matched_new.insert(new_name.as_str());
+            }
+        }
+
+        // Remaining removed → DROP
+        for name in &removed {
+            if !matched_old.contains(name) {
+                changes.push(DdlCommand::DropColumn {
+                    col_name: name.to_string(),
+                });
+            }
+        }
+
+        // Remaining added → ADD
+        for name in &added {
+            if !matched_new.contains(name) {
+                let col_type = crate::metadata::get_column_type(
+                    catalog_client,
+                    &new.nspname,
+                    &new.relname,
+                    name,
+                )
+                .await
+                .map_err(|e| format!("get_column_type: {}", e))?;
+                let mapped_type = crate::types::map_pg_type_for_duckdb(&col_type);
+                changes.push(DdlCommand::AddColumn {
+                    col_name: name.to_string(),
+                    col_type: mapped_type,
+                });
+            }
+        }
+    } else if !added.is_empty() {
+        // Pure ADD
+        for name in &added {
+            let col_type =
+                crate::metadata::get_column_type(catalog_client, &new.nspname, &new.relname, name)
+                    .await
+                    .map_err(|e| format!("get_column_type: {}", e))?;
+            let mapped_type = crate::types::map_pg_type_for_duckdb(&col_type);
+            changes.push(DdlCommand::AddColumn {
+                col_name: name.to_string(),
+                col_type: mapped_type,
+            });
+        }
+    } else {
+        // Pure DROP
+        for name in &removed {
+            changes.push(DdlCommand::DropColumn {
+                col_name: name.to_string(),
+            });
+        }
+    }
+
+    Ok(changes)
+}
+
 /// Decode and dispatch a single pgoutput WAL message to the flush coordinator.
 ///
 /// Returns `true` if the message was a COMMIT (used by the caller to trigger
@@ -219,11 +348,101 @@ async fn process_one_wal_message(
 
     match msgtype {
         'R' => {
-            let (rel_id, entry) = parse_relation_message(data, &mut cursor);
+            let (rel_id, new_entry) = parse_relation_message(data, &mut cursor);
+
+            // Detect schema changes by comparing with the cached RELATION entry.
+            if let Some(old_cached) = rel_cache.get(&rel_id) {
+                if let Some(ref mapping) = old_cached.mapping {
+                    if mapping.enabled && mapping.state != "ERRORED" {
+                        let catalog_client = source_client.unwrap_or(meta.client());
+
+                        // Detect column-level schema changes
+                        let changes =
+                            detect_schema_changes(&old_cached.entry, &new_entry, catalog_client)
+                                .await?;
+
+                        // Detect table rename (same rel_id, different relname)
+                        let table_renamed = old_cached.entry.relname != new_entry.relname;
+
+                        if !changes.is_empty() {
+                            let target_key =
+                                format!("{}.{}", mapping.target_schema, mapping.target_table);
+
+                            // Load PK attrs from catalog for the new schema
+                            let (_, new_key_attrs) = crate::metadata::load_pk_metadata(
+                                catalog_client,
+                                &new_entry.nspname,
+                                &new_entry.relname,
+                            )
+                            .await
+                            .map_err(|e| format!("load_pk_metadata for DDL: {}", e))?;
+
+                            let new_meta = QueueMeta {
+                                target_key: target_key.clone(),
+                                mapping_id: mapping.id,
+                                attnames: new_entry.attnames.clone(),
+                                key_attrs: new_key_attrs,
+                                atttypes: new_entry.atttypes.clone(),
+                                source_label: mapping.source_label.clone(),
+                                sync_mode: mapping.sync_mode.clone(),
+                            };
+
+                            coordinator.set_pending_ddl(
+                                mapping.id,
+                                PendingDdl {
+                                    commands: changes,
+                                    new_meta,
+                                    target_oid: mapping.target_oid,
+                                    post_changes: Vec::new(),
+                                },
+                            );
+
+                            tracing::info!(
+                                "pg_duckpipe: DDL change detected for {}.{}, \
+                                 setting barrier on {}",
+                                new_entry.nspname,
+                                new_entry.relname,
+                                target_key,
+                            );
+                        }
+
+                        // Update source name metadata on table rename
+                        if table_renamed {
+                            let _ = meta
+                                .update_source_name(
+                                    mapping.id,
+                                    &new_entry.nspname,
+                                    &new_entry.relname,
+                                )
+                                .await;
+                        }
+
+                        // Preserve mapping for the new entry (carry forward)
+                        let mut carried_mapping = mapping.clone();
+                        if table_renamed {
+                            carried_mapping.source_schema = new_entry.nspname.clone();
+                            carried_mapping.source_table = new_entry.relname.clone();
+                        }
+                        rel_cache.insert(
+                            rel_id,
+                            RelCacheWithMapping {
+                                entry: new_entry,
+                                mapping: Some(carried_mapping),
+                                // Reset pk_key_attrs — will be re-resolved on next DML
+                                pk_key_attrs: None,
+                            },
+                        );
+                        return Ok(false);
+                    }
+                }
+            }
+
+            // Default: cache the new entry (first RELATION for this rel_id, or
+            // table is disabled/ERRORED — no DDL propagation needed).
             rel_cache.insert(
                 rel_id,
                 RelCacheWithMapping {
-                    entry,
+                    entry: new_entry,
                     mapping: None,
                     pk_key_attrs: None,
                 },
