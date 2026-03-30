@@ -291,7 +291,7 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
                             log!(
                                 "pg_duckpipe LISTEN task started on channel '{}' ({})",
                                 listen_channel,
-                                listen_connstr
+                                duckpipe_core::connstr::redact_password(&listen_connstr)
                             );
                             Some(h)
                         }
@@ -299,7 +299,7 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
                             log!(
                                 "pg_duckpipe failed to start LISTEN task: {} (connstr: {})",
                                 e,
-                                listen_connstr
+                                duckpipe_core::connstr::redact_password(&listen_connstr)
                             );
                             None
                         }
