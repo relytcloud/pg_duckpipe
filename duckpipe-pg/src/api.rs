@@ -2611,6 +2611,7 @@ CREATE FUNCTION duckpipe.set_config(
 ) RETURNS void
 AS 'MODULE_PATHNAME', '@FUNCTION_NAME@'
 LANGUAGE C STRICT;
+REVOKE ALL ON FUNCTION duckpipe.set_config(TEXT, TEXT) FROM PUBLIC;
 ")]
 fn set_config(key: &str, value: &str) {
     // Validate key and value
@@ -2691,6 +2692,7 @@ CREATE FUNCTION duckpipe.set_group_config(
 ) RETURNS void
 AS 'MODULE_PATHNAME', '@FUNCTION_NAME@'
 LANGUAGE C STRICT;
+REVOKE ALL ON FUNCTION duckpipe.set_group_config(TEXT, TEXT, TEXT) FROM PUBLIC;
 ")]
 fn set_group_config(group_name: &str, key: &str, value: &str) {
     // Validate key and value
