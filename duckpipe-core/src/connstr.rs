@@ -208,19 +208,21 @@ pub fn redact_password(connstr: &str) -> String {
     let user = config.get_user().unwrap_or("postgres");
     let dbname = config.get_dbname().unwrap_or("postgres");
 
-    let mut parts = vec![
-        format!("host={}", host),
-        format!("port={}", port),
-        format!("user={}", user),
-        format!("dbname={}", dbname),
-    ];
-    if config.get_password().is_some() {
-        parts.push("password=********".to_string());
-    }
-    if let Some(s) = sslmode_to_string(config.get_ssl_mode()) {
-        parts.push(format!("sslmode={}", s));
-    }
-    parts.join(" ")
+    [
+        Some(format!("host={}", host)),
+        Some(format!("port={}", port)),
+        Some(format!("user={}", user)),
+        Some(format!("dbname={}", dbname)),
+        config
+            .get_password()
+            .is_some()
+            .then(|| "password=********".to_string()),
+        sslmode_to_string(config.get_ssl_mode()).map(|s| format!("sslmode={}", s)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(" ")
 }
 
 #[cfg(test)]

@@ -190,16 +190,20 @@ fn discover_lake_table_info(
         .map(|(name, dtype)| (name.to_lowercase(), dtype))
         .collect();
 
-    let mut column_types = Vec::with_capacity(expected_attnames.len());
-    for name in expected_attnames {
-        let dtype = lake_col_map.get(&name.to_lowercase()).ok_or_else(|| {
-            format!(
-                "column '{}' not found in DuckLake table {}.{}",
-                name, lake_schema, target_table
-            )
-        })?;
-        column_types.push(dtype.clone());
-    }
+    let column_types: Vec<String> = expected_attnames
+        .iter()
+        .map(|name| {
+            lake_col_map
+                .get(&name.to_lowercase())
+                .cloned()
+                .ok_or_else(|| {
+                    format!(
+                        "column '{}' not found in DuckLake table {}.{}",
+                        name, lake_schema, target_table
+                    )
+                })
+        })
+        .collect::<Result<_, _>>()?;
 
     Ok(LakeTableInfo {
         lake_schema,
@@ -408,20 +412,19 @@ impl FlushWorker {
         );
 
         // Build buffer table schema (no _duckpipe_source — injected as literal at INSERT time)
-        let mut buf_cols = Vec::new();
-        buf_cols.push("_seq INTEGER".to_string());
-        buf_cols.push("_op_type INTEGER".to_string());
-        for (i, name) in attnames.iter().enumerate() {
-            buf_cols.push(format!(
-                "\"{}\" {}",
-                name.replace('"', "\"\""),
-                lake_info.column_types[i]
-            ));
-        }
-        // Append mode: store per-change LSN for _duckpipe_lsn metadata
-        if self.sync_mode == "append" {
-            buf_cols.push("_lsn BIGINT".to_string());
-        }
+        let buf_cols: Vec<String> = ["_seq INTEGER", "_op_type INTEGER"]
+            .into_iter()
+            .map(String::from)
+            .chain(attnames.iter().enumerate().map(|(i, name)| {
+                format!(
+                    "\"{}\" {}",
+                    name.replace('"', "\"\""),
+                    lake_info.column_types[i]
+                )
+            }))
+            // Append mode: store per-change LSN for _duckpipe_lsn metadata
+            .chain((self.sync_mode == "append").then(|| "_lsn BIGINT".to_string()))
+            .collect();
 
         let create_buf = format!("CREATE TABLE buffer ({})", buf_cols.join(", "));
         self.db

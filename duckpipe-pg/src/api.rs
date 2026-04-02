@@ -220,12 +220,13 @@ impl PgConn {
                 let result = client
                     .select(sql, None, &[])
                     .map_err(|e| format!("SPI query_string_pairs: {}", e))?;
-                let mut pairs = Vec::new();
-                for r in result {
-                    let a: String = r.get::<String>(1).unwrap().unwrap_or_default();
-                    let b: String = r.get::<String>(2).unwrap().unwrap_or_default();
-                    pairs.push((a, b));
-                }
+                let pairs: Vec<_> = result
+                    .map(|r| {
+                        let a: String = r.get::<String>(1).unwrap().unwrap_or_default();
+                        let b: String = r.get::<String>(2).unwrap().unwrap_or_default();
+                        (a, b)
+                    })
+                    .collect();
                 Ok(pairs)
             }),
             Self::Remote { rt, client, .. } => {
@@ -1030,7 +1031,7 @@ fn add_table(
                 }
             }
         }
-        let mut col_clauses: Vec<String> = col_defs
+        let col_clauses: Vec<String> = col_defs
             .iter()
             .map(|(name, type_str)| {
                 format!(
@@ -1039,14 +1040,17 @@ fn add_table(
                     duckpipe_core::types::map_pg_type_for_duckdb(type_str)
                 )
             })
+            // Always add _duckpipe_source column for fan-in support
+            .chain(["\"_duckpipe_source\" TEXT".to_string()])
+            // Append mode: add metadata columns for change tracking
+            .chain(
+                (sync_mode == "append")
+                    .then_some(["\"_duckpipe_op\" TEXT", "\"_duckpipe_lsn\" BIGINT"])
+                    .into_iter()
+                    .flatten()
+                    .map(String::from),
+            )
             .collect();
-        // Always add _duckpipe_source column for fan-in support
-        col_clauses.push("\"_duckpipe_source\" TEXT".to_string());
-        // Append mode: add metadata columns for change tracking
-        if sync_mode == "append" {
-            col_clauses.push("\"_duckpipe_op\" TEXT".to_string());
-            col_clauses.push("\"_duckpipe_lsn\" BIGINT".to_string());
-        }
         let create_sql = format!(
             "CREATE TABLE IF NOT EXISTS {}.{} ({}) USING ducklake",
             quote_ident(&t_schema),
@@ -1145,14 +1149,10 @@ fn add_table(
                         &existing_cols_args,
                     )
                     .unwrap();
-                let mut target_cols: Vec<String> = Vec::new();
-                for r in existing_result {
-                    if let Some(name) = r.get::<String>(1).unwrap() {
-                        if !is_duckpipe_system_column(&name) {
-                            target_cols.push(name);
-                        }
-                    }
-                }
+                let target_cols: Vec<String> = existing_result
+                    .filter_map(|r| r.get::<String>(1).unwrap())
+                    .filter(|name| !is_duckpipe_system_column(name))
+                    .collect();
                 let source_cols: Vec<&str> = col_defs.iter().map(|(n, _)| n.as_str()).collect();
                 if source_cols.len() != target_cols.len() {
                     return Err(format!(
@@ -2057,12 +2057,13 @@ fn get_table_config(source_table: &str, key: default!(Option<&str>, "NULL")) -> 
         let global_result = client
             .select("SELECT key, value FROM duckpipe.global_config", None, &[])
             .unwrap();
-        let mut kv_rows: Vec<(String, String)> = Vec::new();
-        for row in global_result {
-            let k: String = row.get::<String>(1).unwrap().unwrap_or_default();
-            let v: String = row.get::<String>(2).unwrap().unwrap_or_default();
-            kv_rows.push((k, v));
-        }
+        let kv_rows: Vec<(String, String)> = global_result
+            .map(|row| {
+                let k: String = row.get::<String>(1).unwrap().unwrap_or_default();
+                let v: String = row.get::<String>(2).unwrap().unwrap_or_default();
+                (k, v)
+            })
+            .collect();
         let global = GroupConfig::from_kv_rows(&kv_rows);
 
         // Read per-group config for this table's group
@@ -2607,12 +2608,13 @@ fn get_config(key: default!(Option<&str>, "NULL")) -> Option<String> {
                 let result = client
                     .select("SELECT key, value FROM duckpipe.global_config", None, &[])
                     .unwrap();
-                let mut kv_rows: Vec<(String, String)> = Vec::new();
-                for row in result {
-                    let k: String = row.get::<String>(1).unwrap().unwrap_or_default();
-                    let v: String = row.get::<String>(2).unwrap().unwrap_or_default();
-                    kv_rows.push((k, v));
-                }
+                let kv_rows: Vec<(String, String)> = result
+                    .map(|row| {
+                        let k: String = row.get::<String>(1).unwrap().unwrap_or_default();
+                        let v: String = row.get::<String>(2).unwrap().unwrap_or_default();
+                        (k, v)
+                    })
+                    .collect();
                 let config = GroupConfig::from_kv_rows(&kv_rows);
                 Some(config.to_json_string())
             }
@@ -2697,12 +2699,13 @@ fn get_group_config(group_name: &str, key: default!(Option<&str>, "NULL")) -> Op
         let global_result = client
             .select("SELECT key, value FROM duckpipe.global_config", None, &[])
             .unwrap();
-        let mut kv_rows: Vec<(String, String)> = Vec::new();
-        for row in global_result {
-            let k: String = row.get::<String>(1).unwrap().unwrap_or_default();
-            let v: String = row.get::<String>(2).unwrap().unwrap_or_default();
-            kv_rows.push((k, v));
-        }
+        let kv_rows: Vec<(String, String)> = global_result
+            .map(|row| {
+                let k: String = row.get::<String>(1).unwrap().unwrap_or_default();
+                let v: String = row.get::<String>(2).unwrap().unwrap_or_default();
+                (k, v)
+            })
+            .collect();
         let global = GroupConfig::from_kv_rows(&kv_rows);
 
         // Read per-group config
