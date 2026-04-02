@@ -289,10 +289,7 @@ fn launch_worker(group_name: &str) -> bool {
             &mut worker.bgw_name,
             &format!("pg_duckpipe [{}:{}]", dbname_str, group_name),
         );
-        write_to_c_buf(
-            &mut worker.bgw_type,
-            &format!("pg_duckpipe:{}", group_name),
-        );
+        write_to_c_buf(&mut worker.bgw_type, &format!("pg_duckpipe:{}", group_name));
         write_to_c_buf(&mut worker.bgw_extra, group_name);
 
         worker.bgw_main_arg = pg_sys::ObjectIdGetDatum(pg_sys::MyDatabaseId) as pg_sys::Datum;
