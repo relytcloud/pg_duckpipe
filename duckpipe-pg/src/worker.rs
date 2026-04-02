@@ -41,12 +41,13 @@ fn read_resolved_config(group_name: &str) -> ResolvedConfig {
             let global_result = client
                 .select("SELECT key, value FROM duckpipe.global_config", None, &[])
                 .unwrap();
-            let mut kv_rows: Vec<(String, String)> = Vec::new();
-            for row in global_result {
-                let key: String = row.get::<String>(1).unwrap().unwrap_or_default();
-                let value: String = row.get::<String>(2).unwrap().unwrap_or_default();
-                kv_rows.push((key, value));
-            }
+            let kv_rows: Vec<(String, String)> = global_result
+                .map(|row| {
+                    let key: String = row.get::<String>(1).unwrap().unwrap_or_default();
+                    let value: String = row.get::<String>(2).unwrap().unwrap_or_default();
+                    (key, value)
+                })
+                .collect();
             let global = GroupConfig::from_kv_rows(&kv_rows);
 
             // Read per-group config
@@ -61,12 +62,11 @@ fn read_resolved_config(group_name: &str) -> ResolvedConfig {
                     &args,
                 )
                 .unwrap();
-            let mut group_config = GroupConfig::default();
-            for row in group_result {
-                if let Some(config_str) = row.get::<String>(1).unwrap() {
-                    group_config = GroupConfig::from_json_str(&config_str).unwrap_or_default();
-                }
-            }
+            let group_config = group_result
+                .filter_map(|row| row.get::<String>(1).unwrap())
+                .last()
+                .map(|s| GroupConfig::from_json_str(&s).unwrap_or_default())
+                .unwrap_or_default();
 
             ResolvedConfig::resolve(&global, &group_config)
         });

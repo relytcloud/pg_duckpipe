@@ -718,8 +718,6 @@ pub async fn load_pk_metadata(
     source_schema: &str,
     source_table: &str,
 ) -> Result<(Vec<String>, Vec<usize>), tokio_postgres::Error> {
-    let mut attnames = Vec::new();
-
     let rows = client
         .query(
             "SELECT a.attname FROM pg_class c \
@@ -731,13 +729,8 @@ pub async fn load_pk_metadata(
             &[&source_schema, &source_table],
         )
         .await?;
+    let attnames: Vec<String> = rows.iter().map(|row| row.get(0)).collect();
 
-    for row in &rows {
-        let name: String = row.get(0);
-        attnames.push(name);
-    }
-
-    let mut key_attrs = Vec::new();
     let rows = client
         .query(
             "SELECT k.attnum::int2 FROM pg_class c \
@@ -749,13 +742,12 @@ pub async fn load_pk_metadata(
             &[&source_schema, &source_table],
         )
         .await?;
-
-    for row in &rows {
-        let attnum: i16 = row.get(0);
-        if attnum > 0 {
-            key_attrs.push((attnum - 1) as usize);
-        }
-    }
+    let key_attrs: Vec<usize> = rows
+        .iter()
+        .map(|row| row.get::<_, i16>(0))
+        .filter(|&a| a > 0)
+        .map(|a| (a - 1) as usize)
+        .collect();
 
     Ok((attnames, key_attrs))
 }

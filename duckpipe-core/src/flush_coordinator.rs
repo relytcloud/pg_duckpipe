@@ -655,12 +655,13 @@ impl FlushCoordinator {
 
     /// Return per-table flush metrics as `(mapping_id, flush_count, flush_duration_ms)`.
     pub fn table_flush_metrics(&self) -> Vec<(i32, i64, i64)> {
-        let mut result = Vec::new();
-        for (&id, &count) in &self.per_table_flush_count {
-            let dur = self.per_table_flush_duration.get(&id).copied().unwrap_or(0);
-            result.push((id, count, dur));
-        }
-        result
+        self.per_table_flush_count
+            .iter()
+            .map(|(&id, &count)| {
+                let dur = self.per_table_flush_duration.get(&id).copied().unwrap_or(0);
+                (id, count, dur)
+            })
+            .collect()
     }
 
     /// Return all per-table metrics combined in a single pass.
@@ -707,17 +708,12 @@ impl FlushCoordinator {
             return 0;
         }
 
-        let mut min_lsn: Option<u64> = None;
-
-        for &lsn in self.per_table_lsn.values() {
-            if lsn == 0 {
-                // A table has never completed a flush: don't advance.
-                return 0;
-            }
-            min_lsn = Some(min_lsn.map_or(lsn, |m: u64| m.min(lsn)));
+        if self.per_table_lsn.values().any(|&lsn| lsn == 0) {
+            // A table has never completed a flush: don't advance.
+            return 0;
         }
 
-        min_lsn.unwrap_or(0)
+        self.per_table_lsn.values().copied().min().unwrap_or(0)
     }
 
     /// Seed the in-memory per-table LSN map from a list of (mapping_id, lsn) pairs.

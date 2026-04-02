@@ -526,37 +526,35 @@ impl RoutingCache {
         // Single SPI query: OID mappings + PK columns via LEFT JOIN.
         // Fetches STREAMING, enabled tables with routing_enabled from config JSONB.
         let rows: Vec<(i64, i64, Option<i16>)> = Spi::connect(|client| {
-            let mut result_rows = Vec::new();
-            let result = client.select(
-                "SELECT tm.source_oid, c.oid::int8 AS target_oid, \
-                        pk.attnum::int2 AS pk_attnum \
-                 FROM duckpipe.table_mappings tm \
-                 JOIN pg_class c ON c.relname = tm.target_table \
-                 JOIN pg_namespace n ON n.oid = c.relnamespace \
-                      AND n.nspname = tm.target_schema \
-                 LEFT JOIN LATERAL ( \
-                     SELECT unnest(i.indkey) AS attnum \
-                     FROM pg_index i \
-                     WHERE i.indisprimary AND i.indrelid = tm.source_oid::oid \
-                 ) pk ON true \
-                 WHERE tm.state = 'STREAMING' AND tm.enabled \
-                   AND COALESCE((tm.config->>'routing_enabled')::boolean, true) \
-                   AND tm.source_oid IS NOT NULL",
-                None,
-                &[],
-            );
-            if let Ok(tuptable) = result {
-                for row in tuptable {
-                    if let (Some(src), Some(tgt)) = (
-                        row.get::<i64>(1).unwrap_or(None),
-                        row.get::<i64>(2).unwrap_or(None),
-                    ) {
-                        let pk_att = row.get::<i16>(3).unwrap_or(None);
-                        result_rows.push((src, tgt, pk_att));
-                    }
-                }
-            }
-            result_rows
+            client
+                .select(
+                    "SELECT tm.source_oid, c.oid::int8 AS target_oid, \
+                            pk.attnum::int2 AS pk_attnum \
+                     FROM duckpipe.table_mappings tm \
+                     JOIN pg_class c ON c.relname = tm.target_table \
+                     JOIN pg_namespace n ON n.oid = c.relnamespace \
+                          AND n.nspname = tm.target_schema \
+                     LEFT JOIN LATERAL ( \
+                         SELECT unnest(i.indkey) AS attnum \
+                         FROM pg_index i \
+                         WHERE i.indisprimary AND i.indrelid = tm.source_oid::oid \
+                     ) pk ON true \
+                     WHERE tm.state = 'STREAMING' AND tm.enabled \
+                       AND COALESCE((tm.config->>'routing_enabled')::boolean, true) \
+                       AND tm.source_oid IS NOT NULL",
+                    None,
+                    &[],
+                )
+                .ok()
+                .into_iter()
+                .flatten()
+                .filter_map(|row| {
+                    let src = row.get::<i64>(1).unwrap_or(None)?;
+                    let tgt = row.get::<i64>(2).unwrap_or(None)?;
+                    let pk_att = row.get::<i16>(3).unwrap_or(None);
+                    Some((src, tgt, pk_att))
+                })
+                .collect()
         });
 
         // Build entries from joined result
@@ -577,10 +575,13 @@ impl RoutingCache {
         // Exclude fan-in tables: multiple sources sharing the same target
         // would return a superset of data when routed.  Count sources per
         // target and remove any with count > 1.
-        let mut target_source_count: HashMap<pg_sys::Oid, u32> = HashMap::new();
-        for entry in entries.values() {
-            *target_source_count.entry(entry.target_oid).or_insert(0) += 1;
-        }
+        let target_source_count = {
+            let mut counts = HashMap::<pg_sys::Oid, u32>::new();
+            for entry in entries.values() {
+                *counts.entry(entry.target_oid).or_insert(0) += 1;
+            }
+            counts
+        };
         entries.retain(|_, e| target_source_count.get(&e.target_oid).copied().unwrap_or(0) <= 1);
 
         self.data = Some(RoutingCacheData { entries });
