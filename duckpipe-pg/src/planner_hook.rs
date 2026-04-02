@@ -528,19 +528,19 @@ impl RoutingCache {
         let rows: Vec<(i64, i64, Option<i16>)> = Spi::connect(|client| {
             client
                 .select(
-                    "SELECT tm.source_oid, c.oid::int8 AS target_oid, \
-                            pk.attnum::int2 AS pk_attnum \
-                     FROM duckpipe.table_mappings tm \
-                     JOIN pg_class c ON c.relname = tm.target_table \
-                     JOIN pg_namespace n ON n.oid = c.relnamespace \
-                          AND n.nspname = tm.target_schema \
-                     LEFT JOIN LATERAL ( \
-                         SELECT unnest(i.indkey) AS attnum \
-                         FROM pg_index i \
-                         WHERE i.indisprimary AND i.indrelid = tm.source_oid::oid \
-                     ) pk ON true \
-                     WHERE tm.state = 'STREAMING' AND tm.enabled \
-                       AND COALESCE((tm.config->>'routing_enabled')::boolean, true) \
+                    "SELECT tm.source_oid, c.oid::int8 AS target_oid,
+                            pk.attnum::int2 AS pk_attnum
+                     FROM duckpipe.table_mappings tm
+                     JOIN pg_class c ON c.relname = tm.target_table
+                     JOIN pg_namespace n ON n.oid = c.relnamespace
+                          AND n.nspname = tm.target_schema
+                     LEFT JOIN LATERAL (
+                         SELECT unnest(i.indkey) AS attnum
+                         FROM pg_index i
+                         WHERE i.indisprimary AND i.indrelid = tm.source_oid::oid
+                     ) pk ON true
+                     WHERE tm.state = 'STREAMING' AND tm.enabled
+                       AND COALESCE((tm.config->>'routing_enabled')::boolean, true)
                        AND tm.source_oid IS NOT NULL",
                     None,
                     &[],

@@ -289,10 +289,7 @@ fn launch_worker(group_name: &str) -> bool {
             &mut worker.bgw_name,
             &format!("pg_duckpipe [{}:{}]", dbname_str, group_name),
         );
-        write_to_c_buf(
-            &mut worker.bgw_type,
-            &format!("pg_duckpipe:{}", group_name),
-        );
+        write_to_c_buf(&mut worker.bgw_type, &format!("pg_duckpipe:{}", group_name));
         write_to_c_buf(&mut worker.bgw_extra, group_name);
 
         worker.bgw_main_arg = pg_sys::ObjectIdGetDatum(pg_sys::MyDatabaseId) as pg_sys::Datum;
@@ -421,7 +418,7 @@ fn create_group(
             ];
             client
                 .update(
-                    "INSERT INTO duckpipe.sync_groups (name, publication, slot_name, conninfo, mode) \
+                    "INSERT INTO duckpipe.sync_groups (name, publication, slot_name, conninfo, mode)
                      VALUES ($1, $2, $3, $4, $5)",
                     None,
                     &args,
@@ -436,7 +433,7 @@ fn create_group(
             ];
             client
                 .update(
-                    "INSERT INTO duckpipe.sync_groups (name, publication, slot_name, mode) \
+                    "INSERT INTO duckpipe.sync_groups (name, publication, slot_name, mode)
                      VALUES ($1, $2, $3, $4)",
                     None,
                     &args,
@@ -730,8 +727,8 @@ fn add_table(
     //     Check early so we report "does not exist" instead of the misleading
     //     "no primary key" error that the PK check would produce.
     let table_exists_sql = format!(
-        "SELECT 1 FROM pg_class c \
-         JOIN pg_namespace n ON n.oid = c.relnamespace \
+        "SELECT 1 FROM pg_class c
+         JOIN pg_namespace n ON n.oid = c.relnamespace
          WHERE n.nspname = {} AND c.relname = {}",
         quote_literal(&schema),
         quote_literal(&table)
@@ -761,9 +758,9 @@ fn add_table(
     //     via REPLICA IDENTITY FULL (set below).
     if sync_mode == "upsert" {
         let pk_sql = format!(
-            "SELECT 1 FROM pg_class c \
-             JOIN pg_namespace n ON n.oid = c.relnamespace \
-             JOIN pg_index i ON i.indrelid = c.oid AND i.indisprimary \
+            "SELECT 1 FROM pg_class c
+             JOIN pg_namespace n ON n.oid = c.relnamespace
+             JOIN pg_index i ON i.indrelid = c.oid AND i.indisprimary
              WHERE n.nspname = {} AND c.relname = {}",
             quote_literal(&schema),
             quote_literal(&table)
@@ -874,8 +871,8 @@ fn add_table(
 
     // 5. Get source OID + relkind in one round-trip
     let source_meta_sql = format!(
-        "SELECT c.oid::text, c.relkind::text FROM pg_class c \
-         JOIN pg_namespace n ON n.oid = c.relnamespace \
+        "SELECT c.oid::text, c.relkind::text FROM pg_class c
+         JOIN pg_namespace n ON n.oid = c.relnamespace
          WHERE n.nspname = {} AND c.relname = {}",
         quote_literal(&schema),
         quote_literal(&table)
@@ -928,23 +925,23 @@ fn add_table(
         // affects the parent catalog entry — pgoutput checks the partition that
         // holds the physical row.
         let do_block = format!(
-            "DO $duckpipe$ \
-             DECLARE r RECORD; \
-             BEGIN \
-               FOR r IN \
-                 WITH RECURSIVE parts AS ( \
-                   SELECT inhrelid FROM pg_inherits WHERE inhparent = {} \
-                   UNION ALL \
-                   SELECT i.inhrelid FROM pg_inherits i \
-                   JOIN parts p ON i.inhparent = p.inhrelid \
-                 ) \
-                 SELECT n.nspname, c.relname \
-                 FROM parts p \
-                 JOIN pg_class c ON c.oid = p.inhrelid \
-                 JOIN pg_namespace n ON n.oid = c.relnamespace \
-               LOOP \
-                 EXECUTE format('ALTER TABLE %I.%I REPLICA IDENTITY FULL', r.nspname, r.relname); \
-               END LOOP; \
+            "DO $duckpipe$
+             DECLARE r RECORD;
+             BEGIN
+               FOR r IN
+                 WITH RECURSIVE parts AS (
+                   SELECT inhrelid FROM pg_inherits WHERE inhparent = {}
+                   UNION ALL
+                   SELECT i.inhrelid FROM pg_inherits i
+                   JOIN parts p ON i.inhparent = p.inhrelid
+                 )
+                 SELECT n.nspname, c.relname
+                 FROM parts p
+                 JOIN pg_class c ON c.oid = p.inhrelid
+                 JOIN pg_namespace n ON n.oid = c.relnamespace
+               LOOP
+                 EXECUTE format('ALTER TABLE %I.%I REPLICA IDENTITY FULL', r.nspname, r.relname);
+               END LOOP;
              END $duckpipe$",
             source_oid
         );
@@ -968,12 +965,12 @@ fn add_table(
     // 6. Column definitions (introspect for both local and remote — needed for PG→DuckDB type mapping)
     let col_defs: Vec<(String, String)> = {
         let col_sql = format!(
-            "SELECT a.attname::text, pg_catalog.format_type(a.atttypid, a.atttypmod) \
-             FROM pg_class c \
-             JOIN pg_namespace n ON n.oid = c.relnamespace \
-             JOIN pg_attribute a ON a.attrelid = c.oid \
-             WHERE n.nspname = {} AND c.relname = {} \
-             AND a.attnum > 0 AND NOT a.attisdropped \
+            "SELECT a.attname::text, pg_catalog.format_type(a.atttypid, a.atttypmod)
+             FROM pg_class c
+             JOIN pg_namespace n ON n.oid = c.relnamespace
+             JOIN pg_attribute a ON a.attrelid = c.oid
+             WHERE n.nspname = {} AND c.relname = {}
+             AND a.attnum > 0 AND NOT a.attisdropped
              ORDER BY a.attnum",
             quote_literal(&schema),
             quote_literal(&table)
@@ -1062,9 +1059,9 @@ fn add_table(
         if group_conninfo.is_none() {
             let owner_args = [datum_text(schema.as_str()), datum_text(table.as_str())];
             let owner_result = client.select(
-                "SELECT pg_catalog.pg_get_userbyid(c.relowner)::text \
-                 FROM pg_class c \
-                 JOIN pg_namespace n ON n.oid = c.relnamespace \
+                "SELECT pg_catalog.pg_get_userbyid(c.relowner)::text
+                 FROM pg_class c
+                 JOIN pg_namespace n ON n.oid = c.relnamespace
                  WHERE n.nspname = $1 AND c.relname = $2",
                 Some(1),
                 &owner_args,
@@ -1098,10 +1095,10 @@ fn add_table(
             ];
             let result = client
                 .select(
-                    "SELECT g.name, m.source_schema, m.source_table FROM duckpipe.table_mappings m \
-                 JOIN duckpipe.sync_groups g ON m.group_id = g.id \
-                 WHERE m.target_schema = $1 AND m.target_table = $2 \
-                 AND NOT (g.name = $3 AND m.source_schema = $4 AND m.source_table = $5) \
+                    "SELECT g.name, m.source_schema, m.source_table FROM duckpipe.table_mappings m
+                 JOIN duckpipe.sync_groups g ON m.group_id = g.id
+                 WHERE m.target_schema = $1 AND m.target_table = $2
+                 AND NOT (g.name = $3 AND m.source_schema = $4 AND m.source_table = $5)
                  LIMIT 1",
                     Some(1),
                     &fan_in_args,
@@ -1124,7 +1121,7 @@ fn add_table(
                         .map(|s| format!(" (source: {})", s))
                         .unwrap_or_default();
                     return Err(format!(
-                        "target table {}.{} is already managed by group '{}'{source_info}; \
+                        "target table {}.{} is already managed by group '{}'{source_info};
                          pass fan_in => true to confirm fan-in streaming",
                         t_schema, t_table, other_group
                     ));
@@ -1135,11 +1132,11 @@ fn add_table(
                     [datum_text(t_schema.as_str()), datum_text(t_table.as_str())];
                 let existing_result = client
                     .select(
-                        "SELECT a.attname::text FROM pg_class c \
-                     JOIN pg_namespace n ON n.oid = c.relnamespace \
-                     JOIN pg_attribute a ON a.attrelid = c.oid \
-                     WHERE n.nspname = $1 AND c.relname = $2 \
-                     AND a.attnum > 0 AND NOT a.attisdropped \
+                        "SELECT a.attname::text FROM pg_class c
+                     JOIN pg_namespace n ON n.oid = c.relnamespace
+                     JOIN pg_attribute a ON a.attrelid = c.oid
+                     WHERE n.nspname = $1 AND c.relname = $2
+                     AND a.attnum > 0 AND NOT a.attisdropped
                      ORDER BY a.attnum",
                         None,
                         &existing_cols_args,
@@ -1182,8 +1179,8 @@ fn add_table(
         let target_oid: i64 = {
             let oid_args = [datum_text(t_schema.as_str()), datum_text(t_table.as_str())];
             let oid_result = client.select(
-                "SELECT c.oid::bigint FROM pg_class c \
-                 JOIN pg_namespace n ON n.oid = c.relnamespace \
+                "SELECT c.oid::bigint FROM pg_class c
+                 JOIN pg_namespace n ON n.oid = c.relnamespace
                  WHERE n.nspname = $1 AND c.relname = $2",
                 Some(1),
                 &oid_args,
@@ -1211,9 +1208,9 @@ fn add_table(
         ];
         client
             .update(
-                "INSERT INTO duckpipe.table_mappings (group_id, source_schema, source_table, \
-                 target_schema, target_table, state, source_oid, target_oid, source_label, sync_mode) \
-                 SELECT sg.id, $1, $2, $3, $4, $5, $7, $8, $9, $10 \
+                "INSERT INTO duckpipe.table_mappings (group_id, source_schema, source_table,
+                 target_schema, target_table, state, source_oid, target_oid, source_label, sync_mode)
+                 SELECT sg.id, $1, $2, $3, $4, $5, $7, $8, $9, $10
                  FROM duckpipe.sync_groups sg WHERE sg.name = $6",
                 None,
                 &args,
@@ -1286,18 +1283,18 @@ fn remove_table(source_table: &str, drop_target: Option<bool>, sync_group: Optio
                 datum_text(sg),
             ];
             (
-                "SELECT g.publication, m.target_schema, m.target_table, g.conninfo, g.name, m.id, g.id \
-                 FROM duckpipe.table_mappings m \
-                 JOIN duckpipe.sync_groups g ON m.group_id = g.id \
+                "SELECT g.publication, m.target_schema, m.target_table, g.conninfo, g.name, m.id, g.id
+                 FROM duckpipe.table_mappings m
+                 JOIN duckpipe.sync_groups g ON m.group_id = g.id
                  WHERE m.source_schema = $1 AND m.source_table = $2 AND g.name = $3",
                 a,
             )
         } else {
             let a = vec![datum_text(schema.as_str()), datum_text(table.as_str())];
             (
-                "SELECT g.publication, m.target_schema, m.target_table, g.conninfo, g.name, m.id, g.id \
-                 FROM duckpipe.table_mappings m \
-                 JOIN duckpipe.sync_groups g ON m.group_id = g.id \
+                "SELECT g.publication, m.target_schema, m.target_table, g.conninfo, g.name, m.id, g.id
+                 FROM duckpipe.table_mappings m
+                 JOIN duckpipe.sync_groups g ON m.group_id = g.id
                  WHERE m.source_schema = $1 AND m.source_table = $2",
                 a,
             )
@@ -1339,7 +1336,7 @@ fn remove_table(source_table: &str, drop_target: Option<bool>, sync_group: Optio
                 let other_count: i64 = {
                     let r = client
                         .select(
-                            "SELECT count(*)::bigint FROM duckpipe.table_mappings \
+                            "SELECT count(*)::bigint FROM duckpipe.table_mappings
                          WHERE target_schema = $1 AND target_table = $2",
                             None,
                             &other_args,
@@ -1423,7 +1420,7 @@ fn remove_table(source_table: &str, drop_target: Option<bool>, sync_group: Optio
         });
         if remaining == 0 {
             warning!(
-                "Group '{}' has no remaining tables — its replication slot is still holding WAL. \
+                "Group '{}' has no remaining tables — its replication slot is still holding WAL.
                  Run SELECT duckpipe.drop_group('{}') to release it.",
                 group_name_for_app,
                 group_name_for_app
@@ -1459,10 +1456,10 @@ fn move_table(source_table: &str, new_group: &str) {
         ];
         let result = client
             .select(
-                "SELECT og.publication, og.conninfo, ng.publication, ng.conninfo, og.name \
-                 FROM duckpipe.table_mappings m \
-                 JOIN duckpipe.sync_groups og ON m.group_id = og.id \
-                 CROSS JOIN duckpipe.sync_groups ng \
+                "SELECT og.publication, og.conninfo, ng.publication, ng.conninfo, og.name
+                 FROM duckpipe.table_mappings m
+                 JOIN duckpipe.sync_groups og ON m.group_id = og.id
+                 CROSS JOIN duckpipe.sync_groups ng
                  WHERE m.source_schema = $1 AND m.source_table = $2 AND ng.name = $3",
                 Some(1),
                 &args,
@@ -1527,8 +1524,8 @@ fn move_table(source_table: &str, new_group: &str) {
         ];
         client
             .update(
-                "UPDATE duckpipe.table_mappings SET group_id = \
-                 (SELECT id FROM duckpipe.sync_groups WHERE name = $1) \
+                "UPDATE duckpipe.table_mappings SET group_id =
+                 (SELECT id FROM duckpipe.sync_groups WHERE name = $1)
                  WHERE source_schema = $2 AND source_table = $3",
                 None,
                 &args,
@@ -1558,18 +1555,18 @@ fn resync_table(source_table: &str, sync_group: Option<&str>) {
                 datum_text(sg),
             ];
             (
-                "SELECT m.target_schema, m.target_table, g.name, m.id, m.source_label \
-                 FROM duckpipe.table_mappings m \
-                 JOIN duckpipe.sync_groups g ON m.group_id = g.id \
+                "SELECT m.target_schema, m.target_table, g.name, m.id, m.source_label
+                 FROM duckpipe.table_mappings m
+                 JOIN duckpipe.sync_groups g ON m.group_id = g.id
                  WHERE m.source_schema = $1 AND m.source_table = $2 AND g.name = $3",
                 a,
             )
         } else {
             let a = vec![datum_text(schema.as_str()), datum_text(table.as_str())];
             (
-                "SELECT m.target_schema, m.target_table, g.name, m.id, m.source_label \
-                 FROM duckpipe.table_mappings m \
-                 JOIN duckpipe.sync_groups g ON m.group_id = g.id \
+                "SELECT m.target_schema, m.target_table, g.name, m.id, m.source_label
+                 FROM duckpipe.table_mappings m
+                 JOIN duckpipe.sync_groups g ON m.group_id = g.id
                  WHERE m.source_schema = $1 AND m.source_table = $2",
                 a,
             )
@@ -1624,7 +1621,7 @@ fn resync_table(source_table: &str, sync_group: Option<&str>) {
             let target_source_count: i64 = {
                 let r = client
                     .select(
-                        "SELECT count(*)::bigint FROM duckpipe.table_mappings \
+                        "SELECT count(*)::bigint FROM duckpipe.table_mappings
                      WHERE target_schema = $1 AND target_table = $2",
                         None,
                         &target_count_args,
@@ -1653,11 +1650,11 @@ fn resync_table(source_table: &str, sync_group: Option<&str>) {
             let reset_args = [datum_i32(mid)];
             client
                 .update(
-                    "UPDATE duckpipe.table_mappings SET state = 'SNAPSHOT', \
-                     rows_synced = 0, last_sync_at = NULL, \
-                     error_message = NULL, applied_lsn = NULL, snapshot_lsn = NULL, \
-                     consecutive_failures = 0, retry_at = NULL, \
-                     snapshot_duration_ms = NULL, snapshot_rows = NULL \
+                    "UPDATE duckpipe.table_mappings SET state = 'SNAPSHOT',
+                     rows_synced = 0, last_sync_at = NULL,
+                     error_message = NULL, applied_lsn = NULL, snapshot_lsn = NULL,
+                     consecutive_failures = 0, retry_at = NULL,
+                     snapshot_duration_ms = NULL, snapshot_rows = NULL
                      WHERE id = $1",
                     None,
                     &reset_args,
@@ -1708,9 +1705,9 @@ fn groups() -> TableIterator<
 
     Spi::connect(|client| {
         let result = client.select(
-            "SELECT g.name, g.publication, g.slot_name, g.enabled, g.mode, \
-             (SELECT count(*) FROM duckpipe.table_mappings m WHERE m.group_id = g.id)::int4 as table_count, \
-             g.last_sync_at, g.conninfo \
+            "SELECT g.name, g.publication, g.slot_name, g.enabled, g.mode,
+             (SELECT count(*) FROM duckpipe.table_mappings m WHERE m.group_id = g.id)::int4 as table_count,
+             g.last_sync_at, g.conninfo
              FROM duckpipe.sync_groups g ORDER BY g.name",
             None,
             &[],
@@ -1778,14 +1775,14 @@ fn tables() -> TableIterator<
 
     Spi::connect(|client| {
         let result = client.select(
-            "SELECT m.source_schema || '.' || m.source_table as source_table, \
-             m.target_schema || '.' || m.target_table as target_table, \
-             g.name as sync_group, m.enabled, \
-             m.rows_synced, m.last_sync_at, \
-             m.source_label, \
-             (COUNT(*) OVER (PARTITION BY m.target_schema, m.target_table))::int4 as source_count \
-             FROM duckpipe.table_mappings m \
-             JOIN duckpipe.sync_groups g ON m.group_id = g.id \
+            "SELECT m.source_schema || '.' || m.source_table as source_table,
+             m.target_schema || '.' || m.target_table as target_table,
+             g.name as sync_group, m.enabled,
+             m.rows_synced, m.last_sync_at,
+             m.source_label,
+             (COUNT(*) OVER (PARTITION BY m.target_schema, m.target_table))::int4 as source_count
+             FROM duckpipe.table_mappings m
+             JOIN duckpipe.sync_groups g ON m.group_id = g.id
              ORDER BY g.name, m.source_schema, m.source_table",
             None,
             &[],
@@ -1879,17 +1876,17 @@ fn status() -> TableIterator<
             .unwrap_or(0);
 
         let result = client.select(
-            "SELECT g.name as sync_group, \
-             m.source_schema || '.' || m.source_table as source_table, \
-             m.target_schema || '.' || m.target_table as target_table, \
-             m.state, m.enabled, \
-             m.rows_synced, m.last_sync_at, \
-             m.error_message, m.consecutive_failures, m.retry_at, m.applied_lsn::text, \
-             m.snapshot_duration_ms, m.snapshot_rows, m.id, m.source_label, \
-             m.group_id, \
-             (g.conninfo IS NULL) as is_local \
-             FROM duckpipe.table_mappings m \
-             JOIN duckpipe.sync_groups g ON m.group_id = g.id \
+            "SELECT g.name as sync_group,
+             m.source_schema || '.' || m.source_table as source_table,
+             m.target_schema || '.' || m.target_table as target_table,
+             m.state, m.enabled,
+             m.rows_synced, m.last_sync_at,
+             m.error_message, m.consecutive_failures, m.retry_at, m.applied_lsn::text,
+             m.snapshot_duration_ms, m.snapshot_rows, m.id, m.source_label,
+             m.group_id,
+             (g.conninfo IS NULL) as is_local
+             FROM duckpipe.table_mappings m
+             JOIN duckpipe.sync_groups g ON m.group_id = g.id
              ORDER BY g.name, m.source_schema, m.source_table",
             None,
             &[],
@@ -1995,7 +1992,7 @@ fn set_table_config(source_table: &str, key: &str, value: &str) {
         let args = [datum_text(schema.as_str()), datum_text(table.as_str())];
         let result = client
             .update(
-                "SELECT config::text FROM duckpipe.table_mappings \
+                "SELECT config::text FROM duckpipe.table_mappings
                  WHERE source_schema = $1 AND source_table = $2 FOR UPDATE",
                 Some(1),
                 &args,
@@ -2027,7 +2024,7 @@ fn set_table_config(source_table: &str, key: &str, value: &str) {
         ];
         client
             .update(
-                "UPDATE duckpipe.table_mappings SET config = $1::jsonb \
+                "UPDATE duckpipe.table_mappings SET config = $1::jsonb
                  WHERE source_schema = $2 AND source_table = $3",
                 None,
                 &update_args,
@@ -2066,9 +2063,9 @@ fn get_table_config(source_table: &str, key: default!(Option<&str>, "NULL")) -> 
         let table_args = [datum_text(schema.as_str()), datum_text(table.as_str())];
         let result = client
             .select(
-                "SELECT g.config::text, m.config::text \
-                 FROM duckpipe.table_mappings m \
-                 JOIN duckpipe.sync_groups g ON m.group_id = g.id \
+                "SELECT g.config::text, m.config::text
+                 FROM duckpipe.table_mappings m
+                 JOIN duckpipe.sync_groups g ON m.group_id = g.id
                  WHERE m.source_schema = $1 AND m.source_table = $2",
                 Some(1),
                 &table_args,
@@ -2207,11 +2204,11 @@ fn metrics() -> String {
 
         // Tables
         let result = client.select(
-            "SELECT g.name, m.source_schema || '.' || m.source_table, \
-             m.state, m.rows_synced, m.consecutive_failures, \
-             m.snapshot_duration_ms, m.snapshot_rows, m.applied_lsn::text, m.id, m.group_id \
-             FROM duckpipe.table_mappings m \
-             JOIN duckpipe.sync_groups g ON m.group_id = g.id \
+            "SELECT g.name, m.source_schema || '.' || m.source_table,
+             m.state, m.rows_synced, m.consecutive_failures,
+             m.snapshot_duration_ms, m.snapshot_rows, m.applied_lsn::text, m.id, m.group_id
+             FROM duckpipe.table_mappings m
+             JOIN duckpipe.sync_groups g ON m.group_id = g.id
              ORDER BY g.name, m.source_schema, m.source_table",
             None,
             &[],
@@ -2274,7 +2271,7 @@ fn metrics() -> String {
 
         // Groups
         let result = client.select(
-            "SELECT g.id, g.name, (g.conninfo IS NULL) as is_local \
+            "SELECT g.id, g.name, (g.conninfo IS NULL) as is_local
              FROM duckpipe.sync_groups g ORDER BY g.name",
             None,
             &[],
@@ -2417,8 +2414,8 @@ fn start_worker(group_name: Option<&str>) {
             let groups: Vec<String> = Spi::connect(|client| {
                 let mut names = Vec::new();
                 let result = client.select(
-                    "SELECT g.name FROM duckpipe.sync_groups g \
-                     WHERE g.enabled = true AND g.mode = 'bgworker' \
+                    "SELECT g.name FROM duckpipe.sync_groups g
+                     WHERE g.enabled = true AND g.mode = 'bgworker'
                      ORDER BY g.name",
                     None,
                     &[],

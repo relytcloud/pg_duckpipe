@@ -229,7 +229,7 @@ pub fn clear_shmem_group_slot(group_id: i32) {
 pub fn read_shmem_table_metrics() -> std::collections::HashMap<i32, TableMetrics> {
     if !shmem_available() {
         pgrx::notice!(
-            "pg_duckpipe: shared-memory metrics unavailable \
+            "pg_duckpipe: shared-memory metrics unavailable
              (not in shared_preload_libraries); queued_changes will show 0"
         );
         return std::collections::HashMap::new();
@@ -258,7 +258,7 @@ pub fn read_shmem_table_metrics() -> std::collections::HashMap<i32, TableMetrics
 pub fn read_shmem_group_metrics() -> std::collections::HashMap<i32, GroupMetrics> {
     if !shmem_available() {
         pgrx::notice!(
-            "pg_duckpipe: shared-memory metrics unavailable \
+            "pg_duckpipe: shared-memory metrics unavailable
              (not in shared_preload_libraries); worker metrics will show defaults"
         );
         return std::collections::HashMap::new();
@@ -292,7 +292,7 @@ pub fn read_shmem_all_metrics() -> (
 ) {
     if !shmem_available() {
         pgrx::notice!(
-            "pg_duckpipe: shared-memory metrics unavailable \
+            "pg_duckpipe: shared-memory metrics unavailable
              (not in shared_preload_libraries); metrics will show defaults"
         );
         return (
@@ -366,8 +366,8 @@ extern "C-unwind" fn _PG_init() {
         SHM_AVAILABLE.store(true, Ordering::Relaxed);
     } else {
         pgrx::warning!(
-            "pg_duckpipe is not in shared_preload_libraries — \
-             shared-memory metrics are unavailable.  \
+            "pg_duckpipe is not in shared_preload_libraries —
+             shared-memory metrics are unavailable. 
              Add pg_duckpipe to shared_preload_libraries and restart PostgreSQL."
         );
     }
