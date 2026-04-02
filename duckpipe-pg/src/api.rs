@@ -104,14 +104,14 @@ fn datum_text(s: &str) -> DatumWithOid<'_> {
 /// Construct an int4-typed SPI parameter.
 ///
 /// SAFETY: INT4OID is the correct OID for `i32`'s `IntoDatum` impl.
-fn datum_i32(v: i32) -> DatumWithOid<'_> {
+fn datum_i32(v: i32) -> DatumWithOid<'static> {
     unsafe { DatumWithOid::new(v, PgBuiltInOids::INT4OID.value()) }
 }
 
 /// Construct an int8-typed SPI parameter.
 ///
 /// SAFETY: INT8OID is the correct OID for `i64`'s `IntoDatum` impl.
-fn datum_i64(v: i64) -> DatumWithOid<'_> {
+fn datum_i64(v: i64) -> DatumWithOid<'static> {
     unsafe { DatumWithOid::new(v, PgBuiltInOids::INT8OID.value()) }
 }
 
@@ -418,7 +418,7 @@ fn create_group(
         if conninfo.is_some() {
             let args = [
                 datum_text(name),
-                datum_text(pub_name.clone()),
+                datum_text(&pub_name),
                 datum_text(slot.as_str()),
                 datum_text(conninfo.unwrap()),
                 datum_text(mode_val),
@@ -434,7 +434,7 @@ fn create_group(
         } else {
             let args = [
                 datum_text(name),
-                datum_text(pub_name.clone()),
+                datum_text(&pub_name),
                 datum_text(slot.as_str()),
                 datum_text(mode_val),
             ];
