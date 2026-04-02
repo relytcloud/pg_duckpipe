@@ -37,6 +37,9 @@ async fn remote_connect(
 /// Execute a SQL statement via raw SPI without marking the transaction as mutable.
 /// This is needed for pg_create_logical_replication_slot() which cannot run in a
 /// transaction that already has a TransactionId assigned.
+///
+/// # Safety
+/// Caller must ensure SPI is connected and the SQL is well-formed.
 unsafe fn spi_exec_raw(sql: &str) -> i32 {
     let c_sql = std::ffi::CString::new(sql).unwrap();
     pg_sys::SPI_execute(c_sql.as_ptr(), false, 0)
@@ -62,6 +65,8 @@ fn parse_source_table(source_table: &str) -> (String, String) {
 
 /// Quote an identifier for SQL
 fn quote_ident(name: &str) -> String {
+    // SAFETY: quote_identifier returns a valid C string; if it allocated new
+    // memory (different pointer than input), that memory lives in CurrentMemoryContext.
     unsafe {
         let c_name = std::ffi::CString::new(name).unwrap();
         let quoted = pg_sys::quote_identifier(c_name.as_ptr());
@@ -74,6 +79,8 @@ fn quote_ident(name: &str) -> String {
 
 /// Quote a literal for SQL.
 fn quote_literal(val: &str) -> String {
+    // SAFETY: quote_literal_cstr returns a valid C string. If it allocated new
+    // memory (different pointer than input), we pfree it after copying.
     unsafe {
         let c_val = std::ffi::CString::new(val).unwrap();
         let quoted = pg_sys::quote_literal_cstr(c_val.as_ptr());
@@ -84,6 +91,34 @@ fn quote_literal(val: &str) -> String {
             pg_sys::pfree(quoted as *mut std::ffi::c_void);
         }
         result
+    }
+}
+
+/// Construct a text-typed SPI parameter.
+///
+/// SAFETY: TEXTOID is the correct OID for `&str`'s `IntoDatum` impl.
+fn datum_text(s: &str) -> DatumWithOid<'_> {
+    unsafe { DatumWithOid::new(s, PgBuiltInOids::TEXTOID.value()) }
+}
+
+/// Construct an int4-typed SPI parameter.
+///
+/// SAFETY: INT4OID is the correct OID for `i32`'s `IntoDatum` impl.
+fn datum_i32(v: i32) -> DatumWithOid<'_> {
+    unsafe { DatumWithOid::new(v, PgBuiltInOids::INT4OID.value()) }
+}
+
+/// Construct an int8-typed SPI parameter.
+///
+/// SAFETY: INT8OID is the correct OID for `i64`'s `IntoDatum` impl.
+fn datum_i64(v: i64) -> DatumWithOid<'_> {
+    unsafe { DatumWithOid::new(v, PgBuiltInOids::INT8OID.value()) }
+}
+
+/// Copy a C string into a fixed-size `c_char` buffer, truncating if needed.
+fn copy_to_c_buf(dst: &mut [std::ffi::c_char], src: &std::ffi::CStr) {
+    for (d, &b) in dst.iter_mut().zip(src.to_bytes_with_nul()) {
+        *d = b as std::ffi::c_char;
     }
 }
 
@@ -206,12 +241,7 @@ impl PgConn {
 /// Check if a per-group pg_duckpipe worker is running.
 fn is_group_worker_running(group_name: &str) -> bool {
     let backend_type = format!("pg_duckpipe:{}", group_name);
-    let args = unsafe {
-        [DatumWithOid::new(
-            backend_type.as_str(),
-            PgBuiltInOids::TEXTOID.value(),
-        )]
-    };
+    let args = [datum_text(backend_type.as_str())];
     let result = Spi::connect(|client| {
         let r = client.select(
             "SELECT 1 FROM pg_stat_activity WHERE backend_type = $1",
@@ -233,6 +263,8 @@ fn is_any_worker_running() -> bool {
 
 /// Register and start a dynamic background worker for a specific group.
 fn launch_worker(group_name: &str) -> bool {
+    // SAFETY: FFI to PostgreSQL bgworker API. The zeroed struct is populated
+    // with valid field values before being passed to RegisterDynamicBackgroundWorker.
     unsafe {
         let dbname = pg_sys::get_database_name(pg_sys::MyDatabaseId);
         let dbname_str = if dbname.is_null() {
@@ -247,49 +279,24 @@ fn launch_worker(group_name: &str) -> bool {
         worker.bgw_flags =
             (pg_sys::BGWORKER_SHMEM_ACCESS | pg_sys::BGWORKER_BACKEND_DATABASE_CONNECTION) as i32;
         worker.bgw_start_time = pg_sys::BgWorkerStartTime::BgWorkerStart_RecoveryFinished;
-        worker.bgw_restart_time = -1; // BGW_NEVER_RESTART — re-launch on demand via add_table/start_worker
+        worker.bgw_restart_time = -1; // BGW_NEVER_RESTART -- re-launch on demand via add_table/start_worker
 
-        // Set library name
-        let lib_name = std::ffi::CString::new("pg_duckpipe").unwrap();
-        let lib_bytes = lib_name.as_bytes_with_nul();
-        let copy_len = lib_bytes.len().min(worker.bgw_library_name.len());
-        for (i, &b) in lib_bytes[..copy_len].iter().enumerate() {
-            worker.bgw_library_name[i] = b as std::ffi::c_char;
-        }
+        let lib_name = c"pg_duckpipe";
+        copy_to_c_buf(&mut worker.bgw_library_name, lib_name);
 
-        // Set function name
-        let func_name = std::ffi::CString::new("duckpipe_worker_main").unwrap();
-        let func_bytes = func_name.as_bytes_with_nul();
-        let copy_len = func_bytes.len().min(worker.bgw_function_name.len());
-        for (i, &b) in func_bytes[..copy_len].iter().enumerate() {
-            worker.bgw_function_name[i] = b as std::ffi::c_char;
-        }
+        let func_name = c"duckpipe_worker_main";
+        copy_to_c_buf(&mut worker.bgw_function_name, func_name);
 
-        // Set worker name (visible in ps output)
         let name = format!("pg_duckpipe [{}:{}]", dbname_str, group_name);
         let name_c = std::ffi::CString::new(name.as_str()).unwrap();
-        let name_bytes = name_c.as_bytes_with_nul();
-        let copy_len = name_bytes.len().min(worker.bgw_name.len());
-        for (i, &b) in name_bytes[..copy_len].iter().enumerate() {
-            worker.bgw_name[i] = b as std::ffi::c_char;
-        }
+        copy_to_c_buf(&mut worker.bgw_name, &name_c);
 
-        // Set worker type (determines backend_type in pg_stat_activity)
         let type_str = format!("pg_duckpipe:{}", group_name);
-        let type_name = std::ffi::CString::new(type_str.as_str()).unwrap();
-        let type_bytes = type_name.as_bytes_with_nul();
-        let copy_len = type_bytes.len().min(worker.bgw_type.len());
-        for (i, &b) in type_bytes[..copy_len].iter().enumerate() {
-            worker.bgw_type[i] = b as std::ffi::c_char;
-        }
+        let type_c = std::ffi::CString::new(type_str.as_str()).unwrap();
+        copy_to_c_buf(&mut worker.bgw_type, &type_c);
 
-        // Pack group_name into bgw_extra (read by duckpipe_worker_main)
         let extra_c = std::ffi::CString::new(group_name).unwrap();
-        let extra_bytes = extra_c.as_bytes_with_nul();
-        let copy_len = extra_bytes.len().min(worker.bgw_extra.len());
-        for (i, &b) in extra_bytes[..copy_len].iter().enumerate() {
-            worker.bgw_extra[i] = b as std::ffi::c_char;
-        }
+        copy_to_c_buf(&mut worker.bgw_extra, &extra_c);
 
         worker.bgw_main_arg = pg_sys::ObjectIdGetDatum(pg_sys::MyDatabaseId) as pg_sys::Datum;
         worker.bgw_notify_pid = pg_sys::MyProcPid;
@@ -382,6 +389,7 @@ fn create_group(
                 "SELECT pg_create_logical_replication_slot({}, 'pgoutput')",
                 quote_literal(&slot)
             );
+            // SAFETY: called within Spi::connect_mut; SQL is constructed from quoted literals.
             let ret = unsafe { spi_exec_raw(&sql) };
             if ret < 0 {
                 ereport!(
@@ -407,15 +415,13 @@ fn create_group(
     // If this fails for a remote group, clean up the remote slot+publication.
     let insert_result: Result<(), String> = Spi::connect_mut(|client| {
         if conninfo.is_some() {
-            let args = unsafe {
-                [
-                    DatumWithOid::new(name, PgBuiltInOids::TEXTOID.value()),
-                    DatumWithOid::new(pub_name.clone(), PgBuiltInOids::TEXTOID.value()),
-                    DatumWithOid::new(slot.as_str(), PgBuiltInOids::TEXTOID.value()),
-                    DatumWithOid::new(conninfo.unwrap(), PgBuiltInOids::TEXTOID.value()),
-                    DatumWithOid::new(mode_val, PgBuiltInOids::TEXTOID.value()),
-                ]
-            };
+            let args = [
+                datum_text(name),
+                datum_text(pub_name.clone()),
+                datum_text(slot.as_str()),
+                datum_text(conninfo.unwrap()),
+                datum_text(mode_val),
+            ];
             client
                 .update(
                     "INSERT INTO duckpipe.sync_groups (name, publication, slot_name, conninfo, mode) \
@@ -425,14 +431,12 @@ fn create_group(
                 )
                 .map_err(|e| format!("Failed to insert into sync_groups: {}", e))?;
         } else {
-            let args = unsafe {
-                [
-                    DatumWithOid::new(name, PgBuiltInOids::TEXTOID.value()),
-                    DatumWithOid::new(pub_name.clone(), PgBuiltInOids::TEXTOID.value()),
-                    DatumWithOid::new(slot.as_str(), PgBuiltInOids::TEXTOID.value()),
-                    DatumWithOid::new(mode_val, PgBuiltInOids::TEXTOID.value()),
-                ]
-            };
+            let args = [
+                datum_text(name),
+                datum_text(pub_name.clone()),
+                datum_text(slot.as_str()),
+                datum_text(mode_val),
+            ];
             client
                 .update(
                     "INSERT INTO duckpipe.sync_groups (name, publication, slot_name, mode) \
@@ -487,7 +491,7 @@ fn drop_group(name: &str) {
 
     Spi::connect_mut(|client| {
         // Get publication, slot_name, conninfo, id
-        let args = unsafe { [DatumWithOid::new(name, PgBuiltInOids::TEXTOID.value())] };
+        let args = [datum_text(name)];
         let row = client
             .select(
                 "SELECT publication, slot_name, conninfo, id FROM duckpipe.sync_groups WHERE name = $1",
@@ -533,7 +537,7 @@ fn drop_group(name: &str) {
         }
 
         // Delete from sync_groups (always local)
-        let args = unsafe { [DatumWithOid::new(name, PgBuiltInOids::TEXTOID.value())] };
+        let args = [datum_text(name)];
         client
             .update(
                 "DELETE FROM duckpipe.sync_groups WHERE name = $1",
@@ -578,7 +582,7 @@ REVOKE ALL ON FUNCTION duckpipe.enable_group(TEXT) FROM PUBLIC;
 ")]
 fn enable_group(name: &str) {
     Spi::connect_mut(|client| {
-        let args = unsafe { [DatumWithOid::new(name, PgBuiltInOids::TEXTOID.value())] };
+        let args = [datum_text(name)];
         let result = client.update(
             "UPDATE duckpipe.sync_groups SET enabled = true WHERE name = $1",
             None,
@@ -611,7 +615,7 @@ REVOKE ALL ON FUNCTION duckpipe.disable_group(TEXT) FROM PUBLIC;
 ")]
 fn disable_group(name: &str) {
     Spi::connect_mut(|client| {
-        let args = unsafe { [DatumWithOid::new(name, PgBuiltInOids::TEXTOID.value())] };
+        let args = [datum_text(name)];
         let result = client.update(
             "UPDATE duckpipe.sync_groups SET enabled = false WHERE name = $1",
             None,
@@ -683,7 +687,7 @@ fn add_table(
         String,
         duckpipe_core::types::GroupMode,
     ) = Spi::connect(|client| {
-        let args = unsafe { [DatumWithOid::new(group, PgBuiltInOids::TEXTOID.value())] };
+        let args = [datum_text(group)];
         let result = client
             .select(
                 "SELECT conninfo, publication, slot_name, mode FROM duckpipe.sync_groups WHERE name = $1",
@@ -807,6 +811,7 @@ fn add_table(
                     "SELECT pg_create_logical_replication_slot({}, 'pgoutput')",
                     quote_literal(&slot_name_val)
                 );
+                // SAFETY: called within Spi::connect_mut; SQL is constructed from quoted literals.
                 let ret = unsafe { spi_exec_raw(&sql) };
                 if ret < 0 {
                     ereport!(
@@ -1000,12 +1005,7 @@ fn add_table(
     let local_result: Result<(), String> = Spi::connect_mut(|client| {
         // Auto-create target schema if needed
         {
-            let args = unsafe {
-                [DatumWithOid::new(
-                    t_schema.as_str(),
-                    PgBuiltInOids::TEXTOID.value(),
-                )]
-            };
+            let args = [datum_text(t_schema.as_str())];
             let result = client.select(
                 "SELECT 1 FROM pg_namespace WHERE nspname = $1",
                 Some(1),
@@ -1060,12 +1060,7 @@ fn add_table(
         // Grant SELECT on target table to the source table owner (local groups only).
         // For remote groups the source owner is on a different PG instance, so skip.
         if group_conninfo.is_none() {
-            let owner_args = unsafe {
-                [
-                    DatumWithOid::new(schema.as_str(), PgBuiltInOids::TEXTOID.value()),
-                    DatumWithOid::new(table.as_str(), PgBuiltInOids::TEXTOID.value()),
-                ]
-            };
+            let owner_args = [datum_text(schema.as_str()), datum_text(table.as_str())];
             let owner_result = client.select(
                 "SELECT pg_catalog.pg_get_userbyid(c.relowner)::text \
                  FROM pg_class c \
@@ -1094,15 +1089,13 @@ fn add_table(
         // Fan-in guard: check if ANY existing mapping targets the same table
         // (catches both cross-group and same-group fan-in attempts)
         {
-            let fan_in_args = unsafe {
-                [
-                    DatumWithOid::new(t_schema.as_str(), PgBuiltInOids::TEXTOID.value()),
-                    DatumWithOid::new(t_table.as_str(), PgBuiltInOids::TEXTOID.value()),
-                    DatumWithOid::new(group, PgBuiltInOids::TEXTOID.value()),
-                    DatumWithOid::new(schema.as_str(), PgBuiltInOids::TEXTOID.value()),
-                    DatumWithOid::new(table.as_str(), PgBuiltInOids::TEXTOID.value()),
-                ]
-            };
+            let fan_in_args = [
+                datum_text(t_schema.as_str()),
+                datum_text(t_table.as_str()),
+                datum_text(group),
+                datum_text(schema.as_str()),
+                datum_text(table.as_str()),
+            ];
             let result = client
                 .select(
                     "SELECT g.name, m.source_schema, m.source_table FROM duckpipe.table_mappings m \
@@ -1138,12 +1131,8 @@ fn add_table(
                 }
                 // Fan-in schema validation: compare column names and types
                 // Get existing target columns from DuckLake
-                let existing_cols_args = unsafe {
-                    [
-                        DatumWithOid::new(t_schema.as_str(), PgBuiltInOids::TEXTOID.value()),
-                        DatumWithOid::new(t_table.as_str(), PgBuiltInOids::TEXTOID.value()),
-                    ]
-                };
+                let existing_cols_args =
+                    [datum_text(t_schema.as_str()), datum_text(t_table.as_str())];
                 let existing_result = client
                     .select(
                         "SELECT a.attname::text FROM pg_class c \
@@ -1195,12 +1184,7 @@ fn add_table(
 
         // Look up target OID for OID-based DDL resolution
         let target_oid: i64 = {
-            let oid_args = unsafe {
-                [
-                    DatumWithOid::new(t_schema.as_str(), PgBuiltInOids::TEXTOID.value()),
-                    DatumWithOid::new(t_table.as_str(), PgBuiltInOids::TEXTOID.value()),
-                ]
-            };
+            let oid_args = [datum_text(t_schema.as_str()), datum_text(t_table.as_str())];
             let oid_result = client.select(
                 "SELECT c.oid::bigint FROM pg_class c \
                  JOIN pg_namespace n ON n.oid = c.relnamespace \
@@ -1217,20 +1201,18 @@ fn add_table(
         // Insert table mapping with source OID, target OID, source_label, and sync_mode
         let initial_state = if copy_data { "SNAPSHOT" } else { "STREAMING" };
         let source_label = format!("{}/{}.{}", group, schema, table);
-        let args = unsafe {
-            [
-                DatumWithOid::new(schema.as_str(), PgBuiltInOids::TEXTOID.value()),
-                DatumWithOid::new(table.as_str(), PgBuiltInOids::TEXTOID.value()),
-                DatumWithOid::new(t_schema.as_str(), PgBuiltInOids::TEXTOID.value()),
-                DatumWithOid::new(t_table.as_str(), PgBuiltInOids::TEXTOID.value()),
-                DatumWithOid::new(initial_state, PgBuiltInOids::TEXTOID.value()),
-                DatumWithOid::new(group, PgBuiltInOids::TEXTOID.value()),
-                DatumWithOid::new(source_oid, PgBuiltInOids::INT8OID.value()),
-                DatumWithOid::new(target_oid, PgBuiltInOids::INT8OID.value()),
-                DatumWithOid::new(source_label.as_str(), PgBuiltInOids::TEXTOID.value()),
-                DatumWithOid::new(sync_mode, PgBuiltInOids::TEXTOID.value()),
-            ]
-        };
+        let args = [
+            datum_text(schema.as_str()),
+            datum_text(table.as_str()),
+            datum_text(t_schema.as_str()),
+            datum_text(t_table.as_str()),
+            datum_text(initial_state),
+            datum_text(group),
+            datum_i64(source_oid),
+            datum_i64(target_oid),
+            datum_text(source_label.as_str()),
+            datum_text(sync_mode),
+        ];
         client
             .update(
                 "INSERT INTO duckpipe.table_mappings (group_id, source_schema, source_table, \
@@ -1302,13 +1284,11 @@ fn remove_table(source_table: &str, drop_target: Option<bool>, sync_group: Optio
         // Get publication, target info, conninfo, group name, group id, and mapping id
         // When sync_group is specified, filter by it; otherwise check for ambiguity
         let (query, args_vec): (&str, Vec<DatumWithOid>) = if let Some(sg) = sync_group {
-            let a = unsafe {
-                vec![
-                    DatumWithOid::new(schema.as_str(), PgBuiltInOids::TEXTOID.value()),
-                    DatumWithOid::new(table.as_str(), PgBuiltInOids::TEXTOID.value()),
-                    DatumWithOid::new(sg, PgBuiltInOids::TEXTOID.value()),
-                ]
-            };
+            let a = vec![
+                datum_text(schema.as_str()),
+                datum_text(table.as_str()),
+                datum_text(sg),
+            ];
             (
                 "SELECT g.publication, m.target_schema, m.target_table, g.conninfo, g.name, m.id, g.id \
                  FROM duckpipe.table_mappings m \
@@ -1317,12 +1297,7 @@ fn remove_table(source_table: &str, drop_target: Option<bool>, sync_group: Optio
                 a,
             )
         } else {
-            let a = unsafe {
-                vec![
-                    DatumWithOid::new(schema.as_str(), PgBuiltInOids::TEXTOID.value()),
-                    DatumWithOid::new(table.as_str(), PgBuiltInOids::TEXTOID.value()),
-                ]
-            };
+            let a = vec![datum_text(schema.as_str()), datum_text(table.as_str())];
             (
                 "SELECT g.publication, m.target_schema, m.target_table, g.conninfo, g.name, m.id, g.id \
                  FROM duckpipe.table_mappings m \
@@ -1364,12 +1339,7 @@ fn remove_table(source_table: &str, drop_target: Option<bool>, sync_group: Optio
         if drop_target {
             if let (Some(ts), Some(tt)) = (&t_schema, &t_table) {
                 // Check if other groups also target this table
-                let other_args = unsafe {
-                    [
-                        DatumWithOid::new(ts.as_str(), PgBuiltInOids::TEXTOID.value()),
-                        DatumWithOid::new(tt.as_str(), PgBuiltInOids::TEXTOID.value()),
-                    ]
-                };
+                let other_args = [datum_text(ts.as_str()), datum_text(tt.as_str())];
                 let other_count: i64 = {
                     let r = client
                         .select(
@@ -1399,7 +1369,7 @@ fn remove_table(source_table: &str, drop_target: Option<bool>, sync_group: Optio
 
         // Delete mapping by id (precise, not by source name which could match multiple)
         if let Some(mid) = mapping_id {
-            let del_args = unsafe { [DatumWithOid::new(mid, PgBuiltInOids::INT4OID.value())] };
+            let del_args = [datum_i32(mid)];
             client
                 .update(
                     "DELETE FROM duckpipe.table_mappings WHERE id = $1",
@@ -1442,7 +1412,7 @@ fn remove_table(source_table: &str, drop_target: Option<bool>, sync_group: Optio
     // Warn if the group has no remaining tables (slot still holds WAL)
     if let Some(gid) = group_id {
         let remaining: i64 = Spi::connect(|client| {
-            let args = unsafe { [DatumWithOid::new(gid, PgBuiltInOids::INT4OID.value())] };
+            let args = [datum_i32(gid)];
             let result = client
                 .select(
                     "SELECT count(*)::bigint FROM duckpipe.table_mappings WHERE group_id = $1",
@@ -1486,13 +1456,11 @@ fn move_table(source_table: &str, new_group: &str) {
         Option<String>,
         String,
     ) = Spi::connect(|client| {
-        let args = unsafe {
-            [
-                DatumWithOid::new(schema.as_str(), PgBuiltInOids::TEXTOID.value()),
-                DatumWithOid::new(table.as_str(), PgBuiltInOids::TEXTOID.value()),
-                DatumWithOid::new(new_group, PgBuiltInOids::TEXTOID.value()),
-            ]
-        };
+        let args = [
+            datum_text(schema.as_str()),
+            datum_text(table.as_str()),
+            datum_text(new_group),
+        ];
         let result = client
             .select(
                 "SELECT og.publication, og.conninfo, ng.publication, ng.conninfo, og.name \
@@ -1556,13 +1524,11 @@ fn move_table(source_table: &str, new_group: &str) {
 
     // Update the group_id in the mapping
     Spi::connect_mut(|client| {
-        let args = unsafe {
-            [
-                DatumWithOid::new(new_group, PgBuiltInOids::TEXTOID.value()),
-                DatumWithOid::new(schema.as_str(), PgBuiltInOids::TEXTOID.value()),
-                DatumWithOid::new(table.as_str(), PgBuiltInOids::TEXTOID.value()),
-            ]
-        };
+        let args = [
+            datum_text(new_group),
+            datum_text(schema.as_str()),
+            datum_text(table.as_str()),
+        ];
         client
             .update(
                 "UPDATE duckpipe.table_mappings SET group_id = \
@@ -1590,13 +1556,11 @@ fn resync_table(source_table: &str, sync_group: Option<&str>) {
     Spi::connect_mut(|client| {
         // Get target table info, group name, mapping id, and source_label
         let (query, args_vec): (&str, Vec<DatumWithOid>) = if let Some(sg) = sync_group {
-            let a = unsafe {
-                vec![
-                    DatumWithOid::new(schema.as_str(), PgBuiltInOids::TEXTOID.value()),
-                    DatumWithOid::new(table.as_str(), PgBuiltInOids::TEXTOID.value()),
-                    DatumWithOid::new(sg, PgBuiltInOids::TEXTOID.value()),
-                ]
-            };
+            let a = vec![
+                datum_text(schema.as_str()),
+                datum_text(table.as_str()),
+                datum_text(sg),
+            ];
             (
                 "SELECT m.target_schema, m.target_table, g.name, m.id, m.source_label \
                  FROM duckpipe.table_mappings m \
@@ -1605,12 +1569,7 @@ fn resync_table(source_table: &str, sync_group: Option<&str>) {
                 a,
             )
         } else {
-            let a = unsafe {
-                vec![
-                    DatumWithOid::new(schema.as_str(), PgBuiltInOids::TEXTOID.value()),
-                    DatumWithOid::new(table.as_str(), PgBuiltInOids::TEXTOID.value()),
-                ]
-            };
+            let a = vec![datum_text(schema.as_str()), datum_text(table.as_str())];
             (
                 "SELECT m.target_schema, m.target_table, g.name, m.id, m.source_label \
                  FROM duckpipe.table_mappings m \
@@ -1665,12 +1624,7 @@ fn resync_table(source_table: &str, sync_group: Option<&str>) {
         // the snapshot process will do a source-scoped DELETE via DuckDB connection.
         // When there's only one source, TRUNCATE is safe and works via SPI.
         {
-            let target_count_args = unsafe {
-                [
-                    DatumWithOid::new(t_schema.as_str(), PgBuiltInOids::TEXTOID.value()),
-                    DatumWithOid::new(t_table.as_str(), PgBuiltInOids::TEXTOID.value()),
-                ]
-            };
+            let target_count_args = [datum_text(t_schema.as_str()), datum_text(t_table.as_str())];
             let target_source_count: i64 = {
                 let r = client
                     .select(
@@ -1700,7 +1654,7 @@ fn resync_table(source_table: &str, sync_group: Option<&str>) {
 
         // Reset state to SNAPSHOT and clear error info (by mapping id)
         if let Some(mid) = mapping_id {
-            let reset_args = unsafe { [DatumWithOid::new(mid, PgBuiltInOids::INT4OID.value())] };
+            let reset_args = [datum_i32(mid)];
             client
                 .update(
                     "UPDATE duckpipe.table_mappings SET state = 'SNAPSHOT', \
@@ -2042,12 +1996,7 @@ fn set_table_config(source_table: &str, key: &str, value: &str) {
 
     Spi::connect_mut(|client| {
         // Lock the row to prevent concurrent read-modify-write race
-        let args = unsafe {
-            [
-                DatumWithOid::new(schema.as_str(), PgBuiltInOids::TEXTOID.value()),
-                DatumWithOid::new(table.as_str(), PgBuiltInOids::TEXTOID.value()),
-            ]
-        };
+        let args = [datum_text(schema.as_str()), datum_text(table.as_str())];
         let result = client
             .update(
                 "SELECT config::text FROM duckpipe.table_mappings \
@@ -2075,13 +2024,11 @@ fn set_table_config(source_table: &str, key: &str, value: &str) {
         config.set_key(key, value).unwrap();
         let config_json = config.to_json_string();
 
-        let update_args = unsafe {
-            [
-                DatumWithOid::new(config_json.as_str(), PgBuiltInOids::TEXTOID.value()),
-                DatumWithOid::new(schema.as_str(), PgBuiltInOids::TEXTOID.value()),
-                DatumWithOid::new(table.as_str(), PgBuiltInOids::TEXTOID.value()),
-            ]
-        };
+        let update_args = [
+            datum_text(config_json.as_str()),
+            datum_text(schema.as_str()),
+            datum_text(table.as_str()),
+        ];
         client
             .update(
                 "UPDATE duckpipe.table_mappings SET config = $1::jsonb \
@@ -2119,12 +2066,7 @@ fn get_table_config(source_table: &str, key: default!(Option<&str>, "NULL")) -> 
         let global = GroupConfig::from_kv_rows(&kv_rows);
 
         // Read per-group config for this table's group
-        let table_args = unsafe {
-            [
-                DatumWithOid::new(schema.as_str(), PgBuiltInOids::TEXTOID.value()),
-                DatumWithOid::new(table.as_str(), PgBuiltInOids::TEXTOID.value()),
-            ]
-        };
+        let table_args = [datum_text(schema.as_str()), datum_text(table.as_str())];
         let result = client
             .select(
                 "SELECT g.config::text, m.config::text \
@@ -2424,7 +2366,7 @@ fn start_worker(group_name: Option<&str>) {
         Some(name) => {
             // Check group mode — daemon groups should not use bgworker
             let group_mode: Option<duckpipe_core::types::GroupMode> = Spi::connect(|client| {
-                let args = unsafe { [DatumWithOid::new(name, PgBuiltInOids::TEXTOID.value())] };
+                let args = [datum_text(name)];
                 let result = client
                     .select(
                         "SELECT mode FROM duckpipe.sync_groups WHERE name = $1",
@@ -2622,12 +2564,7 @@ fn set_config(key: &str, value: &str) {
     log!("pg_duckpipe: set_config('{}', '{}')", key, value);
 
     Spi::connect_mut(|client| {
-        let args = unsafe {
-            [
-                DatumWithOid::new(key, PgBuiltInOids::TEXTOID.value()),
-                DatumWithOid::new(value, PgBuiltInOids::TEXTOID.value()),
-            ]
-        };
+        let args = [datum_text(key), datum_text(value)];
         client
             .update(
                 "INSERT INTO duckpipe.global_config (key, value) VALUES ($1, $2)
@@ -2652,7 +2589,7 @@ fn get_config(key: default!(Option<&str>, "NULL")) -> Option<String> {
         match key {
             Some(k) => {
                 // Return single key value
-                let args = unsafe { [DatumWithOid::new(k, PgBuiltInOids::TEXTOID.value())] };
+                let args = [datum_text(k)];
                 let result = client
                     .select(
                         "SELECT value FROM duckpipe.global_config WHERE key = $1",
@@ -2709,12 +2646,7 @@ fn set_group_config(group_name: &str, key: &str, value: &str) {
 
     Spi::connect_mut(|client| {
         // Lock the row to prevent concurrent read-modify-write race
-        let args = unsafe {
-            [DatumWithOid::new(
-                group_name,
-                PgBuiltInOids::TEXTOID.value(),
-            )]
-        };
+        let args = [datum_text(group_name)];
         let result = client
             .update(
                 "SELECT config::text FROM duckpipe.sync_groups WHERE name = $1 FOR UPDATE",
@@ -2738,12 +2670,7 @@ fn set_group_config(group_name: &str, key: &str, value: &str) {
         config.set_key(key, value).unwrap();
         let config_json = config.to_json_string();
 
-        let update_args = unsafe {
-            [
-                DatumWithOid::new(config_json.as_str(), PgBuiltInOids::TEXTOID.value()),
-                DatumWithOid::new(group_name, PgBuiltInOids::TEXTOID.value()),
-            ]
-        };
+        let update_args = [datum_text(config_json.as_str()), datum_text(group_name)];
         client
             .update(
                 "UPDATE duckpipe.sync_groups SET config = $1::jsonb WHERE name = $2",
@@ -2779,12 +2706,7 @@ fn get_group_config(group_name: &str, key: default!(Option<&str>, "NULL")) -> Op
         let global = GroupConfig::from_kv_rows(&kv_rows);
 
         // Read per-group config
-        let args = unsafe {
-            [DatumWithOid::new(
-                group_name,
-                PgBuiltInOids::TEXTOID.value(),
-            )]
-        };
+        let args = [datum_text(group_name)];
         let result = client
             .select(
                 "SELECT config::text FROM duckpipe.sync_groups WHERE name = $1",
