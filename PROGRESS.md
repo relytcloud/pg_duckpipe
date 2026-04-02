@@ -23,6 +23,7 @@
 - [ ] Explicit `Value` variants for more PG types (date, timestamp, uuid, numeric, interval, json)
 - [x] Sync tables with no PK (append mode; upsert requires PK)
 - [ ] Column and row filtering — selective column sync and WHERE predicates on `add_table()`
+- [ ] Transform hooks — per-table SQL transforms applied to each batch before flush (column masking, computed columns, type coercion, aggregation); runs on the flush thread's DuckDB connection against the buffered batch
 
 ### Monitoring / Observability
 - [ ] Replication lag in `status()` — compute `pg_current_wal_lsn() - applied_lsn` as `lag_bytes`; needs special handling for remote groups (lag is relative to remote WAL tip, not local)

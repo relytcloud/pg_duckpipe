@@ -1,5 +1,5 @@
 ARG PG_VERSION=18
-ARG PGDUCKLAKE_COMMIT=d5dd63073b9512b05f8a7ee6ebd79ff5b50b1028
+ARG PGDUCKLAKE_COMMIT=20d799e673639fb0c36a3b31db413e45057a10ed
 
 ###############################################################################
 ### DUCKLAKE-BUILDER — clone + build pg_duckdb + libduckdb + pg_ducklake
