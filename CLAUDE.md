@@ -8,10 +8,13 @@ pg_duckpipe: PostgreSQL CDC extension — syncs heap tables to pg_ducklake colum
 
 ```bash
 make installcheck               # Build + install + run all regression tests
-make check-regression TEST=api  # Run a single test
+make check-regression TEST=api  # Run a single regression test
+make check-daemon               # Run daemon E2E tests
+make installcheck-all           # Both regression + daemon tests
+make format                     # cargo fmt (CI checks all workspace crates)
 ```
 
-Tests use a temporary PG instance on port 5555 (wal_level=logical). See `test/regression/schedule`.
+Tests use a temporary PG instance on port 5555 (wal_level=logical). CI tests against PG 17 + 18.
 
 ## Workspace
 
@@ -20,6 +23,8 @@ duckpipe-core/     # Shared engine: decoder, DuckDB flush, streaming replication
 duckpipe-pg/       # PG extension (pgrx): GUCs, SQL API, bgworker, remote group DDL
 duckpipe-daemon/   # Standalone daemon (TCP, clap CLI)
 test/regression/   # SQL regression tests
+test/daemon/       # Daemon E2E tests
+docker/            # Dockerfile, compose files, ducklake extension build script
 ```
 
 ## Architecture
@@ -36,28 +41,23 @@ Heap Tables → WAL → Replication Slot (pgoutput) → Decoder → FlushCoordin
 
 ## Key Rules
 
-- Source tables must have PRIMARY KEY
-- Target auto-created as `{table}_ducklake` via `LIKE source USING ducklake` (local groups) or explicit DDL from remote introspection (remote groups)
+- Source tables must have PRIMARY KEY (upsert mode; append mode works without PK)
+- Target auto-created as `{table}_ducklake` via explicit column definitions with PG→DuckDB type mapping + `USING ducklake`
 - `add_table()` auto-starts the bgworker
 - TRUNCATE uses per-table drain before DELETE (DuckLake ignores TRUNCATE)
 
 ## Documentation
 
-| Doc | Purpose |
-|-----|---------|
-| `doc/USAGE.md` | User-facing: SQL API, monitoring, GUCs, tuning |
-| `doc/FAN_IN.md` | Fan-in streaming: multiple sources to one target, use cases, operations |
-| `doc/REMOTE_SYNC.md` | Remote sync: connection strings, TLS, architecture |
-| `doc/ACCESS_CONTROL.md` | Permission model: function ACLs, target table grants, bgworker identity |
-| `doc/DATA_TYPES.md` | PG→DuckDB type mapping, conversion architecture, limitations |
-| `doc/CODE_WALKTHROUGH.md` | Developer-facing: detailed code walkthrough |
-| `doc/DESIGN_V2.md` | Historical: original v2 architecture design |
-| `doc/PARALLELISM.md` | Parallelism model: threads, async tasks, communication, backpressure |
-| `PROGRESS.md` | Implementation progress: done/todo checklist + detailed phase history |
+User-facing docs live in `doc/` (QUICKSTART, USAGE, FAN_IN, REMOTE_SYNC, DAEMON, ACCESS_CONTROL, DATA_TYPES). Key developer docs:
+
+- `doc/CODE_WALKTHROUGH.md` — detailed code walkthrough (read before major changes)
+- `doc/PARALLELISM.md` — threading model, async tasks, backpressure
+- `PROGRESS.md` — done/todo checklist + phase history
 
 ## Dev Guidelines
 
 - **TDD**: failing test first → fix → `make installcheck` (all must pass)
-- **Format before commit**: always run `cargo fmt` before committing (CI enforces `cargo fmt --check`)
-- **Docs**: update `CLAUDE.md`, `doc/CODE_WALKTHROUGH.md`, `PROGRESS.md` after major changes
+- **Format before commit**: `make format` before committing (CI enforces `cargo fmt --all --check`)
+- **Docs**: update relevant docs (see table above) after major changes
 - **Diagrams**: follow `doc/img/STYLE.md` when creating or updating Excalidraw diagrams; export as PNG to `doc/img/`
+- **Side effects**: always consider the side effects of code changes — deps, correctness, perf, overhead, stability
