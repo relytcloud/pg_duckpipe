@@ -115,9 +115,10 @@ fn datum_i64(v: i64) -> DatumWithOid<'static> {
     unsafe { DatumWithOid::new(v, PgBuiltInOids::INT8OID.value()) }
 }
 
-/// Copy a C string into a fixed-size `c_char` buffer, truncating if needed.
-fn copy_to_c_buf(dst: &mut [std::ffi::c_char], src: &std::ffi::CStr) {
-    for (d, &b) in dst.iter_mut().zip(src.to_bytes_with_nul()) {
+/// Copy a Rust string into a fixed-size `c_char` buffer (NUL-terminated, truncating if needed).
+fn write_to_c_buf(dst: &mut [std::ffi::c_char], src: &str) {
+    let c = std::ffi::CString::new(src).unwrap();
+    for (d, &b) in dst.iter_mut().zip(c.to_bytes_with_nul()) {
         *d = b as std::ffi::c_char;
     }
 }
@@ -282,22 +283,17 @@ fn launch_worker(group_name: &str) -> bool {
         worker.bgw_start_time = pg_sys::BgWorkerStartTime::BgWorkerStart_RecoveryFinished;
         worker.bgw_restart_time = -1; // BGW_NEVER_RESTART -- re-launch on demand via add_table/start_worker
 
-        let lib_name = c"pg_duckpipe";
-        copy_to_c_buf(&mut worker.bgw_library_name, lib_name);
-
-        let func_name = c"duckpipe_worker_main";
-        copy_to_c_buf(&mut worker.bgw_function_name, func_name);
-
-        let name = format!("pg_duckpipe [{}:{}]", dbname_str, group_name);
-        let name_c = std::ffi::CString::new(name.as_str()).unwrap();
-        copy_to_c_buf(&mut worker.bgw_name, &name_c);
-
-        let type_str = format!("pg_duckpipe:{}", group_name);
-        let type_c = std::ffi::CString::new(type_str.as_str()).unwrap();
-        copy_to_c_buf(&mut worker.bgw_type, &type_c);
-
-        let extra_c = std::ffi::CString::new(group_name).unwrap();
-        copy_to_c_buf(&mut worker.bgw_extra, &extra_c);
+        write_to_c_buf(&mut worker.bgw_library_name, "pg_duckpipe");
+        write_to_c_buf(&mut worker.bgw_function_name, "duckpipe_worker_main");
+        write_to_c_buf(
+            &mut worker.bgw_name,
+            &format!("pg_duckpipe [{}:{}]", dbname_str, group_name),
+        );
+        write_to_c_buf(
+            &mut worker.bgw_type,
+            &format!("pg_duckpipe:{}", group_name),
+        );
+        write_to_c_buf(&mut worker.bgw_extra, group_name);
 
         worker.bgw_main_arg = pg_sys::ObjectIdGetDatum(pg_sys::MyDatabaseId) as pg_sys::Datum;
         worker.bgw_notify_pid = pg_sys::MyProcPid;
