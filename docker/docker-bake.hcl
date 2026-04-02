@@ -11,7 +11,7 @@ variable "DUCKDB_VERSION" {
 }
 
 variable "PGDUCKLAKE_COMMIT" {
-  default = "d5dd63073b9512b05f8a7ee6ebd79ff5b50b1028"
+  default = "20d799e673639fb0c36a3b31db413e45057a10ed"
 }
 
 # Base target: defines build args, target stage, and default tag.
