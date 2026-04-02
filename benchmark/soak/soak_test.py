@@ -2,8 +2,8 @@
 """pg_duckpipe Soak Test Orchestrator.
 
 Runs a long-duration workload against pg_duckpipe, continuously monitoring
-pipeline health, collecting metrics to CSV, running periodic consistency
-checks, and optionally injecting chaos events.
+pipeline health, collecting metrics to CSV, and optionally injecting chaos
+events. A final consistency check runs after the workload stops.
 
 Usage:
   python3 soak_test.py [options]
@@ -159,8 +159,6 @@ def build_metrics_row(state, total_rows, delta, rate, wal_lag, queued, bp, slot_
     max_failures = max((t['consecutive_failures'] for t in table_statuses), default=0)
 
     with state.lock:
-        last_check = state.consistency_checks[-1] if state.consistency_checks else None
-        consistency_result = last_check[1] if last_check else ""
         event_str = state.events[-1][1] if state.events else ""
 
     return {
@@ -185,7 +183,7 @@ def build_metrics_row(state, total_rows, delta, rate, wal_lag, queued, bp, slot_
         'tables_snapshot': state_counts.get('SNAPSHOT', 0),
         'tables_catchup': state_counts.get('CATCHUP', 0),
         'max_consecutive_failures': max_failures,
-        'consistency_check_result': consistency_result,
+        'consistency_check_result': "",
         'event': event_str,
     }
 
@@ -226,9 +224,8 @@ class SoakState:
         self.flush_rate = 0.0  # flushes/s
         self.avg_flush_duration_ms = 0
 
-        # Consistency
+        # Consistency (final check only)
         self.consistency_checks = []
-        self.last_consistency_time = 0
 
         # Events log
         self.events = []
@@ -351,39 +348,6 @@ def monitor_loop(state, db_params, args, csv_writer, csv_file):
         state.stop_event.wait(poll_interval)
 
 
-# ==============================================================================
-# Consistency Thread
-# ==============================================================================
-
-def consistency_loop(state, db_params, args):
-    """Periodically run consistency checks."""
-    interval = args.consistency_interval
-
-    # Wait for initial data to be ready
-    state.stop_event.wait(min(interval, 60))
-
-    check_num = 0
-    while not state.stop_event.is_set():
-        check_num += 1
-        state.add_event(f"Consistency check #{check_num} starting...")
-
-        try:
-            mismatches = verify_table_consistency_full(db_params, args.tables)
-            result = "PASS" if not mismatches else f"FAIL ({len(mismatches)} mismatches)"
-
-            with state.lock:
-                state.consistency_checks.append((check_num, result, mismatches))
-                state.last_consistency_time = time.time()
-
-            state.add_event(f"Consistency check #{check_num}: {result}")
-
-        except Exception as e:
-            result = f"ERROR: {e}"
-            with state.lock:
-                state.consistency_checks.append((check_num, result, []))
-            state.add_event(f"Consistency check #{check_num}: {result}")
-
-        state.stop_event.wait(interval)
 
 
 # ==============================================================================
@@ -547,20 +511,16 @@ def render_display(state, args):
     )
     lines.append("")
 
-    # Consistency
+    # Consistency (final check only — mid-test mismatches are expected during active writes)
     lines.append(f"\033[1;33m-- Consistency --\033[0m")
     with state.lock:
         checks = list(state.consistency_checks)
-        last_t = state.last_consistency_time
 
     if checks:
-        passed = sum(1 for _, r, _ in checks if r == "PASS")
-        total = len(checks)
         last_result = checks[-1][1]
-        ago = now - last_t if last_t > 0 else 0
-        lines.append(f"  Last: {format_duration(ago)} ago  Result: {last_result}  Total: {passed}/{total} passed")
+        lines.append(f"  Final: {last_result}")
     else:
-        lines.append(f"  No checks yet (first in {args.consistency_interval}s)")
+        lines.append(f"  Pending (checked after workload stops)")
     lines.append("")
 
     # Recent Events
@@ -685,7 +645,6 @@ def final_consistency_check(state, db_params, args, get_queued=None):
 
     with state.lock:
         state.consistency_checks.append(("final", result, mismatches))
-        state.last_consistency_time = time.time()
 
     state.add_event(f"Final consistency: {result}")
     return result, mismatches
@@ -781,14 +740,6 @@ def main():
     monitor_thread.start()
     threads.append(monitor_thread)
 
-    # Consistency thread
-    consistency_thread = threading.Thread(
-        target=consistency_loop, args=(state, db_params, args),
-        daemon=True, name="consistency"
-    )
-    consistency_thread.start()
-    threads.append(consistency_thread)
-
     # Chaos thread
     if args.chaos != "none":
         chaos_thread = threading.Thread(
@@ -849,10 +800,7 @@ def main():
     print(f"  Peak Lag     : {state.peak_lag_bytes / 1048576:.1f} MB")
     print(f"  DuckDB Memory: {state.total_duckdb_memory_bytes / 1048576:.1f} MB")
     print(f"  Total Flushes: {state.total_flush_count:,}")
-    with state.lock:
-        total_checks = len(state.consistency_checks)
-        passed_checks = sum(1 for _, r, _ in state.consistency_checks if r == "PASS")
-    print(f"  Consistency  : {passed_checks}/{total_checks} passed")
+    print(f"  Consistency  : {final_result}")
     print(f"  Final Check  : {final_result}")
     print(f"  Results Dir  : {args.output_dir}")
     print(f"{'=' * 60}")
