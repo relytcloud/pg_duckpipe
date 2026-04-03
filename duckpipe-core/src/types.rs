@@ -422,11 +422,9 @@ pub struct Change {
 impl Change {
     /// Estimated in-memory byte size of this change (for backpressure accounting).
     pub fn estimated_bytes(&self) -> i64 {
-        // Base overhead: enum discriminant + lsn + 3 Vec headers (~24 bytes each)
-        const BASE: usize = 80;
         let col_bytes: usize = self.col_values.iter().map(|v| v.estimated_bytes()).sum();
         let key_bytes: usize = self.key_values.iter().map(|v| v.estimated_bytes()).sum();
-        (BASE + col_bytes + key_bytes + self.col_unchanged.len()) as i64
+        (std::mem::size_of::<Self>() + col_bytes + key_bytes + self.col_unchanged.len()) as i64
     }
 }
 

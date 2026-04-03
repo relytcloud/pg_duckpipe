@@ -48,13 +48,6 @@ CREATE TABLE duckpipe.table_mappings (
 
 CREATE INDEX ON duckpipe.table_mappings (group_id);
 
--- Worker runtime state (one row per sync group, upserted each sync cycle)
-CREATE TABLE duckpipe.worker_state (
-    group_id             INTEGER PRIMARY KEY REFERENCES duckpipe.sync_groups(id) ON DELETE CASCADE,
-    total_queued_bytes   BIGINT DEFAULT 0,
-    is_backpressured     BOOLEAN DEFAULT false,
-    updated_at           TIMESTAMPTZ
-);
 
 -- Global config (key-value rows, seeded with defaults)
 CREATE TABLE duckpipe.global_config (
@@ -84,5 +77,4 @@ GRANT USAGE ON SCHEMA duckpipe TO PUBLIC;
 -- Keep internal tables private — only accessible via API functions.
 REVOKE ALL ON duckpipe.sync_groups FROM PUBLIC;
 REVOKE ALL ON duckpipe.table_mappings FROM PUBLIC;
-REVOKE ALL ON duckpipe.worker_state FROM PUBLIC;
 REVOKE ALL ON duckpipe.global_config FROM PUBLIC;

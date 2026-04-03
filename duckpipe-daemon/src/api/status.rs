@@ -52,25 +52,15 @@ pub async fn get_status(State(state): State<Arc<AppState>>) -> Result<impl IntoR
         })
         .collect();
 
-    // Worker state
-    let worker_row = client
-        .query_opt(
-            "SELECT total_queued_bytes, is_backpressured,
-                    updated_at::text AS updated_at
-             FROM duckpipe.worker_state ws
-             JOIN duckpipe.sync_groups sg ON sg.id = ws.group_id
-             WHERE sg.name = $1",
-            &[&group_name],
-        )
-        .await?;
-
-    let worker = worker_row.map(|r| {
+    // Worker state from in-memory metrics cache (same as /metrics endpoint)
+    let worker = {
+        let cache = state.metrics_cache.lock().await;
+        let gm = &cache.group;
         json!({
-            "total_queued_bytes": r.get::<_, i64>("total_queued_bytes"),
-            "is_backpressured": r.get::<_, bool>("is_backpressured"),
-            "updated_at": r.get::<_, Option<String>>("updated_at"),
+            "total_queued_bytes": gm.total_queued_bytes,
+            "is_backpressured": gm.is_backpressured,
         })
-    });
+    };
 
     // Group info
     let group_row = client
