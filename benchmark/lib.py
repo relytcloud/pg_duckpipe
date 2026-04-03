@@ -143,9 +143,6 @@ def get_total_queued_bytes(db_params):
     return parse_int(res, 0)
 
 
-# Backward-compatible alias
-get_total_queued_changes = get_total_queued_bytes
-
 
 def get_snapshot_metrics(db_params, num_tables):
     """Query duckpipe.status() for per-table snapshot timing."""
