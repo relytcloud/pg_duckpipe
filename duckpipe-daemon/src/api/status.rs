@@ -17,7 +17,7 @@ pub async fn get_status(State(state): State<Arc<AppState>>) -> Result<impl IntoR
         .query(
             "SELECT tm.source_schema || '.' || tm.source_table AS source_table,
                     tm.target_schema || '.' || tm.target_table AS target_table,
-                    tm.state, tm.enabled, tm.rows_synced, tm.queued_changes,
+                    tm.state, tm.enabled, tm.rows_synced,
                     tm.last_sync_at::text AS last_sync_at,
                     tm.error_message, tm.consecutive_failures,
                     tm.retry_at::text AS retry_at,
@@ -40,7 +40,6 @@ pub async fn get_status(State(state): State<Arc<AppState>>) -> Result<impl IntoR
                 "state": r.get::<_, String>("state"),
                 "enabled": r.get::<_, bool>("enabled"),
                 "rows_synced": r.get::<_, i64>("rows_synced"),
-                "queued_changes": r.get::<_, i64>("queued_changes"),
                 "last_sync_at": r.get::<_, Option<String>>("last_sync_at"),
                 "error_message": r.get::<_, Option<String>>("error_message"),
                 "consecutive_failures": r.get::<_, i32>("consecutive_failures"),

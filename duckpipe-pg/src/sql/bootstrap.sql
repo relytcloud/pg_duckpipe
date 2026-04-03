@@ -29,7 +29,6 @@ CREATE TABLE duckpipe.table_mappings (
     applied_lsn     pg_lsn,
     enabled         BOOLEAN DEFAULT true,
     rows_synced     BIGINT DEFAULT 0,
-    queued_changes  BIGINT DEFAULT 0,
     last_sync_at    TIMESTAMPTZ,
     created_at      TIMESTAMPTZ DEFAULT NOW(),
     source_oid      BIGINT,
