@@ -297,7 +297,7 @@ def monitor_loop_daemon(state, db_params, daemon_url, args, csv_writer, csv_file
             worker = status.get('worker') or {} if status else {}
 
             total_rows = sum(t.get('rows_synced', 0) for t in tables)
-            queued = worker.get('total_queued_changes', 0) if worker else 0
+            queued = worker.get('total_queued_bytes', 0) if worker else 0
             bp = worker.get('is_backpressured', False) if worker else False
 
             table_statuses = []
@@ -351,7 +351,7 @@ def _daemon_get_queued(daemon_url):
     status = daemon_get_status(daemon_url)
     if status:
         worker = (status.get('worker') or {})
-        return worker.get('total_queued_changes', 0)
+        return worker.get('total_queued_bytes', 0)
     return 1  # non-zero to keep waiting
 
 

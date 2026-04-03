@@ -28,6 +28,14 @@ fn validate_config_value(
                 return Err(format!("'{}' must be positive, got {}", key, v));
             }
         }
+        "bigint" => {
+            let v = value
+                .parse::<i64>()
+                .map_err(|_| format!("'{}' must be an integer, got '{}'", key, value))?;
+            if v <= 0 {
+                return Err(format!("'{}' must be positive, got {}", key, v));
+            }
+        }
         "bool" => {
             value
                 .parse::<bool>()
@@ -47,7 +55,7 @@ const VALID_CONFIG_KEYS: &[(&str, &str)] = &[
     ("flush_interval_ms", "int"),
     ("flush_batch_threshold", "int"),
     ("max_concurrent_flushes", "int"),
-    ("max_queued_changes", "int"),
+    ("max_queued_bytes", "bigint"),
 ];
 
 /// Partial config — Option fields. Used for per-group overrides in JSONB.
@@ -69,7 +77,7 @@ pub struct GroupConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_concurrent_flushes: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_queued_changes: Option<i32>,
+    pub max_queued_bytes: Option<i64>,
 }
 
 impl GroupConfig {
@@ -109,7 +117,7 @@ impl GroupConfig {
             "max_concurrent_flushes" => {
                 self.max_concurrent_flushes = Some(value.parse::<i32>().unwrap())
             }
-            "max_queued_changes" => self.max_queued_changes = Some(value.parse::<i32>().unwrap()),
+            "max_queued_bytes" => self.max_queued_bytes = Some(value.parse::<i64>().unwrap()),
             _ => return Err(format!("unknown config key: '{}'", key)),
         }
         Ok(())
@@ -125,7 +133,7 @@ impl GroupConfig {
             "flush_interval_ms" => self.flush_interval_ms.map(|v| v.to_string()),
             "flush_batch_threshold" => self.flush_batch_threshold.map(|v| v.to_string()),
             "max_concurrent_flushes" => self.max_concurrent_flushes.map(|v| v.to_string()),
-            "max_queued_changes" => self.max_queued_changes.map(|v| v.to_string()),
+            "max_queued_bytes" => self.max_queued_bytes.map(|v| v.to_string()),
             _ => None,
         }
     }
@@ -227,7 +235,7 @@ pub struct ResolvedConfig {
     pub flush_interval_ms: i32,
     pub flush_batch_threshold: i32,
     pub max_concurrent_flushes: i32,
-    pub max_queued_changes: i32,
+    pub max_queued_bytes: i64,
 }
 
 impl Default for ResolvedConfig {
@@ -240,7 +248,7 @@ impl Default for ResolvedConfig {
             flush_interval_ms: 5000,
             flush_batch_threshold: 50000,
             max_concurrent_flushes: 4,
-            max_queued_changes: 500000,
+            max_queued_bytes: 256_000_000,
         }
     }
 }
@@ -256,7 +264,7 @@ impl ResolvedConfig {
             flush_interval_ms: Some(self.flush_interval_ms),
             flush_batch_threshold: Some(self.flush_batch_threshold),
             max_concurrent_flushes: Some(self.max_concurrent_flushes),
-            max_queued_changes: Some(self.max_queued_changes),
+            max_queued_bytes: Some(self.max_queued_bytes),
         }
     }
 
@@ -270,7 +278,7 @@ impl ResolvedConfig {
             "flush_interval_ms" => Some(self.flush_interval_ms.to_string()),
             "flush_batch_threshold" => Some(self.flush_batch_threshold.to_string()),
             "max_concurrent_flushes" => Some(self.max_concurrent_flushes.to_string()),
-            "max_queued_changes" => Some(self.max_queued_changes.to_string()),
+            "max_queued_bytes" => Some(self.max_queued_bytes.to_string()),
             _ => None,
         }
     }
@@ -291,7 +299,7 @@ impl ResolvedConfig {
             drain_poll_ms: self.drain_poll_ms,
             duckdb_buffer_memory_mb: self.duckdb_buffer_memory_mb,
             max_concurrent_flushes: self.max_concurrent_flushes,
-            max_queued_changes: self.max_queued_changes,
+            max_queued_bytes: self.max_queued_bytes,
         }
     }
 
@@ -327,10 +335,10 @@ impl ResolvedConfig {
                 .max_concurrent_flushes
                 .or(global.max_concurrent_flushes)
                 .unwrap_or(defaults.max_concurrent_flushes),
-            max_queued_changes: group
-                .max_queued_changes
-                .or(global.max_queued_changes)
-                .unwrap_or(defaults.max_queued_changes),
+            max_queued_bytes: group
+                .max_queued_bytes
+                .or(global.max_queued_bytes)
+                .unwrap_or(defaults.max_queued_bytes),
         }
     }
 }
@@ -358,6 +366,20 @@ impl Value {
         match self {
             Value::Text(s) => s.len(),
             _ => 0,
+        }
+    }
+
+    /// Estimated in-memory byte size of this value (for backpressure accounting).
+    #[inline]
+    pub fn estimated_bytes(&self) -> usize {
+        match self {
+            Value::Null => 0,
+            Value::Bool(_) => 1,
+            Value::Int16(_) => 2,
+            Value::Int32(_) => 4,
+            Value::Int64(_) | Value::Float64(_) => 8,
+            Value::Float32(_) => 4,
+            Value::Text(s) => 24 + s.len(), // String header + data
         }
     }
 }
@@ -395,6 +417,17 @@ pub struct Change {
     pub key_values: Vec<Value>,
     /// For Update changes: true for columns that were unchanged (TOAST)
     pub col_unchanged: Vec<bool>,
+}
+
+impl Change {
+    /// Estimated in-memory byte size of this change (for backpressure accounting).
+    pub fn estimated_bytes(&self) -> i64 {
+        // Base overhead: enum discriminant + lsn + 3 Vec headers (~24 bytes each)
+        const BASE: usize = 80;
+        let col_bytes: usize = self.col_values.iter().map(|v| v.estimated_bytes()).sum();
+        let key_bytes: usize = self.key_values.iter().map(|v| v.estimated_bytes()).sum();
+        (BASE + col_bytes + key_bytes + self.col_unchanged.len()) as i64
+    }
 }
 
 /// Relation cache entry (decoded from pgoutput RELATION messages)

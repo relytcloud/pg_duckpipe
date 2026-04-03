@@ -86,8 +86,8 @@ while true; do
     WAL_LAG=${WAL_LAG:-0}
     WAL_LAG_FMT=$(fmt_bytes "$WAL_LAG")
 
-    # Queued changes + backpressure
-    WORKER_DATA=$(run_sql "SELECT COALESCE(SUM(total_queued_changes), 0), bool_or(is_backpressured) FROM duckpipe.worker_status()")
+    # Queued bytes + backpressure
+    WORKER_DATA=$(run_sql "SELECT COALESCE(SUM(total_queued_bytes), 0), bool_or(is_backpressured) FROM duckpipe.worker_status()")
     QUEUED=$(echo "$WORKER_DATA" | cut -d'|' -f1 | tr -d ' ')
     QUEUED=${QUEUED:-0}
     BP=$(echo "$WORKER_DATA" | cut -d'|' -f2 | tr -d ' ')

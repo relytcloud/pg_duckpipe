@@ -491,7 +491,7 @@ pub struct FlushCoordinator {
     threads: HashMap<String, FlushThreadEntry>,  // Per-table thread + queue
     result_tx: mpsc::Sender<FlushThreadResult>,
     result_rx: mpsc::Receiver<FlushThreadResult>,
-    backpressure: Arc<BackpressureState>,         // AtomicI64 total_queued + max_queued
+    backpressure: Arc<BackpressureState>,         // Per-queue byte tracking + max_queued_bytes
     flush_batch_threshold: usize,
     flush_interval_ms: u64,
     flush_gate: Arc<FlushGate>,                  // Limits concurrent flush operations
@@ -503,7 +503,7 @@ Key data structures:
 - `TableQueueHandle` — `Arc`-shared between producer and consumer, with `Condvar` for waking the flush thread
 - `ThreadControl` — `AtomicBool` flags for shutdown and drain_requested (lock-free signaling)
 - `FlushThreadEntry` — per-table coordinator state: queue handle, control, join handle, drain_complete barrier
-- `BackpressureState` — `AtomicI64` total_queued counter incremented by producer and decremented by flush threads; `max_queued` threshold
+- `BackpressureState` — per-queue `AtomicI64` byte counters incremented by producer and decremented by flush threads; `max_queued_bytes` threshold; WAL consumer sums all queues to check backpressure
 - `FlushGate` — ticket-based FIFO semaphore limiting concurrent `flush_buffer()` calls (see below)
 
 **FlushGate** — controls flush parallelism:
@@ -513,10 +513,10 @@ With 100+ tables, all flush threads trying to `flush_buffer()` concurrently woul
 Fairness: threads take a ticket on arrival and wait in strict FIFO order — no starvation possible. The timeout adapts to the median of the last 64 flush durations (floor 1s), falling back to `flush_interval` until enough data is collected. On timeout, the thread forfeits its ticket so it doesn't block the queue. Drain requests (TRUNCATE/shutdown) bypass the gate entirely for correctness.
 
 **Public API:**
-- `new(pg_connstr, ducklake_schema, group_name, flush_batch_threshold, flush_interval_ms, max_queued_changes, duckdb_buffer_memory_mb, duckdb_flush_memory_mb, max_concurrent_flushes)` — create coordinator with FlushGate, no threads yet
+- `new(pg_connstr, ducklake_schema, group_name, flush_batch_threshold, flush_interval_ms, max_queued_bytes, duckdb_buffer_memory_mb, duckdb_flush_memory_mb, max_concurrent_flushes)` — create coordinator with FlushGate, no threads yet
 - `ensure_queue(target_key, mapping_id, attnames, key_attrs, atttypes)` — create queue + spawn flush thread if new (or respawn if dead); passes `Arc<FlushGate>` to thread
-- `push_change(target_key, change)` — lock queue, push change, notify condvar, increment backpressure counter
-- `is_backpressured() -> bool` — true when total_queued >= max_queued
+- `push_change(target_key, change)` — lock queue, push change, notify condvar, increment per-queue byte counter
+- `is_backpressured() -> bool` — true when sum of per-queue byte counters >= max_queued_bytes
 - `get_meta(mapping_id) -> Option<QueueMeta>` — clone current queue metadata (used to build TRUNCATE barriers)
 - `drain_and_wait_all() -> Vec<FlushThreadResult>` — synchronous barrier (retained for shutdown only)
 - `collect_results() -> Vec<FlushThreadResult>` — non-blocking drain of mpsc result channel
@@ -532,7 +532,7 @@ Each flush thread creates its own `tokio::runtime::Runtime` for async PG metadat
 1. Calculate `wait_timeout` = remaining time until next flush_interval trigger
 2. Lock queue, `wait_timeout` on Condvar (not indefinite wait)
 3. If shutdown → flush accumulated, break
-4. Drain new changes from shared queue to local accumulator, decrement backpressure counter
+4. Drain new changes from shared queue to local accumulator, decrement per-queue byte counter
 5. Self-trigger check: accumulated >= `batch_threshold` OR elapsed >= `flush_interval`
 6. If should flush:
    a. Acquire `FlushGate` slot (ticket-based FIFO wait with adaptive timeout; drain requests bypass gate)
@@ -554,7 +554,7 @@ Each flush thread creates its own `tokio::runtime::Runtime` for async PG metadat
 | `Condvar` | Wakes consumer with timeout; spurious wakeups handled by condition check |
 | `ThreadControl` flags | `AtomicBool` with Acquire/Release ordering |
 | `drain_complete` | `Mutex<bool>` + `Condvar` — main thread waits, flush thread signals |
-| `BackpressureState.total_queued` | `AtomicI64` — producer increments, flush threads decrement |
+| `BackpressureState` per-queue byte counters | `AtomicI64` per queue — producer increments, flush threads decrement; WAL consumer sums for backpressure check |
 | `FlushGate` | `Mutex` + `Condvar` — ticket-based FIFO; threads wait on condvar for their turn |
 | `FlushWorker` | `Send` + `!Sync` — exclusive ownership within each flush thread |
 | `tokio::runtime::Runtime` | Per-thread — each flush thread owns its own runtime for PG ops |
@@ -594,7 +594,7 @@ pub struct ServiceConfig {
     pub ducklake_schema: String,     // DuckLake schema name
     pub flush_interval_ms: i32,      // Time trigger for flush
     pub flush_batch_threshold: i32,  // Size trigger for flush
-    pub max_queued_changes: i32,     // Backpressure threshold
+    pub max_queued_bytes: i64,       // Backpressure threshold (bytes)
     pub duckdb_buffer_memory_mb: i32,   // DuckDB memory during buffering
     pub duckdb_flush_memory_mb: i32,    // DuckDB memory during flush
     pub max_concurrent_flushes: i32, // FlushGate concurrency limit
@@ -659,7 +659,7 @@ After the message loop:
 - The main thread (`collect_results()`) tracks `per_table_flush_count` and `per_table_flush_duration` in-memory; the bgworker writes these to PG shared memory (SHM) after each sync cycle
 - On failure: `FlushWorker` is dropped (lazily recreated), flush thread records error in PG, transitions to ERRORED after 3 consecutive failures
 - Per-table error isolation: one table failing doesn't block others
-- Backpressure: WAL consumer pauses when total queued changes exceed `max_queued_changes`
+- Backpressure: WAL consumer pauses when total queued bytes exceed `max_queued_bytes`
 - TRUNCATE: non-blocking barrier queue (same as DDL); flush thread drains pending changes then executes DELETE
 - Crash safety: replication slot only advances past what all tables have durably flushed (confirmed_lsn = min(applied_lsn) read from PG)
 
@@ -693,9 +693,9 @@ The barrier ensures old-schema data is flushed before ALTER TABLE, preventing co
 
 Extension entry point. `_PG_init` registers GUC parameters, the background worker, and shared memory.
 
-GUCs registered: `poll_interval`, `batch_size_per_group`, `enabled`, `debug_log`, `data_inlining_row_limit`, `flush_interval`, `flush_batch_threshold`, `max_queued_changes`, `duckdb_buffer_memory_mb`, `duckdb_flush_memory_mb`, `max_concurrent_flushes`. See [USAGE.md](./USAGE.md#configuration-gucs) for full parameter reference.
+GUCs registered: `poll_interval`, `batch_size_per_group`, `enabled`, `debug_log`, `data_inlining_row_limit`, `flush_interval`, `flush_batch_threshold`, `max_queued_bytes`, `duckdb_buffer_memory_mb`, `duckdb_flush_memory_mb`, `max_concurrent_flushes`. See [USAGE.md](./USAGE.md#configuration-gucs) for full parameter reference.
 
-**Shared memory (SHM)**: `_PG_init` also registers `METRICS_SHM` — a `PgLwLock<SharedMetrics>` struct in PG shared memory containing per-table slots (`queued_changes`, `duckdb_memory_bytes`, `flush_count`, `flush_duration_ms`) and per-group slots (`total_queued_changes`, `is_backpressured`, `active_flushes`). Fixed-size: 128 table slots + 8 group slots (~5KB). The bgworker writes to SHM after each sync cycle; SQL functions (`status()`, `worker_status()`, `metrics()`) read from SHM, avoiding PG round-trips for transient observability data.
+**Shared memory (SHM)**: `_PG_init` also registers `METRICS_SHM` — a `PgLwLock<SharedMetrics>` struct in PG shared memory containing per-table slots (`queued_changes`, `duckdb_memory_bytes`, `flush_count`, `flush_duration_ms`) and per-group slots (`total_queued_bytes`, `is_backpressured`, `active_flushes`). Fixed-size: 128 table slots + 8 group slots (~5KB). The bgworker writes to SHM after each sync cycle; SQL functions (`status()`, `worker_status()`, `metrics()`) read from SHM, avoiding PG round-trips for transient observability data.
 
 ### 6.2 `api.rs`
 
@@ -703,7 +703,7 @@ SQL-callable functions. All are REVOKE'd from PUBLIC by default. See [USAGE.md](
 
 Functions implemented: `create_group`, `drop_group`, `enable_group`, `disable_group`, `add_table`, `remove_table`, `move_table`, `resync_table`, `start_worker`, `stop_worker`, monitoring SRFs (`groups()`, `tables()`, `status()`, `worker_status()`), and `metrics()` (JSON snapshot).
 
-**SHM-backed monitoring**: `status()` and `worker_status()` read transient metrics (`queued_changes`, `duckdb_memory_bytes`, `flush_count`, `flush_duration_ms`, `total_queued_changes`, `is_backpressured`, `active_flushes`) from PG shared memory instead of PG tables. `metrics()` merges SHM data with persisted PG data (state, rows_synced, applied_lsn, etc.) into a single JSON document.
+**SHM-backed monitoring**: `status()` and `worker_status()` read transient metrics (`queued_changes`, `duckdb_memory_bytes`, `flush_count`, `flush_duration_ms`, `total_queued_bytes`, `is_backpressured`, `active_flushes`) from PG shared memory instead of PG tables. `metrics()` merges SHM data with persisted PG data (state, rows_synced, applied_lsn, etc.) into a single JSON document.
 
 **`add_table` implementation** — the most complex function:
 1. Parse source table name (default schema: `public`)
@@ -739,7 +739,7 @@ Thin shell around `duckpipe-core`. The BGWorker entry point (`duckpipe_worker_ma
 
 The `catch_unwind` wrapper catches both Rust panics and PostgreSQL errors (`CaughtError`). On panic, `coordinator.clear()` shuts down all flush threads and recreates the mpsc channel to destroy any inconsistent state.
 
-After each successful sync cycle, the bgworker writes transient metrics to PG shared memory (SHM): per-group `total_queued_changes`, `is_backpressured`, and `active_flushes`, and per-table `queued_changes`, `duckdb_memory_bytes`, `flush_count`, and `flush_duration_ms`. This eliminates 3 PG round-trips per cycle that were previously used for observability-only updates. The worker also calls `coordinator.set_max_concurrent_flushes()` each cycle so runtime GUC changes take effect without restart.
+After each successful sync cycle, the bgworker writes transient metrics to PG shared memory (SHM): per-group `total_queued_bytes`, `is_backpressured`, and `active_flushes`, and per-table `queued_changes`, `duckdb_memory_bytes`, `flush_count`, and `flush_duration_ms`. This eliminates 3 PG round-trips per cycle that were previously used for observability-only updates. The worker also calls `coordinator.set_max_concurrent_flushes()` each cycle so runtime GUC changes take effect without restart.
 
 ### 6.4 `bootstrap.sql`
 
@@ -764,7 +764,7 @@ duckpipe --connstr "host=localhost port=5432 dbname=mydb user=replicator passwor
          [--ducklake-schema ducklake]
          [--flush-interval 5000]
          [--flush-batch-threshold 10000]
-         [--max-queued-changes 500000]
+         [--max-queued-bytes 256000000]
          [--duckdb-buffer-memory-mb 16]
          [--duckdb-flush-memory-mb 512]
          [--max-concurrent-flushes 4]

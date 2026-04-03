@@ -71,7 +71,7 @@ curl -s -X POST http://localhost:8080/tables \
 | `--poll-interval` | 1000 | WAL poll interval in ms |
 | `--flush-interval` | 1000 | Flush interval in ms |
 | `--flush-batch-threshold` | 10000 | Queued changes to trigger immediate flush |
-| `--max-queued-changes` | 500000 | Backpressure threshold |
+| `--max-queued-bytes` | 256000000 | Backpressure threshold (bytes; 256 MB) |
 | `--ducklake-schema` | ducklake | DuckLake metadata schema |
 | `--debug` | false | Enable debug timing logs |
 
@@ -127,7 +127,7 @@ Response:
     }
   ],
   "worker": {
-    "total_queued_changes": 0,
+    "total_queued_bytes": 0,
     "is_backpressured": false
   }
 }

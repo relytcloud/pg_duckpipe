@@ -51,7 +51,7 @@ CREATE INDEX ON duckpipe.table_mappings (group_id);
 -- Worker runtime state (one row per sync group, upserted each sync cycle)
 CREATE TABLE duckpipe.worker_state (
     group_id             INTEGER PRIMARY KEY REFERENCES duckpipe.sync_groups(id) ON DELETE CASCADE,
-    total_queued_changes BIGINT DEFAULT 0,
+    total_queued_bytes   BIGINT DEFAULT 0,
     is_backpressured     BOOLEAN DEFAULT false,
     updated_at           TIMESTAMPTZ
 );
@@ -69,7 +69,7 @@ INSERT INTO duckpipe.global_config VALUES
     ('flush_interval_ms', '5000'),
     ('flush_batch_threshold', '50000'),
     ('max_concurrent_flushes', '4'),
-    ('max_queued_changes', '500000');
+    ('max_queued_bytes', '256000000');
 
 -- Default sync group
 INSERT INTO duckpipe.sync_groups (name, publication, slot_name)

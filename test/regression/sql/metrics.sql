@@ -29,7 +29,7 @@ FROM jsonb_array_elements((duckpipe.metrics()::jsonb)->'tables') AS t;
 -- Verify the group entry has expected fields
 SELECT
   (g->>'name') AS group_name,
-  (g->>'total_queued_changes')::bigint AS total_queued,
+  (g->>'total_queued_bytes')::bigint AS total_queued,
   (g->>'is_backpressured')::boolean AS is_bp
 FROM jsonb_array_elements((duckpipe.metrics()::jsonb)->'groups') AS g;
 

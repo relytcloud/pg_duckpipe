@@ -55,7 +55,7 @@ pub async fn get_status(State(state): State<Arc<AppState>>) -> Result<impl IntoR
     // Worker state
     let worker_row = client
         .query_opt(
-            "SELECT total_queued_changes, is_backpressured,
+            "SELECT total_queued_bytes, is_backpressured,
                     updated_at::text AS updated_at
              FROM duckpipe.worker_state ws
              JOIN duckpipe.sync_groups sg ON sg.id = ws.group_id
@@ -66,7 +66,7 @@ pub async fn get_status(State(state): State<Arc<AppState>>) -> Result<impl IntoR
 
     let worker = worker_row.map(|r| {
         json!({
-            "total_queued_changes": r.get::<_, i64>("total_queued_changes"),
+            "total_queued_bytes": r.get::<_, i64>("total_queued_bytes"),
             "is_backpressured": r.get::<_, bool>("is_backpressured"),
             "updated_at": r.get::<_, Option<String>>("updated_at"),
         })

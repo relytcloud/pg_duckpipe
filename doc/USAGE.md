@@ -143,13 +143,13 @@ FROM duckpipe.groups();
 ### Worker Pipeline Status
 
 ```sql
-SELECT total_queued_changes, is_backpressured
+SELECT total_queued_bytes, is_backpressured
 FROM duckpipe.worker_status();
 ```
 
 | Column | Description |
 |--------|-------------|
-| `total_queued_changes` | In-flight changes across all per-table flush queues (from shared memory) |
+| `total_queued_bytes` | Total bytes queued across all per-table flush queues (from shared memory) |
 | `is_backpressured` | `true` when WAL consumption is paused because queues are full (from shared memory) |
 
 ### JSON Metrics
@@ -179,7 +179,7 @@ Output structure:
   }],
   "groups": [{
     "name": "default",
-    "total_queued_changes": 42,
+    "total_queued_bytes": 42,
     "is_backpressured": false
   }]
 }
@@ -220,7 +220,7 @@ DuckDB resource limits and flush tuning are managed via the `duckpipe.global_con
 | `flush_interval_ms` | int | `5000` | Time-based flush trigger (ms) |
 | `flush_batch_threshold` | int | `50000` | Queue-size flush trigger |
 | `max_concurrent_flushes` | int | `4` | Max concurrent flush operations per group |
-| `max_queued_changes` | int | `500000` | Backpressure threshold |
+| `max_queued_bytes` | int | `256000000` | Backpressure threshold (bytes; 256 MB default) |
 
 #### Config API
 

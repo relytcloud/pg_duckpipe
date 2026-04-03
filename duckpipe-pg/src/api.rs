@@ -2126,7 +2126,7 @@ fn get_table_config(source_table: &str, key: default!(Option<&str>, "NULL")) -> 
 #[pg_extern(sql = "
 CREATE FUNCTION duckpipe.worker_status() RETURNS TABLE(
     sync_group TEXT,
-    total_queued_changes BIGINT,
+    total_queued_bytes BIGINT,
     is_backpressured BOOLEAN,
     active_flushes INT,
     gate_wait_avg_ms BIGINT,
@@ -2139,7 +2139,7 @@ fn worker_status() -> TableIterator<
     'static,
     (
         name!(sync_group, String),
-        name!(total_queued_changes, i64),
+        name!(total_queued_bytes, i64),
         name!(is_backpressured, bool),
         name!(active_flushes, i32),
         name!(gate_wait_avg_ms, i64),
@@ -2167,7 +2167,7 @@ fn worker_status() -> TableIterator<
 
                 rows.push((
                     sync_group,
-                    gm.total_queued_changes,
+                    gm.total_queued_bytes,
                     gm.is_backpressured,
                     gm.active_flushes,
                     gm.gate_wait_avg_ms,
@@ -2293,10 +2293,10 @@ fn metrics() -> String {
                     };
 
                 group_entries.push(format!(
-                    "{{\"name\":{},\"total_queued_changes\":{},\"is_backpressured\":{},\"active_flushes\":{},\
+                    "{{\"name\":{},\"total_queued_bytes\":{},\"is_backpressured\":{},\"active_flushes\":{},\
                      \"gate_wait_avg_ms\":{},\"gate_timeouts\":{},\"source_lag_bytes\":{}}}",
                     json_str(&name),
-                    gm.total_queued_changes,
+                    gm.total_queued_bytes,
                     gm.is_backpressured,
                     gm.active_flushes,
                     gm.gate_wait_avg_ms,
@@ -2729,7 +2729,7 @@ fn get_group_config(group_name: &str, key: default!(Option<&str>, "NULL")) -> Op
                 Some(v) => Some(v),
                 None => {
                     error!(
-                        "unknown config key: '{}'. Valid keys: duckdb_buffer_memory_mb, duckdb_flush_memory_mb, duckdb_threads, flush_interval_ms, flush_batch_threshold, max_concurrent_flushes, max_queued_changes",
+                        "unknown config key: '{}'. Valid keys: duckdb_buffer_memory_mb, duckdb_flush_memory_mb, duckdb_threads, flush_interval_ms, flush_batch_threshold, max_concurrent_flushes, max_queued_bytes",
                         k
                     );
                 }
