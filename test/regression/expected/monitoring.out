@@ -33,9 +33,9 @@ FROM duckpipe.status();
 
 -- Test duckpipe.worker_status() returns runtime state (per group, from SHM)
 SELECT sync_group, total_queued_bytes, is_backpressured FROM duckpipe.worker_status();
- sync_group | total_queued_bytes | is_backpressured
+ sync_group | total_queued_bytes | is_backpressured 
 ------------+--------------------+------------------
- default    |                    0 | f
+ default    |                  0 | f
 (1 row)
 
 -- Cleanup
