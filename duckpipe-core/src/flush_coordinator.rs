@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use crate::duckdb_flush::FlushWorker;
 use crate::flush_worker;
 use crate::metadata::ERRORED_THRESHOLD;
-use crate::types::{Change, ResolvedConfig, TableConfig};
+use crate::types::{Change, ResolvedConfig, SyncMode, TableConfig};
 
 /// In-memory group-level metrics from FlushCoordinator.
 #[derive(Clone, Copy, Default)]
@@ -52,7 +52,7 @@ pub struct QueueMeta {
     pub key_attrs: Vec<usize>,
     pub atttypes: Vec<u32>,
     pub source_label: String,
-    pub sync_mode: String,
+    pub sync_mode: SyncMode,
 }
 
 /// Barrier command: DDL (ADD/DROP/RENAME COLUMN) or TRUNCATE (DELETE by source).
@@ -450,7 +450,7 @@ impl FlushCoordinator {
         atttypes: Vec<u32>,
         paused: bool,
         source_label: String,
-        sync_mode: String,
+        sync_mode: SyncMode,
         table_config: &TableConfig,
     ) {
         // Seed in-memory LSN from the persistent PG value if we haven't seen this table yet.
@@ -1102,7 +1102,7 @@ fn flush_thread_main(
                         ducklake_schema,
                         &resolved_config,
                         meta.source_label.clone(),
-                        meta.sync_mode.clone(),
+                        meta.sync_mode,
                         temp_dir.clone(),
                     ) {
                         Ok(w) => worker = Some(w),

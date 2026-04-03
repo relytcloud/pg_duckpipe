@@ -2,7 +2,9 @@ use pgrx::datum::{DatumWithOid, TimestampWithTimeZone};
 use pgrx::prelude::*;
 
 use duckpipe_core::listen;
-use duckpipe_core::types::{is_duckpipe_system_column, GroupConfig, ResolvedConfig, TableConfig};
+use duckpipe_core::types::{
+    is_duckpipe_system_column, GroupConfig, ResolvedConfig, SyncMode, TableConfig,
+};
 
 use crate::DATA_INLINING_ROW_LIMIT;
 
@@ -654,19 +656,12 @@ fn add_table(
     let group = sync_group.unwrap_or("default");
     let copy_data = copy_data.unwrap_or(true);
     let fan_in = fan_in.unwrap_or(false);
-    let sync_mode = sync_mode.unwrap_or("upsert");
-
-    // Validate sync_mode
-    if sync_mode != "upsert" && sync_mode != "append" {
-        ereport!(
-            ERROR,
-            PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
-            format!(
-                "sync_mode must be 'upsert' or 'append', got '{}'",
-                sync_mode
-            )
-        );
-    }
+    let sync_mode: SyncMode = match sync_mode.unwrap_or("upsert").parse() {
+        Ok(m) => m,
+        Err(e) => {
+            ereport!(ERROR, PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE, e);
+        }
+    };
 
     let (t_schema, t_table) = if let Some(target) = target_table {
         parse_source_table(target)
@@ -756,7 +751,7 @@ fn add_table(
     //     does not leave orphaned replication infrastructure behind.
     //     Append mode works without a PK: the changelog stores full row values
     //     via REPLICA IDENTITY FULL (set below).
-    if sync_mode == "upsert" {
+    if matches!(sync_mode, SyncMode::Upsert) {
         let pk_sql = format!(
             "SELECT 1 FROM pg_class c \
              JOIN pg_namespace n ON n.oid = c.relnamespace \
@@ -1037,7 +1032,7 @@ fn add_table(
             .chain(["\"_duckpipe_source\" TEXT".to_string()])
             // Append mode: add metadata columns for change tracking
             .chain(
-                (sync_mode == "append")
+                (matches!(sync_mode, SyncMode::Append))
                     .then_some(["\"_duckpipe_op\" TEXT", "\"_duckpipe_lsn\" BIGINT"])
                     .into_iter()
                     .flatten()
@@ -1204,7 +1199,7 @@ fn add_table(
             datum_i64(source_oid),
             datum_i64(target_oid),
             datum_text(source_label.as_str()),
-            datum_text(sync_mode),
+            datum_text(sync_mode.as_str()),
         ];
         client
             .update(

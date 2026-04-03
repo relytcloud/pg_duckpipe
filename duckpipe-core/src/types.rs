@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::state::SyncState;
+
 /// Shared validation for config key-value pairs against a `&[(&str, &str)]` table.
 fn validate_config_value(
     valid_keys: &[(&str, &str)],
@@ -386,6 +388,17 @@ pub enum ChangeType {
     Update,
 }
 
+impl ChangeType {
+    /// Numeric code used in the DuckDB buffer table's `_op_type` column.
+    pub fn as_i32(&self) -> i32 {
+        match self {
+            ChangeType::Insert => 0,
+            ChangeType::Update => 1,
+            ChangeType::Delete => 2,
+        }
+    }
+}
+
 /// A decoded change
 #[derive(Debug, Clone)]
 pub struct Change {
@@ -439,6 +452,43 @@ impl std::str::FromStr for GroupMode {
     }
 }
 
+/// Sync mode: upsert (compact + replace by PK) or append (immutable changelog).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncMode {
+    Upsert,
+    Append,
+}
+
+impl SyncMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SyncMode::Upsert => "upsert",
+            SyncMode::Append => "append",
+        }
+    }
+}
+
+impl std::str::FromStr for SyncMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "upsert" => Ok(SyncMode::Upsert),
+            "append" => Ok(SyncMode::Append),
+            other => Err(format!(
+                "invalid sync_mode '{}': must be 'upsert' or 'append'",
+                other
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for SyncMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Sync group metadata
 #[derive(Debug, Clone)]
 pub struct SyncGroup {
@@ -463,7 +513,7 @@ pub struct TableMapping {
     pub source_table: String,
     pub target_schema: String,
     pub target_table: String,
-    pub state: String,
+    pub state: SyncState,
     pub snapshot_lsn: u64,
     pub applied_lsn: u64,
     pub enabled: bool,
@@ -471,7 +521,7 @@ pub struct TableMapping {
     pub target_oid: i64,
     pub error_message: Option<String>,
     pub source_label: String,
-    pub sync_mode: String,
+    pub sync_mode: SyncMode,
     /// Per-table config overrides (from table_mappings.config JSONB column).
     pub config: TableConfig,
 }
