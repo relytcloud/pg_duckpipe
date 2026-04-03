@@ -18,6 +18,8 @@ use std::time::Instant;
 
 use duckdb::Connection;
 
+use crate::types::SyncMode;
+
 /// Guard that DETACHes the DuckLake database on drop.
 struct DetachOnDrop(Connection);
 
@@ -77,7 +79,7 @@ pub async fn process_snapshot_task(
     task_id: i32,
     group_name: &str,
     source_label: String,
-    sync_mode: String,
+    sync_mode: SyncMode,
 ) -> Result<(u64, u64, u64), String> {
     let table_start = Instant::now();
 
@@ -165,7 +167,7 @@ pub async fn process_snapshot_task(
         let consumer_target_table = target_table.to_string();
         let consumer_timing = timing;
         let consumer_source_label = source_label.clone();
-        let consumer_sync_mode = sync_mode.clone();
+        let consumer_sync_mode = sync_mode;
 
         let consumer_handle = tokio::task::spawn_blocking(move || {
             run_duckdb_consumer(
@@ -176,7 +178,7 @@ pub async fn process_snapshot_task(
                 &consumer_target_table,
                 consumer_timing,
                 &consumer_source_label,
-                &consumer_sync_mode,
+                consumer_sync_mode,
             )
         });
 
@@ -383,7 +385,7 @@ fn run_duckdb_consumer(
     target_table: &str,
     timing: bool,
     source_label: &str,
-    sync_mode: &str,
+    sync_mode: SyncMode,
 ) -> Result<u64, String> {
     let t_start = if timing { Some(Instant::now()) } else { None };
 
@@ -500,7 +502,7 @@ fn run_duckdb_consumer(
 
                 // Build INSERT: source columns from CSV + system column literals
                 let source_value = format!("'{}'", source_label.replace('\'', "''"));
-                let insert_sql = if sync_mode == "append" {
+                let insert_sql = if matches!(sync_mode, SyncMode::Append) {
                     // Append mode: inject _duckpipe_op='I' and _duckpipe_lsn=0 for snapshot rows
                     format!(
                         "INSERT INTO {} ({}) SELECT {}, {}, 'I', 0 FROM read_csv('{}', header=true, nullstr='__DUCKPIPE_NULL__')",

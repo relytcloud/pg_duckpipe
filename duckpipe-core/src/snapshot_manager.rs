@@ -76,7 +76,7 @@ impl SnapshotManager {
             let tgt_schema = task.target_schema.clone();
             let tgt_table = task.target_table.clone();
             let source_label = task.source_label.clone();
-            let sync_mode = task.sync_mode.clone();
+            let sync_mode = task.sync_mode;
             let cs = connstr.to_string();
             let ddb_cs = duckdb_pg_connstr.to_string();
             let dl_schema = ducklake_schema.to_string();

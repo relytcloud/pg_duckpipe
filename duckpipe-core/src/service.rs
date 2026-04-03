@@ -21,7 +21,8 @@ use crate::flush_coordinator::{
 use crate::metadata::{compute_backoff_secs, MetadataClient, ERRORED_THRESHOLD};
 use crate::slot_consumer::SlotConsumer;
 use crate::snapshot_manager::SnapshotManager;
-use crate::types::{Change, ChangeType, RelCacheEntry, SyncGroup, TableMapping, Value};
+use crate::state::SyncState;
+use crate::types::{Change, ChangeType, RelCacheEntry, SyncGroup, SyncMode, TableMapping, Value};
 
 /// Configuration for the DuckPipe service.
 #[derive(Debug, Clone)]
@@ -142,7 +143,7 @@ async fn ensure_coordinator_queue(
         final_attrs
     };
 
-    let paused = mapping.state == "SNAPSHOT";
+    let paused = matches!(mapping.state, SyncState::Snapshot);
     coordinator.ensure_queue(
         target_key,
         mapping.id,
@@ -152,7 +153,7 @@ async fn ensure_coordinator_queue(
         atttypes.clone(),
         paused,
         mapping.source_label.clone(),
-        mapping.sync_mode.clone(),
+        mapping.sync_mode,
         &mapping.config,
     );
     Ok(())
@@ -162,15 +163,18 @@ async fn ensure_coordinator_queue(
 /// not yet caught up (CATCHUP with lsn <= snapshot_lsn), or already applied
 /// in append mode (lsn <= applied_lsn).
 fn should_skip_change(mapping: &TableMapping, lsn: u64) -> bool {
-    if !mapping.enabled || mapping.state == "ERRORED" {
+    if !mapping.enabled || matches!(mapping.state, SyncState::Errored) {
         return true;
     }
-    if mapping.state == "CATCHUP" && mapping.snapshot_lsn != 0 && lsn <= mapping.snapshot_lsn {
+    if matches!(mapping.state, SyncState::Catchup)
+        && mapping.snapshot_lsn != 0
+        && lsn <= mapping.snapshot_lsn
+    {
         return true;
     }
     // Append-mode exactly-once: skip already-applied WAL changes
-    if mapping.sync_mode == "append"
-        && mapping.state == "STREAMING"
+    if matches!(mapping.sync_mode, SyncMode::Append)
+        && matches!(mapping.state, SyncState::Streaming)
         && mapping.applied_lsn != 0
         && lsn <= mapping.applied_lsn
     {
@@ -353,7 +357,7 @@ async fn process_one_wal_message(
             // Detect schema changes by comparing with the cached RELATION entry.
             if let Some(old_cached) = rel_cache.get(&rel_id) {
                 if let Some(ref mapping) = old_cached.mapping {
-                    if mapping.enabled && mapping.state != "ERRORED" {
+                    if mapping.enabled && !matches!(mapping.state, SyncState::Errored) {
                         let catalog_client = source_client.unwrap_or(meta.client());
 
                         // Detect column-level schema changes
@@ -384,7 +388,7 @@ async fn process_one_wal_message(
                                 key_attrs: new_key_attrs,
                                 atttypes: new_entry.atttypes.clone(),
                                 source_label: mapping.source_label.clone(),
-                                sync_mode: mapping.sync_mode.clone(),
+                                sync_mode: mapping.sync_mode,
                             };
 
                             coordinator.set_pending_ddl(
@@ -538,7 +542,7 @@ async fn process_one_wal_message(
                         extract_key_values(&new_values, pk_attrs)
                     };
 
-                    if mapping.sync_mode == "append" {
+                    if matches!(mapping.sync_mode, SyncMode::Append) {
                         // Append mode: push a single Update change (preserves raw op type)
                         let final_values = if has_unchanged && old_marker == 'O' {
                             fill_toast_columns(&new_values, &old_values, &new_unchanged)
@@ -696,8 +700,8 @@ async fn process_one_wal_message(
                 if let Some(cached) = rel_cache.get(&rel_id) {
                     let mapping = resolve_mapping(meta, group.id, rel_id, &cached.entry).await?;
                     if let Some(mapping) = mapping {
-                        if mapping.enabled && mapping.state != "ERRORED" {
-                            if mapping.sync_mode == "append" {
+                        if mapping.enabled && !matches!(mapping.state, SyncState::Errored) {
+                            if matches!(mapping.sync_mode, SyncMode::Append) {
                                 // Append mode: skip DELETE, log that TRUNCATE was received.
                                 // The changelog is immutable — TRUNCATE is not propagated.
                                 tracing::info!(
@@ -794,18 +798,18 @@ async fn run_heartbeat(
                 }
                 Ok(Some(new_state)) => {
                     tracing::info!(
-                        "pg_duckpipe: auto-retrying errored table {}.{} → {}",
+                        "pg_duckpipe: auto-retrying errored table {}.{} -> {}",
                         table.source_schema,
                         table.source_table,
                         new_state
                     );
-                    if new_state == "STREAMING" {
-                        // Mirror ERRORED → STREAMING in the rel_cache so routing resumes
+                    if matches!(new_state, SyncState::Streaming) {
+                        // Mirror ERRORED -> STREAMING in the rel_cache so routing resumes
                         // immediately without waiting for the next periodic refresh.
                         for cached in rel_cache.values_mut() {
                             if let Some(ref mut mapping) = cached.mapping {
                                 if mapping.id == table.id {
-                                    mapping.state = "STREAMING".to_string();
+                                    mapping.state = SyncState::Streaming;
                                     break;
                                 }
                             }
@@ -825,11 +829,11 @@ async fn run_heartbeat(
         // Mirror the transition immediately in rel_cache.
         for cached in rel_cache.values_mut() {
             if let Some(ref mut mapping) = cached.mapping {
-                if mapping.state == "CATCHUP"
+                if matches!(mapping.state, SyncState::Catchup)
                     && mapping.snapshot_lsn != 0
                     && mapping.snapshot_lsn <= group.pending_lsn
                 {
-                    mapping.state = "STREAMING".to_string();
+                    mapping.state = SyncState::Streaming;
                 }
             }
         }
@@ -1345,9 +1349,9 @@ pub async fn run_group_sync_cycle(
                 Ok(meta_map) => {
                     for cached in slot_state.rel_cache.values_mut() {
                         if let Some(ref mut mapping) = cached.mapping {
-                            if let Some((enabled, state_str)) = meta_map.get(&mapping.id) {
+                            if let Some((enabled, state)) = meta_map.get(&mapping.id) {
                                 mapping.enabled = *enabled;
-                                mapping.state = state_str.clone();
+                                mapping.state = *state;
                             }
                         }
                     }

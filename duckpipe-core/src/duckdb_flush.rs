@@ -14,7 +14,8 @@ use std::time::Instant;
 use duckdb::{Config, Connection};
 
 use crate::types::{
-    fixed_bytes_for_oid, is_duckpipe_system_column, Change, ChangeType, ResolvedConfig, Value,
+    fixed_bytes_for_oid, is_duckpipe_system_column, Change, ChangeType, ResolvedConfig, SyncMode,
+    Value,
 };
 
 const DUCKLAKE_EXT_FILENAME: &str = "ducklake.duckdb_extension";
@@ -296,8 +297,8 @@ pub struct FlushWorker {
     /// Injected as a SQL literal into INSERT statements and scopes
     /// DELETE operations to this label for fan-in isolation.
     source_label: String,
-    /// Sync mode: "upsert" (default) or "append" (immutable changelog).
-    sync_mode: String,
+    /// Sync mode: upsert (default) or append (immutable changelog).
+    sync_mode: SyncMode,
     /// Cached high-water `_duckpipe_lsn` from the target table (append mode only).
     /// Queried once on the first flush after restart, then reused across subsequent
     /// flushes until all replayed WAL has been consumed. Zero means no dedup needed.
@@ -319,7 +320,7 @@ impl FlushWorker {
         ducklake_schema: &str,
         resolved_config: &ResolvedConfig,
         source_label: String,
-        sync_mode: String,
+        sync_mode: SyncMode,
         temp_dir: std::path::PathBuf,
     ) -> Result<Self, String> {
         let db = open_ducklake_connection(pg_connstr, ducklake_schema)?;
@@ -423,7 +424,7 @@ impl FlushWorker {
                 )
             }))
             // Append mode: store per-change LSN for _duckpipe_lsn metadata
-            .chain((self.sync_mode == "append").then(|| "_lsn BIGINT".to_string()))
+            .chain((matches!(self.sync_mode, SyncMode::Append)).then(|| "_lsn BIGINT".to_string()))
             .collect();
 
         let create_buf = format!("CREATE TABLE buffer ({})", buf_cols.join(", "));
@@ -478,7 +479,7 @@ impl FlushWorker {
         let mut seq = seq_start;
         let fixed_row_bytes = self.cached_fixed_row_bytes;
         let mut var_total: usize = 0;
-        let is_append = self.sync_mode == "append";
+        let is_append = matches!(self.sync_mode, SyncMode::Append);
 
         {
             let mut appender = self
@@ -488,11 +489,7 @@ impl FlushWorker {
 
             for change in changes {
                 seq += 1;
-                let op_type: i32 = match change.change_type {
-                    ChangeType::Insert => 0,
-                    ChangeType::Update => 1,
-                    ChangeType::Delete => 2,
-                };
+                let op_type = change.change_type.as_i32();
 
                 // +2 = _seq, _op_type; +1 more for _lsn in append mode
                 let extra = if is_append { 3 } else { 2 };
@@ -570,7 +567,7 @@ impl FlushWorker {
             .execute_batch(&format!("SET memory_limit = '{}'", self.flush_memory_limit))
             .map_err(|e| format!("duckdb raise memory_limit: {}", e))?;
 
-        if self.sync_mode == "append" {
+        if matches!(self.sync_mode, SyncMode::Append) {
             self.flush_append(target_key, applied_count, &flush_start)?;
         } else {
             self.flush_upsert(target_key, applied_count, &flush_start)?;
