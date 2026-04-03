@@ -764,7 +764,7 @@ duckpipe --connstr "host=localhost port=5432 dbname=mydb user=replicator passwor
          [--ducklake-schema ducklake]
          [--flush-interval 5000]
          [--flush-batch-threshold 10000]
-         [--max-queued-bytes 256000000]
+         [--max-queued-bytes 1000000000]
          [--duckdb-buffer-memory-mb 16]
          [--duckdb-flush-memory-mb 512]
          [--max-concurrent-flushes 4]

@@ -248,7 +248,7 @@ impl Default for ResolvedConfig {
             flush_interval_ms: 5000,
             flush_batch_threshold: 50000,
             max_concurrent_flushes: 4,
-            max_queued_bytes: 256_000_000,
+            max_queued_bytes: 1_000_000_000,
         }
     }
 }

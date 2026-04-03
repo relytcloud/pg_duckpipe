@@ -107,7 +107,7 @@ Single async task per sync group. Reads WAL and dispatches decoded changes to pe
 
 ### Backpressure Design
 
-The WAL consumer sums per-queue byte counters across all tables. When the total exceeds `max_queued_bytes` (default 256 MB), WAL consumption pauses until flush workers drain enough data.
+The WAL consumer sums per-queue byte counters across all tables. When the total exceeds `max_queued_bytes` (default 1 GB), WAL consumption pauses until flush workers drain enough data.
 
 This is byte-size-based rather than LSN-gap-based, which directly measures memory pressure. LSN gaps can misfire (large gaps from unrelated WAL consume no staging memory, while small gaps with many rows can exhaust memory). Byte tracking is more accurate than row counting because row sizes vary widely across tables.
 

@@ -69,7 +69,7 @@ INSERT INTO duckpipe.global_config VALUES
     ('flush_interval_ms', '5000'),
     ('flush_batch_threshold', '50000'),
     ('max_concurrent_flushes', '4'),
-    ('max_queued_bytes', '256000000');
+    ('max_queued_bytes', '1000000000');
 
 -- Default sync group
 INSERT INTO duckpipe.sync_groups (name, publication, slot_name)

@@ -220,7 +220,7 @@ DuckDB resource limits and flush tuning are managed via the `duckpipe.global_con
 | `flush_interval_ms` | int | `5000` | Time-based flush trigger (ms) |
 | `flush_batch_threshold` | int | `50000` | Queue-size flush trigger |
 | `max_concurrent_flushes` | int | `4` | Max concurrent flush operations per group |
-| `max_queued_bytes` | int | `256000000` | Backpressure threshold (bytes; 256 MB default) |
+| `max_queued_bytes` | int | `1000000000` | Backpressure threshold (bytes; 1 GB default) |
 
 #### Config API
 
