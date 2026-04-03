@@ -26,7 +26,7 @@ DECLARE
   q bigint;
 BEGIN
   WHILE i < 100 LOOP
-    SELECT total_queued_changes INTO q
+    SELECT total_queued_bytes INTO q
       FROM duckpipe.worker_status();
     IF q = 0 THEN
       idle_count := idle_count + 1;

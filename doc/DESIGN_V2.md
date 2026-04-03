@@ -22,7 +22,7 @@ pg_duckpipe is a CDC sync service from PostgreSQL heap tables to DuckLake column
 3. **Unified WAL consumption** — Use START_REPLICATION protocol for all modes
 4. **Per-table staging** — One queue per source table, drained by flush workers
 5. **DuckDB buffer + DELETE+INSERT flush path** — Flush workers drain queue into DuckDB buffer table, compact and apply to DuckLake via DELETE+INSERT
-6. **Backpressure-aware** — AtomicI64 counter tracks total queued changes, pauses WAL consumer when threshold exceeded
+6. **Backpressure-aware** — Per-queue byte tracking pauses WAL consumer when total queued bytes exceed threshold
 7. **Source table OID** — Use OID as identifier to survive table renames
 8. **REPLICA IDENTITY FULL** — Required on source tables to avoid TOAST-unchanged column issues
 
@@ -83,7 +83,7 @@ Both modes use identical `duckpipe-core` sync logic.
 │                              └───────────────────────────────────┘  │
 │                                                                      │
 │  ┌─────────────────────┐                                            │
-│  │ Source PostgreSQL    │    Backpressure: AtomicI64 total_queued    │
+│  │ Source PostgreSQL    │    Backpressure: per-queue byte tracking   │
 │  │ Heap Tables, WAL,   │    pauses slot consumer when > threshold   │
 │  │ Slot, Publication   │                                            │
 │  └─────────────────────┘                                            │
@@ -101,15 +101,15 @@ Single async task per sync group. Reads WAL and dispatches decoded changes to pe
 1. **WAL consumption** — START_REPLICATION protocol (unified for all modes)
 2. **pgoutput decoding** — Parse binary protocol
 3. **Route to queues** — Append decoded changes to per-table staging queues
-4. **Backpressure control** — Monitor AtomicI64 total queue depth, pause if above threshold
+4. **Backpressure control** — Sum per-queue byte counters, pause if total exceeds `max_queued_bytes`
 5. **Checkpoint coordination** — Track per-table `applied_lsn`, compute `confirmed_flush_lsn`
 6. **Replication slot advancement** — Send `StandbyStatusUpdate` with confirmed LSN
 
 ### Backpressure Design
 
-The slot consumer tracks total queued changes across all tables via a shared `AtomicI64` counter. When the count exceeds `max_queued_changes`, WAL consumption pauses until flush workers drain enough changes.
+The WAL consumer sums per-queue byte counters across all tables. When the total exceeds `max_queued_bytes` (default 1 GB), WAL consumption pauses until flush workers drain enough data.
 
-This is row-count-based rather than LSN-gap-based, which directly measures memory pressure. LSN gaps can misfire (large gaps from unrelated WAL consume no staging memory, while small gaps with many rows can exhaust memory).
+This is byte-size-based rather than LSN-gap-based, which directly measures memory pressure. LSN gaps can misfire (large gaps from unrelated WAL consume no staging memory, while small gaps with many rows can exhaust memory). Byte tracking is more accurate than row counting because row sizes vary widely across tables.
 
 ---
 
@@ -269,7 +269,7 @@ Main thread (tokio current_thread runtime)
 ├── Slot Consumer (1 per sync group, async task)
 │   └── Per-table staging queues (Mutex<VecDeque>)
 ├── Snapshot Workers (tokio tasks, parallel)
-└── Backpressure counter (AtomicI64, shared)
+└── Backpressure: per-queue AtomicI64 byte counters, summed by WAL consumer
 
 Flush Threads (OS threads via std::thread::spawn, 1 per table)
 ├── Each owns: DuckDB in-memory connection (DuckLake attached)

@@ -16,7 +16,7 @@ from lib import (
     get_sysbench_cmd,
     parse_int,
     get_total_lag_bytes,
-    get_total_queued_changes,
+    get_total_queued_bytes,
     get_snapshot_metrics,
     get_benchmark_rows_synced,
     wait_for_db_ready,
@@ -300,7 +300,7 @@ def benchmark_streaming(args, db_params):
 
         now = time.time()
         final_lag = get_total_lag_bytes(db_params)
-        queued_changes = get_total_queued_changes(db_params)
+        queued_changes = get_total_queued_bytes(db_params)
         count_increasing = current_count > prev_count
         lag_decreasing = final_lag < prev_final_lag
         flush_draining = queued_changes > 0

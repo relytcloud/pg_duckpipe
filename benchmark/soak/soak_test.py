@@ -30,7 +30,7 @@ from lib import (
     get_sysbench_cmd,
     parse_int,
     get_total_lag_bytes,
-    get_total_queued_changes,
+    get_total_queued_bytes,
     get_full_status,
     get_worker_status,
     get_wal_slot_size_bytes,
@@ -309,7 +309,7 @@ def monitor_loop(state, db_params, args, csv_writer, csv_file):
 
             # Pipeline metrics
             wal_lag = get_total_lag_bytes(db_params)
-            queued = get_total_queued_changes(db_params)
+            queued = get_total_queued_bytes(db_params)
             slot_wal = get_wal_slot_size_bytes(db_params)
             total_rows = get_benchmark_rows_synced(db_params, args.tables)
 
@@ -623,10 +623,10 @@ def final_consistency_check(state, db_params, args, get_queued=None):
     """Wait for catch-up and run a final consistency check.
 
     get_queued: callable returning current queued change count.
-                Defaults to SQL-based get_total_queued_changes(db_params).
+                Defaults to SQL-based get_total_queued_bytes(db_params).
     """
     if get_queued is None:
-        get_queued = lambda: get_total_queued_changes(db_params)
+        get_queued = lambda: get_total_queued_bytes(db_params)
 
     state.add_event("Final: waiting for catch-up...")
 

@@ -19,7 +19,7 @@ use super::{pg_connect, AppState};
 ///                 "queued_changes", "duckdb_memory_bytes", "flush_count",
 ///                 "flush_duration_ms", "consecutive_failures",
 ///                 "snapshot_duration_ms", "snapshot_rows", "applied_lsn" }],
-///   "groups": [{ "name", "total_queued_changes", "is_backpressured", "active_flushes" }]
+///   "groups": [{ "name", "total_queued_bytes", "is_backpressured", "active_flushes" }]
 /// }
 /// ```
 pub async fn get_metrics(
@@ -78,7 +78,7 @@ pub async fn get_metrics(
     let gm = &cache.group;
     let groups: Vec<Value> = vec![json!({
         "name": group_name,
-        "total_queued_changes": gm.total_queued_changes,
+        "total_queued_bytes": gm.total_queued_bytes,
         "is_backpressured": gm.is_backpressured,
         "active_flushes": gm.active_flushes,
         "gate_wait_avg_ms": gm.gate_wait_avg_ms,

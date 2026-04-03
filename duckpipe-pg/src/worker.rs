@@ -358,7 +358,7 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
                             crate::write_shmem_metrics(
                                 &crate::GroupMetrics {
                                     group_id,
-                                    total_queued_changes: coord.total_queued(),
+                                    total_queued_bytes: coord.total_queued_bytes(),
                                     is_backpressured: coord.is_backpressured(),
                                     active_flushes: coord.active_flush_count() as i32,
                                     gate_wait_avg_ms: gs.avg_wait_ms,

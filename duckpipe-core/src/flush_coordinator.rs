@@ -3,7 +3,7 @@
 //! Flush threads are fully decoupled from WAL consumption:
 //! - Self-trigger based on queue size (batch_threshold) or time (flush_interval)
 //! - Handle PG metadata updates (applied_lsn, metrics, error state) independently
-//! - Backpressure via AtomicI64 total_queued prevents unbounded memory growth
+//! - Backpressure via per-queue byte tracking prevents unbounded memory growth
 //!
 //! `drain_and_wait_all()` is retained for shutdown. TRUNCATE uses the same
 //! non-blocking barrier queue as DDL (see `DdlCommand::Truncate`).
@@ -24,7 +24,7 @@ use crate::types::{Change, ResolvedConfig, SyncMode, TableConfig};
 #[derive(Clone, Copy, Default)]
 pub struct GroupMetrics {
     pub group_id: i32,
-    pub total_queued_changes: i64,
+    pub total_queued_bytes: i64,
     pub is_backpressured: bool,
     pub active_flushes: i32,
     pub gate_wait_avg_ms: i64,
@@ -100,6 +100,10 @@ struct SharedTableQueue {
     /// DDL barrier queue. When non-empty, push_change routes to the last
     /// barrier's `post_changes`. Processed FIFO by the flush thread.
     pending_ddls: std::collections::VecDeque<PendingDdl>,
+    /// Estimated byte size of all changes in this queue (main + DDL post_changes).
+    /// Incremented on push, decremented on drain. Single source of truth for
+    /// backpressure — the WAL consumer sums this across all queues.
+    queued_bytes: i64,
 }
 
 /// Arc-shared handle between producer (main thread) and consumer (flush thread).
@@ -324,21 +328,6 @@ pub struct GateStats {
     pub timeout_count: i64,
 }
 
-/// Shared backpressure state between producer (WAL consumer) and flush threads.
-struct BackpressureState {
-    /// Total number of in-flight changes (shared queues + local accumulators).
-    /// Incremented by producer on push_change(), decremented by flush threads
-    /// after flush completes or accumulated data is cleared. Using Relaxed ordering
-    /// is acceptable since backpressure is best-effort (off-by-a-few is fine).
-    total_queued: AtomicI64,
-    /// Subset of total_queued for paused (SNAPSHOT) tables.
-    /// Excluded from backpressure so buffered snapshot changes don't block
-    /// WAL streaming for other tables.
-    snapshot_queued: AtomicI64,
-    /// Maximum allowed queued changes before backpressure kicks in.
-    max_queued: i64,
-}
-
 /// Producer-consumer flush coordinator with persistent per-table flush threads.
 pub struct FlushCoordinator {
     pg_connstr: String,
@@ -347,7 +336,8 @@ pub struct FlushCoordinator {
     threads: HashMap<i32, FlushThreadEntry>,
     result_tx: mpsc::Sender<FlushThreadResult>,
     result_rx: mpsc::Receiver<FlushThreadResult>,
-    backpressure: Arc<BackpressureState>,
+    /// Maximum allowed queued bytes before backpressure kicks in.
+    max_queued_bytes: i64,
     resolved_config: ResolvedConfig,
     /// Base directory for per-table DuckDB spill files.
     /// Each flush thread gets `{temp_base_dir}/m{mapping_id}/`.
@@ -389,7 +379,7 @@ impl FlushCoordinator {
         temp_base_dir: std::path::PathBuf,
     ) -> Self {
         let (tx, rx) = mpsc::channel();
-        let max_queued = resolved_config.max_queued_changes as i64;
+        let max_queued_bytes = resolved_config.max_queued_bytes;
         let max_concurrent = resolved_config.max_concurrent_flushes as usize;
         let flush_interval = Duration::from_millis(resolved_config.flush_interval_ms as u64);
         FlushCoordinator {
@@ -399,11 +389,7 @@ impl FlushCoordinator {
             threads: HashMap::new(),
             result_tx: tx,
             result_rx: rx,
-            backpressure: Arc::new(BackpressureState {
-                total_queued: AtomicI64::new(0),
-                snapshot_queued: AtomicI64::new(0),
-                max_queued,
-            }),
+            max_queued_bytes,
             resolved_config,
             temp_base_dir,
             per_table_lsn: HashMap::new(),
@@ -496,6 +482,7 @@ impl FlushCoordinator {
                 changes: Vec::new(),
                 last_lsn: 0,
                 pending_ddls: std::collections::VecDeque::new(),
+                queued_bytes: 0,
             }),
             condvar: Condvar::new(),
         });
@@ -518,7 +505,6 @@ impl FlushCoordinator {
         let pg_connstr = self.pg_connstr.clone();
         let ducklake_schema = self.ducklake_schema.clone();
         let group_name = self.group_name.clone();
-        let bp = Arc::clone(&self.backpressure);
         let fg = Arc::clone(&self.flush_gate);
         let effective_config = self.resolved_config.resolve_for_table(table_config);
         let batch_threshold = effective_config.flush_batch_threshold as usize;
@@ -538,7 +524,6 @@ impl FlushCoordinator {
                     &pg_connstr,
                     &ducklake_schema,
                     &group_name,
-                    bp,
                     fg,
                     batch_threshold,
                     interval_ms,
@@ -571,22 +556,16 @@ impl FlushCoordinator {
     /// `post_changes` so the flush thread can drain old-schema changes first.
     pub fn push_change(&self, mapping_id: i32, change: Change) {
         if let Some(entry) = self.threads.get(&mapping_id) {
+            let change_bytes = change.estimated_bytes();
             let mut guard = entry.queue_handle.inner.lock().unwrap();
             if change.lsn > guard.last_lsn {
                 guard.last_lsn = change.lsn;
             }
+            guard.queued_bytes += change_bytes;
             if let Some(last_ddl) = guard.pending_ddls.back_mut() {
                 last_ddl.post_changes.push(change);
             } else {
                 guard.changes.push(change);
-            }
-            self.backpressure
-                .total_queued
-                .fetch_add(1, Ordering::Relaxed);
-            if entry.control.paused.load(Ordering::Relaxed) {
-                self.backpressure
-                    .snapshot_queued
-                    .fetch_add(1, Ordering::Relaxed);
             }
         }
     }
@@ -616,17 +595,28 @@ impl FlushCoordinator {
     }
 
     /// Check if backpressure should pause WAL consumption.
-    /// Excludes changes queued for paused (SNAPSHOT) tables so that buffered
-    /// snapshot WAL changes don't block streaming for other tables.
+    /// Sums `queued_bytes` across all non-paused queues and compares to threshold.
+    /// Paused (SNAPSHOT) tables are excluded so buffered WAL changes during
+    /// snapshot don't block streaming for other tables.
     pub fn is_backpressured(&self) -> bool {
-        let total = self.backpressure.total_queued.load(Ordering::Relaxed);
-        let snapshot = self.backpressure.snapshot_queued.load(Ordering::Relaxed);
-        (total - snapshot) >= self.backpressure.max_queued
+        self.total_queued_bytes_active() >= self.max_queued_bytes
     }
 
-    /// Get the current total queued changes count (for observability).
-    pub fn total_queued(&self) -> i64 {
-        self.backpressure.total_queued.load(Ordering::Relaxed)
+    /// Sum of `queued_bytes` across all queues (for observability). Includes paused.
+    pub fn total_queued_bytes(&self) -> i64 {
+        self.threads
+            .values()
+            .map(|entry| entry.queue_handle.inner.lock().unwrap().queued_bytes)
+            .sum()
+    }
+
+    /// Sum of `queued_bytes` across non-paused queues (for backpressure check).
+    fn total_queued_bytes_active(&self) -> i64 {
+        self.threads
+            .values()
+            .filter(|entry| !entry.control.paused.load(Ordering::Relaxed))
+            .map(|entry| entry.queue_handle.inner.lock().unwrap().queued_bytes)
+            .sum()
     }
 
     /// Return per-table pending change counts as `(mapping_id, queued_changes)`.
@@ -752,33 +742,10 @@ impl FlushCoordinator {
             .collect();
 
         for mapping_id in &stale_ids {
-            // Shut down the flush thread and reclaim leaked backpressure counters.
+            // Shut down the flush thread. No backpressure counter cleanup needed —
+            // the queue's queued_bytes disappears with the removed entry, and the
+            // WAL consumer sums per-queue bytes on each backpressure check.
             if let Some(mut entry) = self.threads.remove(mapping_id) {
-                // Drain backpressure for any changes still in the shared queue or
-                // local accumulator — push_change() incremented total_queued (and
-                // snapshot_queued if paused) but the thread will never flush them.
-                let shared = {
-                    let guard = entry.queue_handle.inner.lock().unwrap();
-                    guard.changes.len() as i64
-                        + guard
-                            .pending_ddls
-                            .iter()
-                            .map(|d| d.post_changes.len() as i64)
-                            .sum::<i64>()
-                };
-                let local = entry.pending_local.load(Ordering::Relaxed);
-                let abandoned = shared + local;
-                if abandoned > 0 {
-                    self.backpressure
-                        .total_queued
-                        .fetch_sub(abandoned, Ordering::Relaxed);
-                    if entry.control.paused.load(Ordering::Relaxed) {
-                        self.backpressure
-                            .snapshot_queued
-                            .fetch_sub(abandoned, Ordering::Relaxed);
-                    }
-                }
-
                 entry.control.shutdown.store(true, Ordering::Release);
                 entry.queue_handle.condvar.notify_one();
                 if let Some(h) = entry.join_handle.take() {
@@ -920,23 +887,12 @@ impl FlushCoordinator {
 
     /// Unpause a table's flush thread after snapshot completion.
     ///
-    /// The entire adjustment (snapshot_queued subtraction + paused=false) is done
-    /// while holding the queue lock. Since `push_change` also holds this lock when
-    /// checking `paused` and incrementing `snapshot_queued`, there is no race window
-    /// where a concurrent push sees stale `paused=true` after the subtraction.
+    /// With per-queue byte tracking, no counter manipulation is needed — the
+    /// queue's `queued_bytes` is naturally included in the next `is_backpressured()`
+    /// sum once the paused flag is cleared.
     pub fn unpause_table(&self, mapping_id: i32) {
         if let Some(entry) = self.threads.get(&mapping_id) {
-            // Hold queue lock for the entire operation to synchronize with push_change.
-            let guard = entry.queue_handle.inner.lock().unwrap();
-            let shared = guard.changes.len() as i64;
-            let local = entry.pending_local.load(Ordering::Relaxed);
-            self.backpressure
-                .snapshot_queued
-                .fetch_sub(shared + local, Ordering::Relaxed);
-            // Clear paused while still holding the lock ��� push_change cannot
-            // observe paused=true after this point.
             entry.control.paused.store(false, Ordering::Release);
-            drop(guard);
             // Wake the flush thread so it starts flushing accumulated data.
             entry.queue_handle.condvar.notify_one();
         }
@@ -985,7 +941,6 @@ fn flush_thread_main(
     pg_connstr: &str,
     ducklake_schema: &str,
     group_name: &str,
-    backpressure: Arc<BackpressureState>,
     flush_gate: Arc<FlushGate>,
     batch_threshold: usize,
     flush_interval_ms: u64,
@@ -1001,7 +956,7 @@ fn flush_thread_main(
         .expect("failed to create flush thread runtime");
 
     let mut worker: Option<FlushWorker> = None;
-    let mut buffered_count: i64 = 0; // tracks changes in DuckDB buffer for backpressure
+    let mut buffered_count: i64 = 0; // tracks changes in DuckDB buffer for flush threshold
     let mut buffered_bytes: i64 = 0; // estimated bytes in DuckDB buffer for avg_row_bytes
     let mut buffered_lsn: u64 = 0;
     let mut buffered_meta: Option<QueueMeta> = None;
@@ -1052,9 +1007,6 @@ fn flush_thread_main(
                 if let Some(w) = worker.as_mut() {
                     w.clear_buffer();
                 }
-                backpressure
-                    .total_queued
-                    .fetch_sub(buffered_count, Ordering::Relaxed);
                 pending_local.store(0, Ordering::Relaxed);
                 if control.drain_requested.load(Ordering::Acquire) {
                     signal_drain_complete(&drain_complete, &control);
@@ -1082,6 +1034,9 @@ fn flush_thread_main(
                 let drain_n = guard.changes.len().min(batch_threshold);
                 let changes: Vec<Change> = guard.changes.drain(..drain_n).collect();
                 let count = changes.len() as i64;
+                // Subtract drained bytes from the queue's byte counter.
+                let drained_bytes: i64 = changes.iter().map(|c| c.estimated_bytes()).sum();
+                guard.queued_bytes -= drained_bytes;
                 // Max LSN across drained changes (WAL is ordered, so last = max).
                 let drained_lsn = changes.last().map(|c| c.lsn).unwrap_or(0);
                 if drained_lsn > buffered_lsn {
@@ -1108,9 +1063,6 @@ fn flush_thread_main(
                         Ok(w) => worker = Some(w),
                         Err(e) => {
                             let error_msg = format!("failed to create FlushWorker: {}", e);
-                            backpressure
-                                .total_queued
-                                .fetch_sub(buffered_count + count, Ordering::Relaxed);
                             buffered_count = 0;
                             buffered_bytes = 0;
                             next_seq = 0;
@@ -1150,12 +1102,9 @@ fn flush_thread_main(
                         pending_local.store(buffered_count, Ordering::Relaxed);
                     }
                     Err(e) => {
-                        // Append failed — drop worker (loses DuckDB buffer),
-                        // decrement backpressure for all lost data, send error.
+                        // Append failed — drop worker (loses DuckDB buffer).
+                        // Bytes already subtracted from queued_bytes at drain time.
                         worker = None;
-                        backpressure
-                            .total_queued
-                            .fetch_sub(buffered_count + count, Ordering::Relaxed);
                         buffered_count = 0;
                         buffered_bytes = 0;
                         next_seq = 0;
@@ -1208,9 +1157,6 @@ fn flush_thread_main(
                             &rt,
                         );
                     }
-                    backpressure
-                        .total_queued
-                        .fetch_sub(buffered_count, Ordering::Relaxed);
                     pending_local.store(0, Ordering::Relaxed);
                 }
 
@@ -1317,9 +1263,6 @@ fn flush_thread_main(
                 flush_gate.release(flush_start.elapsed());
             }
 
-            backpressure
-                .total_queued
-                .fetch_sub(buffered_count, Ordering::Relaxed);
             buffered_count = 0;
             buffered_bytes = 0;
             next_seq = 0;
