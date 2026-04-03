@@ -7,7 +7,7 @@
 //! 3. Checkpoint: crash-safe StandbyStatusUpdate with min(applied_lsn) from PG metadata
 //! 4. Backpressure: WAL consumption pauses when total queued changes exceed threshold
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use tokio_postgres::Client;
@@ -397,7 +397,7 @@ async fn process_one_wal_message(
                                     commands: changes,
                                     new_meta,
                                     target_oid: mapping.target_oid,
-                                    post_changes: Vec::new(),
+                                    post_changes: VecDeque::new(),
                                 },
                             );
 
@@ -718,7 +718,7 @@ async fn process_one_wal_message(
                                         }],
                                         new_meta: meta,
                                         target_oid: mapping.target_oid,
-                                        post_changes: Vec::new(),
+                                        post_changes: VecDeque::new(),
                                     },
                                 );
                             } else {
