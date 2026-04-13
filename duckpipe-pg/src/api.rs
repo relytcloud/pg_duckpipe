@@ -2555,7 +2555,12 @@ fn set_config(key: &str, value: &str) {
         error!("{}", e);
     }
 
-    log!("pg_duckpipe: set_config('{}', '{}')", key, value);
+    let log_value = if key.ends_with("connstr") || key.ends_with("conninfo") {
+        duckpipe_core::connstr::redact_password(value)
+    } else {
+        value.to_string()
+    };
+    log!("pg_duckpipe: set_config('{}', '{}')", key, log_value);
 
     Spi::connect_mut(|client| {
         let args = [datum_text(key), datum_text(value)];
@@ -2725,15 +2730,12 @@ fn get_group_config(group_name: &str, key: default!(Option<&str>, "NULL")) -> Op
         let resolved = ResolvedConfig::resolve(&global, &group_config);
 
         match key {
-            Some(k) => match resolved.get_key(k) {
-                Some(v) => Some(v),
-                None => {
-                    error!(
-                        "unknown config key: '{}'. Valid keys: duckdb_buffer_memory_mb, duckdb_flush_memory_mb, duckdb_threads, flush_interval_ms, flush_batch_threshold, max_concurrent_flushes, max_queued_changes",
-                        k
-                    );
+            Some(k) => {
+                if !GroupConfig::is_known_key(k) {
+                    error!("unknown config key: '{}'", k);
                 }
-            },
+                resolved.get_key(k)
+            }
             None => Some(resolved.to_group_config().to_json_string()),
         }
     })

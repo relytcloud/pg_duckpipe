@@ -7,6 +7,7 @@ test: monitoring
 test: metrics
 test: sync_group_mode
 test: group_config
+test: ducklake_catalog_connstr
 test: table_config
 # Nonexistent table: proper error message instead of misleading "no primary key"
 test: nonexistent_table

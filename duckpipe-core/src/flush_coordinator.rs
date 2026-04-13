@@ -342,6 +342,9 @@ struct BackpressureState {
 /// Producer-consumer flush coordinator with persistent per-table flush threads.
 pub struct FlushCoordinator {
     pg_connstr: String,
+    /// PG connstr for DuckLake ATTACH (DuckDB → Postgres catalog).
+    /// Defaults to `pg_connstr` unless `ducklake_catalog_connstr` config is set.
+    ducklake_pg_connstr: String,
     ducklake_schema: String,
     group_name: String,
     threads: HashMap<i32, FlushThreadEntry>,
@@ -392,8 +395,19 @@ impl FlushCoordinator {
         let max_queued = resolved_config.max_queued_changes as i64;
         let max_concurrent = resolved_config.max_concurrent_flushes as usize;
         let flush_interval = Duration::from_millis(resolved_config.flush_interval_ms as u64);
+        let ducklake_pg_connstr = resolved_config
+            .ducklake_catalog_connstr
+            .clone()
+            .unwrap_or_else(|| pg_connstr.clone());
+        if ducklake_pg_connstr != pg_connstr {
+            tracing::info!(
+                "DuckLake catalog connstr: {}",
+                crate::connstr::redact_password(&ducklake_pg_connstr)
+            );
+        }
         FlushCoordinator {
             pg_connstr,
+            ducklake_pg_connstr,
             ducklake_schema,
             group_name,
             threads: HashMap::new(),
@@ -516,6 +530,7 @@ impl FlushCoordinator {
         let pl = Arc::clone(&pending_local);
         let tx = self.result_tx.clone();
         let pg_connstr = self.pg_connstr.clone();
+        let ducklake_pg_connstr = self.ducklake_pg_connstr.clone();
         let ducklake_schema = self.ducklake_schema.clone();
         let group_name = self.group_name.clone();
         let bp = Arc::clone(&self.backpressure);
@@ -536,6 +551,7 @@ impl FlushCoordinator {
                     pl,
                     tx,
                     &pg_connstr,
+                    &ducklake_pg_connstr,
                     &ducklake_schema,
                     &group_name,
                     bp,
@@ -942,9 +958,14 @@ impl FlushCoordinator {
         }
     }
 
-    /// Get the PG connection string.
+    /// Get the PG connection string (local metadata).
     pub fn pg_connstr(&self) -> &str {
         &self.pg_connstr
+    }
+
+    /// Get the PG connection string used for DuckLake ATTACH (may be remote).
+    pub fn ducklake_pg_connstr(&self) -> &str {
+        &self.ducklake_pg_connstr
     }
 
     /// Get the DuckLake metadata schema name.
@@ -983,6 +1004,7 @@ fn flush_thread_main(
     pending_local: Arc<AtomicI64>,
     result_tx: mpsc::Sender<FlushThreadResult>,
     pg_connstr: &str,
+    ducklake_pg_connstr: &str,
     ducklake_schema: &str,
     group_name: &str,
     backpressure: Arc<BackpressureState>,
@@ -1098,7 +1120,7 @@ fn flush_thread_main(
                 // Ensure FlushWorker exists before appending
                 if worker.is_none() {
                     match FlushWorker::new(
-                        pg_connstr,
+                        ducklake_pg_connstr,
                         ducklake_schema,
                         &resolved_config,
                         meta.source_label.clone(),

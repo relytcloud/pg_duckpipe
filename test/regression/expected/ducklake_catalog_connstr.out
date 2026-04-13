@@ -1,0 +1,70 @@
+-- Test ducklake_catalog_connstr config key (string type)
+-- Exercises global and per-group CRUD for the remote DuckLake catalog connstr.
+-- 1. Initially unset (not in global_config table)
+SELECT duckpipe.get_config('ducklake_catalog_connstr');
+ get_config 
+------------
+ 
+(1 row)
+
+-- 2. Set at global level
+SELECT duckpipe.set_config('ducklake_catalog_connstr',
+    'host=analytics.example.com port=5432 dbname=lake user=catalog');
+ set_config 
+------------
+ 
+(1 row)
+
+SELECT duckpipe.get_config('ducklake_catalog_connstr');
+                          get_config                           
+---------------------------------------------------------------
+ host=analytics.example.com port=5432 dbname=lake user=catalog
+(1 row)
+
+-- 3. Visible in full config JSON
+SELECT duckpipe.get_config()::jsonb ? 'ducklake_catalog_connstr' AS has_key;
+ has_key 
+---------
+ t
+(1 row)
+
+-- 4. Empty string rejected
+SELECT duckpipe.set_config('ducklake_catalog_connstr', '');
+ERROR:  'ducklake_catalog_connstr' must be a non-empty string
+-- 5. Per-group override
+SELECT duckpipe.set_group_config('default', 'ducklake_catalog_connstr',
+    'host=group-catalog port=5432 dbname=mydb');
+ set_group_config 
+------------------
+ 
+(1 row)
+
+SELECT duckpipe.get_group_config('default', 'ducklake_catalog_connstr');
+             get_group_config             
+------------------------------------------
+ host=group-catalog port=5432 dbname=mydb
+(1 row)
+
+-- 6. Resolved JSON shows group override
+SELECT duckpipe.get_group_config('default')::jsonb->>'ducklake_catalog_connstr' AS catalog_connstr;
+             catalog_connstr              
+------------------------------------------
+ host=group-catalog port=5432 dbname=mydb
+(1 row)
+
+-- 7. Cleanup
+DELETE FROM duckpipe.global_config WHERE key = 'ducklake_catalog_connstr';
+UPDATE duckpipe.sync_groups SET config = '{}'::jsonb WHERE name = 'default';
+-- 8. Verify unset after cleanup
+SELECT duckpipe.get_config('ducklake_catalog_connstr');
+ get_config 
+------------
+ 
+(1 row)
+
+SELECT duckpipe.get_group_config('default', 'ducklake_catalog_connstr');
+ get_group_config 
+------------------
+ 
+(1 row)
+
