@@ -356,7 +356,7 @@ async fn run_sync_loop(
                                 let gs = coordinator.gate_stats();
                                 cache.group = duckpipe_core::flush_coordinator::GroupMetrics {
                                     group_id: 0, // daemon doesn't use PG group_id
-                                    total_queued_changes: coordinator.total_queued(),
+                                    total_queued_bytes: coordinator.total_queued_bytes(),
                                     is_backpressured: coordinator.is_backpressured(),
                                     active_flushes: coordinator.active_flush_count() as i32,
                                     gate_wait_avg_ms: gs.avg_wait_ms,

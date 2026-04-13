@@ -4,8 +4,9 @@ use std::collections::HashMap;
 
 use tokio_postgres::{Client, Row};
 
+use crate::state::SyncState;
 use crate::types::{
-    format_lsn, parse_lsn, GroupConfig, GroupMode, SyncGroup, TableConfig, TableMapping,
+    format_lsn, parse_lsn, GroupConfig, GroupMode, SyncGroup, SyncMode, TableConfig, TableMapping,
 };
 
 /// Parse a `tokio_postgres::Row` from the standard 14-column TableMapping SELECT into a `TableMapping`.
@@ -13,13 +14,15 @@ use crate::types::{
 ///               state, snapshot_lsn::text, enabled, source_oid, error_message,
 ///               applied_lsn::text, source_label, sync_mode, config::text
 fn table_mapping_from_row(row: &Row) -> TableMapping {
+    let state_str: String = row.get(5);
+    let sync_mode_str: Option<String> = row.get(13);
     TableMapping {
         id: row.get(0),
         source_schema: row.get(1),
         source_table: row.get(2),
         target_schema: row.get(3),
         target_table: row.get(4),
-        state: row.get(5),
+        state: SyncState::from_str(&state_str).unwrap_or(SyncState::Pending),
         snapshot_lsn: row
             .get::<_, Option<String>>(6)
             .map(|s| parse_lsn(&s))
@@ -33,9 +36,9 @@ fn table_mapping_from_row(row: &Row) -> TableMapping {
             .unwrap_or(0),
         target_oid: row.get::<_, Option<i64>>(11).unwrap_or(0),
         source_label: row.get::<_, Option<String>>(12).unwrap_or_default(),
-        sync_mode: row
-            .get::<_, Option<String>>(13)
-            .unwrap_or_else(|| "upsert".to_string()),
+        sync_mode: sync_mode_str
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(SyncMode::Upsert),
         config: row
             .get::<_, Option<String>>(14)
             .and_then(|s| TableConfig::from_json_str(&s).ok())
@@ -328,7 +331,7 @@ impl<'a> MetadataClient<'a> {
     pub async fn retry_errored_table(
         &self,
         mapping_id: i32,
-    ) -> Result<Option<String>, tokio_postgres::Error> {
+    ) -> Result<Option<SyncState>, tokio_postgres::Error> {
         let rows = self
             .client
             .query(
@@ -340,7 +343,10 @@ impl<'a> MetadataClient<'a> {
                 &[&mapping_id],
             )
             .await?;
-        Ok(rows.first().map(|r| r.get::<_, String>(0)))
+        Ok(rows.first().map(|r| {
+            let s: String = r.get(0);
+            SyncState::from_str(&s).unwrap_or(SyncState::Pending)
+        }))
     }
 
     /// Update source schema and table name (e.g., after a table rename detected via OID match).
@@ -606,7 +612,8 @@ impl<'a> MetadataClient<'a> {
                 source_label: row.get::<_, Option<String>>(5).unwrap_or_default(),
                 sync_mode: row
                     .get::<_, Option<String>>(6)
-                    .unwrap_or_else(|| "upsert".to_string()),
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(SyncMode::Upsert),
             })
             .collect())
     }
@@ -644,7 +651,7 @@ impl<'a> MetadataClient<'a> {
     pub async fn get_mapping_enabled_states(
         &self,
         ids: &[i32],
-    ) -> Result<HashMap<i32, (bool, String)>, tokio_postgres::Error> {
+    ) -> Result<HashMap<i32, (bool, SyncState)>, tokio_postgres::Error> {
         let rows = self
             .client
             .query(
@@ -659,7 +666,8 @@ impl<'a> MetadataClient<'a> {
             .map(|row| {
                 let id: i32 = row.get(0);
                 let enabled: bool = row.get(1);
-                let state: String = row.get(2);
+                let state_str: String = row.get(2);
+                let state = SyncState::from_str(&state_str).unwrap_or(SyncState::Pending);
                 (id, (enabled, state))
             })
             .collect())
@@ -706,7 +714,7 @@ pub struct SnapshotTask {
     pub target_schema: String,
     pub target_table: String,
     pub source_label: String,
-    pub sync_mode: String,
+    pub sync_mode: SyncMode,
 }
 
 /// Load column names and primary key attribute indices from any PG connection.

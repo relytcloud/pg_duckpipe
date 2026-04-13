@@ -103,7 +103,7 @@ WAL stream (interleaved):
   └─────────┘ └─────────┘            └─────────┘            └─────────┘
 ```
 
-A slow table doesn't block other flush threads directly — each drains its own queue and flushes to DuckDB on its own schedule. However, if total queued changes across all streaming tables exceed `max_queued_changes`, global [backpressure](#5-backpressure) pauses WAL consumption for all tables. Flush triggers independently when either:
+A slow table doesn't block other flush threads directly — each drains its own queue and flushes to DuckDB on its own schedule. However, if total queued bytes across all streaming tables exceed `max_queued_bytes`, global [backpressure](#5-backpressure) pauses WAL consumption for all tables. Flush triggers independently when either:
 
 - **Batch threshold**: accumulated changes reach `flush_batch_threshold`
 - **Time interval**: `flush_interval_ms` has elapsed since last flush
@@ -178,14 +178,20 @@ Backpressure is applied **globally** — when triggered, the WAL consumer pauses
 
 ### 5.2 Snapshot Isolation from Backpressure
 
-Without special handling, a long-running snapshot would inflate `total_queued` and trigger backpressure, stalling WAL streaming for *all* tables — even healthy ones. The system tracks snapshot-buffered changes in a separate `snapshot_queued` counter and excludes them from the backpressure check:
+Without special handling, a long-running snapshot would inflate the total queued bytes and trigger backpressure, stalling WAL streaming for *all* tables — even healthy ones. The backpressure check simply skips paused (snapshot) queues when summing:
 
 ```rust
 // flush_coordinator.rs
 pub fn is_backpressured(&self) -> bool {
-    let total = self.backpressure.total_queued.load(Ordering::Relaxed);
-    let snapshot = self.backpressure.snapshot_queued.load(Ordering::Relaxed);
-    (total - snapshot) >= self.backpressure.max_queued
+    self.total_queued_bytes_active() >= self.max_queued_bytes
+}
+
+// Only sums queued_bytes from non-paused queues
+fn total_queued_bytes_active(&self) -> i64 {
+    self.threads.values()
+        .filter(|e| !e.control.paused.load(Ordering::Relaxed))
+        .map(|e| e.queue_handle.inner.lock().unwrap().queued_bytes)
+        .sum()
 }
 ```
 
@@ -194,7 +200,7 @@ pub fn is_backpressured(&self) -> bool {
 - **When not backpressured**: WAL consumer runs at full speed, all flush threads process independently — maximum parallelism (up to `max_concurrent_flushes` concurrent flushes).
 - **When backpressured**: WAL consumer skips its polling round (all tables stall together), but flush threads continue draining their queues. Once enough changes are flushed, backpressure clears and WAL consumption resumes.
 - **Snapshot tables are immune**: their buffered changes don't count toward the backpressure threshold, so adding a new table via `add_table()` won't degrade throughput for existing tables.
-- **FlushGate complements backpressure**: backpressure limits the *producer* (WAL consumer) based on total queue depth; FlushGate limits the *consumers* (flush threads) based on concurrent flush operations. Together they bound both memory from queued changes and memory from active DuckDB flush sessions.
+- **FlushGate complements backpressure**: backpressure limits the *producer* (WAL consumer) based on total queued bytes; FlushGate limits the *consumers* (flush threads) based on concurrent flush operations. Together they bound both memory from queued changes and memory from active DuckDB flush sessions.
 
 ---
 

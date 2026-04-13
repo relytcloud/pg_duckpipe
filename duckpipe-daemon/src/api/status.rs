@@ -17,7 +17,7 @@ pub async fn get_status(State(state): State<Arc<AppState>>) -> Result<impl IntoR
         .query(
             "SELECT tm.source_schema || '.' || tm.source_table AS source_table,
                     tm.target_schema || '.' || tm.target_table AS target_table,
-                    tm.state, tm.enabled, tm.rows_synced, tm.queued_changes,
+                    tm.state, tm.enabled, tm.rows_synced,
                     tm.last_sync_at::text AS last_sync_at,
                     tm.error_message, tm.consecutive_failures,
                     tm.retry_at::text AS retry_at,
@@ -40,7 +40,6 @@ pub async fn get_status(State(state): State<Arc<AppState>>) -> Result<impl IntoR
                 "state": r.get::<_, String>("state"),
                 "enabled": r.get::<_, bool>("enabled"),
                 "rows_synced": r.get::<_, i64>("rows_synced"),
-                "queued_changes": r.get::<_, i64>("queued_changes"),
                 "last_sync_at": r.get::<_, Option<String>>("last_sync_at"),
                 "error_message": r.get::<_, Option<String>>("error_message"),
                 "consecutive_failures": r.get::<_, i32>("consecutive_failures"),
@@ -52,25 +51,15 @@ pub async fn get_status(State(state): State<Arc<AppState>>) -> Result<impl IntoR
         })
         .collect();
 
-    // Worker state
-    let worker_row = client
-        .query_opt(
-            "SELECT total_queued_changes, is_backpressured,
-                    updated_at::text AS updated_at
-             FROM duckpipe.worker_state ws
-             JOIN duckpipe.sync_groups sg ON sg.id = ws.group_id
-             WHERE sg.name = $1",
-            &[&group_name],
-        )
-        .await?;
-
-    let worker = worker_row.map(|r| {
+    // Worker state from in-memory metrics cache (same as /metrics endpoint)
+    let worker = {
+        let cache = state.metrics_cache.lock().await;
+        let gm = &cache.group;
         json!({
-            "total_queued_changes": r.get::<_, i64>("total_queued_changes"),
-            "is_backpressured": r.get::<_, bool>("is_backpressured"),
-            "updated_at": r.get::<_, Option<String>>("updated_at"),
+            "total_queued_bytes": gm.total_queued_bytes,
+            "is_backpressured": gm.is_backpressured,
         })
-    });
+    };
 
     // Group info
     let group_row = client

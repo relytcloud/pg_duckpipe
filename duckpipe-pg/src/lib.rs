@@ -49,7 +49,7 @@ pub struct TableMetricsSlot {
 #[repr(C)]
 pub struct GroupMetricsSlot {
     pub group_id: i32, // 0 = unused slot
-    pub total_queued_changes: i64,
+    pub total_queued_bytes: i64,
     pub is_backpressured: i32, // 0/1
     pub active_flushes: i32,
     pub gate_wait_avg_ms: i64,
@@ -77,7 +77,7 @@ impl Default for SharedMetrics {
             }; MAX_METRICS_TABLES],
             groups: [GroupMetricsSlot {
                 group_id: 0,
-                total_queued_changes: 0,
+                total_queued_bytes: 0,
                 is_backpressured: 0,
                 active_flushes: 0,
                 gate_wait_avg_ms: 0,
@@ -119,7 +119,7 @@ pub fn write_shmem_metrics(group: &GroupMetrics, tables: &[TableMetrics]) {
     let mut found_group = false;
     for slot in shm.groups.iter_mut() {
         if slot.group_id == group.group_id {
-            slot.total_queued_changes = group.total_queued_changes;
+            slot.total_queued_bytes = group.total_queued_bytes;
             slot.is_backpressured = bp;
             slot.active_flushes = group.active_flushes;
             slot.gate_wait_avg_ms = group.gate_wait_avg_ms;
@@ -131,7 +131,7 @@ pub fn write_shmem_metrics(group: &GroupMetrics, tables: &[TableMetrics]) {
         if slot.group_id == 0 {
             *slot = GroupMetricsSlot {
                 group_id: group.group_id,
-                total_queued_changes: group.total_queued_changes,
+                total_queued_bytes: group.total_queued_bytes,
                 is_backpressured: bp,
                 active_flushes: group.active_flushes,
                 gate_wait_avg_ms: group.gate_wait_avg_ms,
@@ -212,7 +212,7 @@ pub fn clear_shmem_group_slot(group_id: i32) {
         if slot.group_id == group_id {
             *slot = GroupMetricsSlot {
                 group_id: 0,
-                total_queued_changes: 0,
+                total_queued_bytes: 0,
                 is_backpressured: 0,
                 active_flushes: 0,
                 gate_wait_avg_ms: 0,
@@ -272,7 +272,7 @@ pub fn read_shmem_group_metrics() -> std::collections::HashMap<i32, GroupMetrics
                 s.group_id,
                 GroupMetrics {
                     group_id: s.group_id,
-                    total_queued_changes: s.total_queued_changes,
+                    total_queued_bytes: s.total_queued_bytes,
                     is_backpressured: s.is_backpressured != 0,
                     active_flushes: s.active_flushes,
                     gate_wait_avg_ms: s.gate_wait_avg_ms,
@@ -328,7 +328,7 @@ pub fn read_shmem_all_metrics() -> (
                 s.group_id,
                 GroupMetrics {
                     group_id: s.group_id,
-                    total_queued_changes: s.total_queued_changes,
+                    total_queued_bytes: s.total_queued_bytes,
                     is_backpressured: s.is_backpressured != 0,
                     active_flushes: s.active_flushes,
                     gate_wait_avg_ms: s.gate_wait_avg_ms,

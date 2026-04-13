@@ -29,7 +29,6 @@ CREATE TABLE duckpipe.table_mappings (
     applied_lsn     pg_lsn,
     enabled         BOOLEAN DEFAULT true,
     rows_synced     BIGINT DEFAULT 0,
-    queued_changes  BIGINT DEFAULT 0,
     last_sync_at    TIMESTAMPTZ,
     created_at      TIMESTAMPTZ DEFAULT NOW(),
     source_oid      BIGINT,
@@ -48,13 +47,6 @@ CREATE TABLE duckpipe.table_mappings (
 
 CREATE INDEX ON duckpipe.table_mappings (group_id);
 
--- Worker runtime state (one row per sync group, upserted each sync cycle)
-CREATE TABLE duckpipe.worker_state (
-    group_id             INTEGER PRIMARY KEY REFERENCES duckpipe.sync_groups(id) ON DELETE CASCADE,
-    total_queued_changes BIGINT DEFAULT 0,
-    is_backpressured     BOOLEAN DEFAULT false,
-    updated_at           TIMESTAMPTZ
-);
 
 -- Global config (key-value rows, seeded with defaults)
 CREATE TABLE duckpipe.global_config (
@@ -69,7 +61,7 @@ INSERT INTO duckpipe.global_config VALUES
     ('flush_interval_ms', '5000'),
     ('flush_batch_threshold', '50000'),
     ('max_concurrent_flushes', '4'),
-    ('max_queued_changes', '500000');
+    ('max_queued_bytes', '1000000000');
 
 -- Default sync group
 INSERT INTO duckpipe.sync_groups (name, publication, slot_name)
@@ -84,5 +76,4 @@ GRANT USAGE ON SCHEMA duckpipe TO PUBLIC;
 -- Keep internal tables private — only accessible via API functions.
 REVOKE ALL ON duckpipe.sync_groups FROM PUBLIC;
 REVOKE ALL ON duckpipe.table_mappings FROM PUBLIC;
-REVOKE ALL ON duckpipe.worker_state FROM PUBLIC;
 REVOKE ALL ON duckpipe.global_config FROM PUBLIC;

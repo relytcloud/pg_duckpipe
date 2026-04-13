@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::state::SyncState;
+
 /// Shared validation for config key-value pairs against a `&[(&str, &str)]` table.
 fn validate_config_value(
     valid_keys: &[(&str, &str)],
@@ -23,6 +25,14 @@ fn validate_config_value(
         "int" => {
             let v = value
                 .parse::<i32>()
+                .map_err(|_| format!("'{}' must be an integer, got '{}'", key, value))?;
+            if v <= 0 {
+                return Err(format!("'{}' must be positive, got {}", key, v));
+            }
+        }
+        "bigint" => {
+            let v = value
+                .parse::<i64>()
                 .map_err(|_| format!("'{}' must be an integer, got '{}'", key, value))?;
             if v <= 0 {
                 return Err(format!("'{}' must be positive, got {}", key, v));
@@ -53,7 +63,7 @@ const VALID_CONFIG_KEYS: &[(&str, &str)] = &[
     ("flush_interval_ms", "int"),
     ("flush_batch_threshold", "int"),
     ("max_concurrent_flushes", "int"),
-    ("max_queued_changes", "int"),
+    ("max_queued_bytes", "bigint"),
 ];
 
 /// Partial config — Option fields. Used for per-group overrides in JSONB.
@@ -77,7 +87,7 @@ pub struct GroupConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_concurrent_flushes: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_queued_changes: Option<i32>,
+    pub max_queued_bytes: Option<i64>,
 }
 
 impl GroupConfig {
@@ -118,7 +128,7 @@ impl GroupConfig {
             "max_concurrent_flushes" => {
                 self.max_concurrent_flushes = Some(value.parse::<i32>().unwrap())
             }
-            "max_queued_changes" => self.max_queued_changes = Some(value.parse::<i32>().unwrap()),
+            "max_queued_bytes" => self.max_queued_bytes = Some(value.parse::<i64>().unwrap()),
             _ => return Err(format!("unknown config key: '{}'", key)),
         }
         Ok(())
@@ -135,7 +145,7 @@ impl GroupConfig {
             "flush_interval_ms" => self.flush_interval_ms.map(|v| v.to_string()),
             "flush_batch_threshold" => self.flush_batch_threshold.map(|v| v.to_string()),
             "max_concurrent_flushes" => self.max_concurrent_flushes.map(|v| v.to_string()),
-            "max_queued_changes" => self.max_queued_changes.map(|v| v.to_string()),
+            "max_queued_bytes" => self.max_queued_bytes.map(|v| v.to_string()),
             _ => None,
         }
     }
@@ -240,7 +250,7 @@ pub struct ResolvedConfig {
     pub flush_interval_ms: i32,
     pub flush_batch_threshold: i32,
     pub max_concurrent_flushes: i32,
-    pub max_queued_changes: i32,
+    pub max_queued_bytes: i64,
 }
 
 impl Default for ResolvedConfig {
@@ -254,7 +264,7 @@ impl Default for ResolvedConfig {
             flush_interval_ms: 5000,
             flush_batch_threshold: 50000,
             max_concurrent_flushes: 4,
-            max_queued_changes: 500000,
+            max_queued_bytes: 1_000_000_000,
         }
     }
 }
@@ -271,7 +281,7 @@ impl ResolvedConfig {
             flush_interval_ms: Some(self.flush_interval_ms),
             flush_batch_threshold: Some(self.flush_batch_threshold),
             max_concurrent_flushes: Some(self.max_concurrent_flushes),
-            max_queued_changes: Some(self.max_queued_changes),
+            max_queued_bytes: Some(self.max_queued_bytes),
         }
     }
 
@@ -286,7 +296,7 @@ impl ResolvedConfig {
             "flush_interval_ms" => Some(self.flush_interval_ms.to_string()),
             "flush_batch_threshold" => Some(self.flush_batch_threshold.to_string()),
             "max_concurrent_flushes" => Some(self.max_concurrent_flushes.to_string()),
-            "max_queued_changes" => Some(self.max_queued_changes.to_string()),
+            "max_queued_bytes" => Some(self.max_queued_bytes.to_string()),
             _ => None,
         }
     }
@@ -308,7 +318,7 @@ impl ResolvedConfig {
             duckdb_buffer_memory_mb: self.duckdb_buffer_memory_mb,
             ducklake_catalog_connstr: self.ducklake_catalog_connstr.clone(),
             max_concurrent_flushes: self.max_concurrent_flushes,
-            max_queued_changes: self.max_queued_changes,
+            max_queued_bytes: self.max_queued_bytes,
         }
     }
 
@@ -349,10 +359,10 @@ impl ResolvedConfig {
                 .max_concurrent_flushes
                 .or(global.max_concurrent_flushes)
                 .unwrap_or(defaults.max_concurrent_flushes),
-            max_queued_changes: group
-                .max_queued_changes
-                .or(global.max_queued_changes)
-                .unwrap_or(defaults.max_queued_changes),
+            max_queued_bytes: group
+                .max_queued_bytes
+                .or(global.max_queued_bytes)
+                .unwrap_or(defaults.max_queued_bytes),
         }
     }
 }
@@ -382,6 +392,20 @@ impl Value {
             _ => 0,
         }
     }
+
+    /// Estimated in-memory byte size of this value (for backpressure accounting).
+    #[inline]
+    pub fn estimated_bytes(&self) -> usize {
+        match self {
+            Value::Null => 0,
+            Value::Bool(_) => 1,
+            Value::Int16(_) => 2,
+            Value::Int32(_) => 4,
+            Value::Int64(_) | Value::Float64(_) => 8,
+            Value::Float32(_) => 4,
+            Value::Text(s) => 24 + s.len(), // String header + data
+        }
+    }
 }
 
 impl std::fmt::Display for Value {
@@ -408,6 +432,17 @@ pub enum ChangeType {
     Update,
 }
 
+impl ChangeType {
+    /// Numeric code used in the DuckDB buffer table's `_op_type` column.
+    pub fn as_i32(&self) -> i32 {
+        match self {
+            ChangeType::Insert => 0,
+            ChangeType::Update => 1,
+            ChangeType::Delete => 2,
+        }
+    }
+}
+
 /// A decoded change
 #[derive(Debug, Clone)]
 pub struct Change {
@@ -417,6 +452,15 @@ pub struct Change {
     pub key_values: Vec<Value>,
     /// For Update changes: true for columns that were unchanged (TOAST)
     pub col_unchanged: Vec<bool>,
+}
+
+impl Change {
+    /// Estimated in-memory byte size of this change (for backpressure accounting).
+    pub fn estimated_bytes(&self) -> i64 {
+        let col_bytes: usize = self.col_values.iter().map(|v| v.estimated_bytes()).sum();
+        let key_bytes: usize = self.key_values.iter().map(|v| v.estimated_bytes()).sum();
+        (std::mem::size_of::<Self>() + col_bytes + key_bytes + self.col_unchanged.len()) as i64
+    }
 }
 
 /// Relation cache entry (decoded from pgoutput RELATION messages)
@@ -461,6 +505,43 @@ impl std::str::FromStr for GroupMode {
     }
 }
 
+/// Sync mode: upsert (compact + replace by PK) or append (immutable changelog).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncMode {
+    Upsert,
+    Append,
+}
+
+impl SyncMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SyncMode::Upsert => "upsert",
+            SyncMode::Append => "append",
+        }
+    }
+}
+
+impl std::str::FromStr for SyncMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "upsert" => Ok(SyncMode::Upsert),
+            "append" => Ok(SyncMode::Append),
+            other => Err(format!(
+                "invalid sync_mode '{}': must be 'upsert' or 'append'",
+                other
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for SyncMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Sync group metadata
 #[derive(Debug, Clone)]
 pub struct SyncGroup {
@@ -485,7 +566,7 @@ pub struct TableMapping {
     pub source_table: String,
     pub target_schema: String,
     pub target_table: String,
-    pub state: String,
+    pub state: SyncState,
     pub snapshot_lsn: u64,
     pub applied_lsn: u64,
     pub enabled: bool,
@@ -493,7 +574,7 @@ pub struct TableMapping {
     pub target_oid: i64,
     pub error_message: Option<String>,
     pub source_label: String,
-    pub sync_mode: String,
+    pub sync_mode: SyncMode,
     /// Per-table config overrides (from table_mappings.config JSONB column).
     pub config: TableConfig,
 }

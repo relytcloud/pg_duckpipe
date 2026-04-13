@@ -195,7 +195,7 @@ FROM duckpipe.groups();
 ### Worker Health
 
 ```sql
-SELECT total_queued_changes, is_backpressured
+SELECT total_queued_bytes, is_backpressured
 FROM duckpipe.worker_status();
 ```
 

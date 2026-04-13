@@ -134,13 +134,14 @@ def get_total_lag_bytes(db_params):
     return parse_int(res, 0)
 
 
-def get_total_queued_changes(db_params):
-    """Return total changes still buffered in flush coordinator queues."""
+def get_total_queued_bytes(db_params):
+    """Return total bytes still buffered in flush coordinator queues."""
     res = run_sql(
         db_params,
-        "SELECT COALESCE(SUM(total_queued_changes), 0) FROM duckpipe.worker_status()",
+        "SELECT COALESCE(SUM(total_queued_bytes), 0) FROM duckpipe.worker_status()",
     )
     return parse_int(res, 0)
+
 
 
 def get_snapshot_metrics(db_params, num_tables):
@@ -196,7 +197,7 @@ def get_worker_status(db_params):
     """Query duckpipe.worker_status(), return list of dicts."""
     res = run_sql(
         db_params,
-        "SELECT total_queued_changes, is_backpressured "
+        "SELECT total_queued_bytes, is_backpressured "
         "FROM duckpipe.worker_status()",
     )
     rows = []
@@ -205,7 +206,7 @@ def get_worker_status(db_params):
             parts = line.split("|")
             if len(parts) >= 2:
                 rows.append({
-                    "total_queued_changes": parse_int(parts[0].strip(), 0),
+                    "total_queued_bytes": parse_int(parts[0].strip(), 0),
                     "is_backpressured": parts[1].strip() == "t",
                 })
     return rows

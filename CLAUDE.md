@@ -35,7 +35,7 @@ Heap Tables → WAL → Replication Slot (pgoutput) → Decoder → FlushCoordin
 
 - **WAL consumer** (main thread): streaming replication via `START_REPLICATION`, pushes decoded changes to per-table shared queues
 - **Flush threads** (per-table OS threads): self-trigger on queue size or time interval, own DuckDB connection + tokio runtime, handle PG metadata updates independently
-- **Backpressure**: AtomicI64 counter pauses WAL consumer when queues exceed `max_queued_changes`
+- **Backpressure**: per-queue byte tracking pauses WAL consumer when total queued bytes exceed `max_queued_bytes`
 - **Crash safety**: `confirmed_lsn = min(applied_lsn)` — slot never advances past durably flushed data
 - **State machine** (per table): PENDING → SNAPSHOT → CATCHUP → STREAMING (or ERRORED with auto-retry)
 
