@@ -2632,11 +2632,16 @@ fn set_group_config(group_name: &str, key: &str, value: &str) {
         error!("{}", e);
     }
 
+    let log_value = if key.ends_with("connstr") || key.ends_with("conninfo") {
+        duckpipe_core::connstr::redact_password(value)
+    } else {
+        value.to_string()
+    };
     log!(
         "pg_duckpipe: set_group_config('{}', '{}', '{}')",
         group_name,
         key,
-        value
+        log_value
     );
 
     Spi::connect_mut(|client| {
