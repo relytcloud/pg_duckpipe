@@ -7,7 +7,6 @@ test: monitoring
 test: metrics
 test: sync_group_mode
 test: group_config
-test: ducklake_catalog_connstr
 test: table_config
 # Nonexistent table: proper error message instead of misleading "no primary key"
 test: nonexistent_table
@@ -69,8 +68,8 @@ test: append_mode_no_pk
 test: append_crash_recovery
 # Remote sync: loopback TCP exercises tokio-postgres DDL path
 test: remote_sync
-# E2E: flush threads use ducklake_catalog_connstr for DuckLake ATTACH
-test: ducklake_catalog_connstr_e2e
+# ducklake_catalog_connstr: config CRUD + E2E flush through configured connstr
+test: ducklake_catalog_connstr
 # Transparent query routing: planner hook rewrites SELECTs to DuckLake targets
 test: query_routing
 # DDL sync: ADD/DROP/RENAME COLUMN propagated to DuckLake target
