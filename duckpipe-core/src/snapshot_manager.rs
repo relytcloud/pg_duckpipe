@@ -62,6 +62,7 @@ impl SnapshotManager {
         ducklake_schema: &str,
         timing: bool,
         group_name: &str,
+        secret_sqls: &[String],
     ) {
         for task in tasks {
             if self.in_flight.contains_key(&task.id) {
@@ -83,6 +84,7 @@ impl SnapshotManager {
             let group_name = group_name.to_string();
             let tx = self.result_tx.clone();
             let notify = Arc::clone(&self.notify);
+            let secrets = secret_sqls.to_vec();
 
             tokio::spawn(async move {
                 let result = snapshot::process_snapshot_task(
@@ -98,6 +100,7 @@ impl SnapshotManager {
                     &group_name,
                     source_label,
                     sync_mode,
+                    secrets,
                 )
                 .await;
                 let _ = tx.send(snapshot::SnapshotResult {

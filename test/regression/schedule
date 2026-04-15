@@ -70,6 +70,8 @@ test: append_crash_recovery
 test: remote_sync
 # ducklake_catalog_connstr: config CRUD + E2E flush through configured connstr
 test: ducklake_catalog_connstr
+# DuckDB secrets: pg_duckdb FDW secret injection into DuckDB connections
+test: duckdb_secrets
 # Transparent query routing: planner hook rewrites SELECTs to DuckLake targets
 test: query_routing
 # DDL sync: ADD/DROP/RENAME COLUMN propagated to DuckLake target
