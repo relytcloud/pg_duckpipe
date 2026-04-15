@@ -590,7 +590,6 @@ pub struct ServiceConfig {
     pub batch_size_per_group: i32,   // Max WAL messages per cycle (default 100000)
     pub debug_log: bool,             // Timing diagnostics
     pub connstr: String,             // PG connection string
-    pub duckdb_pg_connstr: String,   // PG connstr for DuckDB ATTACH
     pub ducklake_schema: String,     // DuckLake schema name
     pub flush_interval_ms: i32,      // Time trigger for flush
     pub flush_batch_threshold: i32,  // Size trigger for flush

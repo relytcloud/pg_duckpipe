@@ -43,6 +43,11 @@ fn validate_config_value(
                 .parse::<bool>()
                 .map_err(|_| format!("'{}' must be true or false, got '{}'", key, value))?;
         }
+        "string" => {
+            if value.is_empty() {
+                return Err(format!("'{}' must be a non-empty string", key));
+            }
+        }
         _ => {}
     }
     Ok(())
@@ -54,6 +59,7 @@ const VALID_CONFIG_KEYS: &[(&str, &str)] = &[
     ("duckdb_buffer_memory_mb", "int"),
     ("duckdb_flush_memory_mb", "int"),
     ("duckdb_threads", "int"),
+    ("ducklake_catalog_connstr", "string"),
     ("flush_interval_ms", "int"),
     ("flush_batch_threshold", "int"),
     ("max_concurrent_flushes", "int"),
@@ -72,6 +78,8 @@ pub struct GroupConfig {
     pub duckdb_flush_memory_mb: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duckdb_threads: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ducklake_catalog_connstr: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub flush_interval_ms: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -112,6 +120,7 @@ impl GroupConfig {
                 self.duckdb_flush_memory_mb = Some(value.parse::<i32>().unwrap())
             }
             "duckdb_threads" => self.duckdb_threads = Some(value.parse::<i32>().unwrap()),
+            "ducklake_catalog_connstr" => self.ducklake_catalog_connstr = Some(value.to_string()),
             "flush_interval_ms" => self.flush_interval_ms = Some(value.parse::<i32>().unwrap()),
             "flush_batch_threshold" => {
                 self.flush_batch_threshold = Some(value.parse::<i32>().unwrap())
@@ -132,6 +141,7 @@ impl GroupConfig {
             "duckdb_buffer_memory_mb" => self.duckdb_buffer_memory_mb.map(|v| v.to_string()),
             "duckdb_flush_memory_mb" => self.duckdb_flush_memory_mb.map(|v| v.to_string()),
             "duckdb_threads" => self.duckdb_threads.map(|v| v.to_string()),
+            "ducklake_catalog_connstr" => self.ducklake_catalog_connstr.clone(),
             "flush_interval_ms" => self.flush_interval_ms.map(|v| v.to_string()),
             "flush_batch_threshold" => self.flush_batch_threshold.map(|v| v.to_string()),
             "max_concurrent_flushes" => self.max_concurrent_flushes.map(|v| v.to_string()),
@@ -227,13 +237,16 @@ impl TableConfig {
     }
 }
 
-/// Fully resolved config — no Options. All values guaranteed present.
+/// Fully resolved config. Numeric fields are guaranteed present (no Options).
+/// `ducklake_catalog_connstr` is `Option<String>` — None means "use local PG".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedConfig {
     pub drain_poll_ms: i32,
     pub duckdb_buffer_memory_mb: i32,
     pub duckdb_flush_memory_mb: i32,
     pub duckdb_threads: i32,
+    /// Remote PG connstr for DuckLake catalog ATTACH. None = use local PG.
+    pub ducklake_catalog_connstr: Option<String>,
     pub flush_interval_ms: i32,
     pub flush_batch_threshold: i32,
     pub max_concurrent_flushes: i32,
@@ -247,6 +260,7 @@ impl Default for ResolvedConfig {
             duckdb_buffer_memory_mb: 16,
             duckdb_flush_memory_mb: 512,
             duckdb_threads: 1,
+            ducklake_catalog_connstr: None,
             flush_interval_ms: 5000,
             flush_batch_threshold: 50000,
             max_concurrent_flushes: 4,
@@ -263,6 +277,7 @@ impl ResolvedConfig {
             duckdb_buffer_memory_mb: Some(self.duckdb_buffer_memory_mb),
             duckdb_flush_memory_mb: Some(self.duckdb_flush_memory_mb),
             duckdb_threads: Some(self.duckdb_threads),
+            ducklake_catalog_connstr: self.ducklake_catalog_connstr.clone(),
             flush_interval_ms: Some(self.flush_interval_ms),
             flush_batch_threshold: Some(self.flush_batch_threshold),
             max_concurrent_flushes: Some(self.max_concurrent_flushes),
@@ -277,6 +292,7 @@ impl ResolvedConfig {
             "duckdb_buffer_memory_mb" => Some(self.duckdb_buffer_memory_mb.to_string()),
             "duckdb_flush_memory_mb" => Some(self.duckdb_flush_memory_mb.to_string()),
             "duckdb_threads" => Some(self.duckdb_threads.to_string()),
+            "ducklake_catalog_connstr" => self.ducklake_catalog_connstr.clone(),
             "flush_interval_ms" => Some(self.flush_interval_ms.to_string()),
             "flush_batch_threshold" => Some(self.flush_batch_threshold.to_string()),
             "max_concurrent_flushes" => Some(self.max_concurrent_flushes.to_string()),
@@ -300,6 +316,7 @@ impl ResolvedConfig {
             // Non-overridable fields pass through unchanged
             drain_poll_ms: self.drain_poll_ms,
             duckdb_buffer_memory_mb: self.duckdb_buffer_memory_mb,
+            ducklake_catalog_connstr: self.ducklake_catalog_connstr.clone(),
             max_concurrent_flushes: self.max_concurrent_flushes,
             max_queued_bytes: self.max_queued_bytes,
         }
@@ -325,6 +342,11 @@ impl ResolvedConfig {
                 .duckdb_threads
                 .or(global.duckdb_threads)
                 .unwrap_or(defaults.duckdb_threads),
+            // No unwrap_or default — None means "use local PG" (resolved at use-site).
+            ducklake_catalog_connstr: group
+                .ducklake_catalog_connstr
+                .clone()
+                .or_else(|| global.ducklake_catalog_connstr.clone()),
             flush_interval_ms: group
                 .flush_interval_ms
                 .or(global.flush_interval_ms)

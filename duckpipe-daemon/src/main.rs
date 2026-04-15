@@ -100,7 +100,6 @@ async fn main() {
         batch_size_per_group: args.batch_size_per_group,
         debug_log: args.debug,
         connstr: connstr.clone(),
-        duckdb_pg_connstr: connstr.clone(),
         ducklake_schema: args.ducklake_schema.clone(),
     };
 

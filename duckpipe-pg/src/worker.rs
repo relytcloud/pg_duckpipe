@@ -20,13 +20,12 @@ fn should_shutdown() -> bool {
 }
 
 /// Read current GUC config.
-fn read_config(connstr: &str, duckdb_pg_connstr: &str) -> ServiceConfig {
+fn read_config(connstr: &str) -> ServiceConfig {
     ServiceConfig {
         poll_interval_ms: POLL_INTERVAL.get(),
         batch_size_per_group: BATCH_SIZE_PER_GROUP.get(),
         debug_log: DEBUG_LOG.get(),
         connstr: connstr.to_string(),
-        duckdb_pg_connstr: duckdb_pg_connstr.to_string(),
         ducklake_schema: "ducklake".to_string(),
     }
 }
@@ -191,12 +190,6 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
         dbname: db.clone(),
     };
 
-    // DuckDB's postgres_scanner speaks TCP, not unix sockets.
-    let duckdb_pg_connstr = format!(
-        "host=127.0.0.1 port={} dbname={} user={}",
-        port, db, os_user
-    );
-
     // Resolve pkglibdir and cache the ducklake extension loading SQL once.
     {
         let pkglibdir = unsafe {
@@ -338,7 +331,7 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
                         continue;
                     }
 
-                    let config = read_config(&connstr, &duckdb_pg_connstr);
+                    let config = read_config(&connstr);
                     let rc = read_resolved_config(&group_name);
                     coord.set_max_concurrent_flushes(rc.max_concurrent_flushes);
 

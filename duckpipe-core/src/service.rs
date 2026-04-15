@@ -32,8 +32,6 @@ pub struct ServiceConfig {
     pub debug_log: bool,
     /// Connection string for flush workers to create their own connections.
     pub connstr: String,
-    /// DuckDB-style PostgreSQL connection string for DuckLake ATTACH
-    pub duckdb_pg_connstr: String,
     /// DuckLake metadata schema name (e.g., "ducklake")
     pub ducklake_schema: String,
 }
@@ -1250,7 +1248,7 @@ pub async fn run_group_sync_cycle(
         snapshot_manager.kick_snapshots(
             snapshot_tasks,
             &snapshot_connstr,
-            coordinator.pg_connstr(),
+            coordinator.ducklake_pg_connstr(),
             coordinator.ducklake_schema(),
             config.debug_log,
             group_name,
