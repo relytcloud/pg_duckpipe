@@ -11,8 +11,12 @@
 /// SQL query that returns complete `CREATE SECRET` statements from pg_duckdb's FDW catalogs.
 ///
 /// Returns one text row per secret: a ready-to-execute DuckDB `CREATE SECRET` statement.
-/// Prefers user-specific mappings over PUBLIC (umuser = 0).
 /// Excludes `motherduck` servers (MotherDuck auth is handled separately by pg_duckdb).
+///
+/// Uses `pg_user_mappings` VIEW (not the raw `pg_user_mapping` catalog) because
+/// PG 17+ restricts direct access to `pg_user_mapping.umoptions` via column-level ACL.
+/// The view applies proper access control: shows options when the current user is the
+/// mapped user with USAGE on the server, or is a superuser.
 ///
 /// The query builds the SQL entirely server-side using `unnest()` + `string_agg()`,
 /// so callers only need to read simple text strings (no text[] handling required).
@@ -30,15 +34,21 @@ SELECT 'CREATE SECRET pgduckdb_secret_' || fs.srvname || ' (TYPE ' || fs.srvtype
             split_part(opt, '=', 1) || ' ' || quote_literal(substr(opt, strpos(opt, '=') + 1)),
             ', '
         )
-        FROM unnest(COALESCE(um_user.umoptions, um_public.umoptions)) AS opt
+        FROM unnest(um.umoptions) AS opt
     ), '')
     || ')' AS secret_sql
 FROM pg_foreign_server fs
 JOIN pg_foreign_data_wrapper fdw ON fdw.oid = fs.srvfdw
-LEFT JOIN pg_user_mapping um_user ON um_user.umserver = fs.oid
-    AND um_user.umuser = (SELECT oid FROM pg_roles WHERE rolname = current_user)
-LEFT JOIN pg_user_mapping um_public ON um_public.umserver = fs.oid
-    AND um_public.umuser = 0::oid
+LEFT JOIN LATERAL (
+    SELECT umoptions FROM pg_user_mappings
+    WHERE srvid = fs.oid
+      AND umuser IN (
+          (SELECT oid FROM pg_roles WHERE rolname = current_user),
+          0
+      )
+    ORDER BY umuser DESC  -- prefer user-specific (nonzero) over PUBLIC (0)
+    LIMIT 1
+) um ON true
 WHERE fdw.fdwname = 'duckdb'
   AND COALESCE(fs.srvtype, '') != 'motherduck'
 "#;
