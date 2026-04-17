@@ -1,0 +1,101 @@
+-- Test DuckDB secret injection from pg_duckdb FDW catalogs.
+--
+-- Verifies that pg_duckpipe reads secrets created via duckdb.create_simple_secret()
+-- from the PG FDW catalogs. The actual CDC E2E with secrets loaded is covered by
+-- the streaming/snapshot tests when secrets exist in the catalog.
+
+------------------------------------------------------------
+-- Part 1: Create a DuckDB secret via pg_duckdb helper
+------------------------------------------------------------
+
+-- Create an S3 secret (uses test credentials — no actual S3 access)
+SELECT duckdb.create_simple_secret(
+    type := 'S3',
+    key_id := 'AKIAIOSFODNN7EXAMPLE',
+    secret := 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+    region := 'us-east-1'
+);
+
+------------------------------------------------------------
+-- Part 2: Verify secrets are discoverable in FDW catalogs
+------------------------------------------------------------
+
+-- Verify secret server exists
+SELECT fs.srvtype, count(*) AS server_count
+FROM pg_foreign_server fs
+JOIN pg_foreign_data_wrapper fdw ON fdw.oid = fs.srvfdw
+WHERE fdw.fdwname = 'duckdb' AND lower(fs.srvtype) = 's3'
+GROUP BY fs.srvtype;
+
+-- Verify user mapping is visible via pg_user_mappings view
+SELECT count(*) > 0 AS has_user_mapping
+FROM pg_user_mappings um
+JOIN pg_foreign_server fs ON fs.oid = um.srvid
+JOIN pg_foreign_data_wrapper fdw ON fdw.oid = fs.srvfdw
+WHERE fdw.fdwname = 'duckdb' AND lower(fs.srvtype) = 's3';
+
+-- Verify pg_duckpipe's SECRET_QUERY returns a valid CREATE SECRET statement
+-- (PG lowercases FDW option names, so use lower() for key_id assertion)
+SELECT secret_sql LIKE 'CREATE SECRET pgduckdb_secret_%' AS valid_format,
+       secret_sql LIKE '%TYPE S3%' AS has_type,
+       secret_sql LIKE '%region%' AS has_region,
+       lower(secret_sql) LIKE '%key_id%' AS has_key_id
+FROM (
+    SELECT 'CREATE SECRET pgduckdb_secret_' || fs.srvname || ' (TYPE ' || fs.srvtype
+        || COALESCE((
+            SELECT ', ' || string_agg(
+                split_part(opt, '=', 1) || ' ' || quote_literal(substr(opt, strpos(opt, '=') + 1)),
+                ', '
+            )
+            FROM unnest(fs.srvoptions) AS opt
+        ), '')
+        || COALESCE((
+            SELECT ', ' || string_agg(
+                split_part(opt, '=', 1) || ' ' || quote_literal(substr(opt, strpos(opt, '=') + 1)),
+                ', '
+            )
+            FROM unnest(um.umoptions) AS opt
+        ), '')
+        || ')' AS secret_sql
+    FROM pg_foreign_server fs
+    JOIN pg_foreign_data_wrapper fdw ON fdw.oid = fs.srvfdw
+    LEFT JOIN LATERAL (
+        SELECT umoptions FROM pg_user_mappings
+        WHERE srvid = fs.oid
+          AND umuser IN (
+              (SELECT oid FROM pg_roles WHERE rolname = current_user),
+              0
+          )
+        ORDER BY umuser DESC
+        LIMIT 1
+    ) um ON true
+    WHERE fdw.fdwname = 'duckdb'
+      AND COALESCE(fs.srvtype, '') != 'motherduck'
+) sub;
+
+------------------------------------------------------------
+-- Part 3: Cleanup
+------------------------------------------------------------
+
+-- Drop the secret's FDW objects
+DO $$
+DECLARE
+    srv_name text;
+BEGIN
+    SELECT fs.srvname INTO srv_name
+    FROM pg_foreign_server fs
+    JOIN pg_foreign_data_wrapper fdw ON fdw.oid = fs.srvfdw
+    WHERE fdw.fdwname = 'duckdb' AND lower(fs.srvtype) = 's3'
+    LIMIT 1;
+    IF srv_name IS NOT NULL THEN
+        EXECUTE format('DROP USER MAPPING IF EXISTS FOR CURRENT_USER SERVER %I', srv_name);
+        EXECUTE format('DROP SERVER IF EXISTS %I', srv_name);
+    END IF;
+END
+$$;
+
+-- Verify cleanup
+SELECT count(*) AS remaining_servers
+FROM pg_foreign_server fs
+JOIN pg_foreign_data_wrapper fdw ON fdw.oid = fs.srvfdw
+WHERE fdw.fdwname = 'duckdb' AND lower(fs.srvtype) = 's3';

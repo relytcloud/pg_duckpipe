@@ -75,6 +75,32 @@ fn read_resolved_config(group_name: &str) -> ResolvedConfig {
     }
 }
 
+/// Read DuckDB secrets from pg_duckdb's FDW catalogs via SPI.
+///
+/// Returns a Vec of `CREATE SECRET` SQL strings to inject into DuckDB connections.
+/// If the `duckdb` FDW doesn't exist (pg_duckdb not installed), returns an empty Vec.
+fn read_duckdb_secrets() -> Vec<String> {
+    unsafe {
+        pg_sys::StartTransactionCommand();
+        pg_sys::PushActiveSnapshot(pg_sys::GetTransactionSnapshot());
+        let secrets = Spi::connect(|client| {
+            let result = client.select(duckpipe_core::duckdb_secrets::SECRET_QUERY, None, &[]);
+            match result {
+                Ok(rows) => rows
+                    .filter_map(|row| row.get::<String>(1).unwrap_or(None))
+                    .collect(),
+                Err(_) => {
+                    // duckdb FDW may not exist (pg_duckdb not installed) — not an error
+                    Vec::new()
+                }
+            }
+        });
+        pg_sys::PopActiveSnapshot();
+        pg_sys::CommitTransactionCommand();
+        secrets
+    }
+}
+
 /// Background worker entry point — one instance per sync group.
 ///
 /// The group name is passed via `bgw_extra` (set by `launch_worker` in api.rs).
@@ -242,12 +268,20 @@ pub extern "C-unwind" fn duckpipe_worker_main(arg: pg_sys::Datum) {
 
     // Create persistent flush coordinator (survives across cycles, cleared on panic)
     let resolved_config = read_resolved_config(&group_name);
+    let duckdb_secret_sqls = read_duckdb_secrets();
+    if !duckdb_secret_sqls.is_empty() {
+        log!(
+            "pg_duckpipe: loaded {} DuckDB secret(s) from pg_duckdb FDW catalogs",
+            duckdb_secret_sqls.len()
+        );
+    }
     let mut coordinator = FlushCoordinator::new(
         connstr.clone(),
         "ducklake".to_string(),
         group_name.clone(),
         resolved_config,
         flush_temp_base,
+        duckdb_secret_sqls,
     );
     let mut snapshot_manager = SnapshotManager::new();
 

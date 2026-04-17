@@ -366,6 +366,11 @@ pub struct FlushCoordinator {
 
     /// Global-per-group semaphore limiting concurrent flush operations.
     flush_gate: Arc<FlushGate>,
+
+    /// `CREATE SECRET` SQL statements from pg_duckdb's FDW catalogs.
+    /// Injected into each new DuckDB connection for S3/GCS/R2 storage access.
+    /// Wrapped in Arc since it's shared immutably across all flush threads and snapshot tasks.
+    duckdb_secret_sqls: Arc<Vec<String>>,
 }
 
 impl FlushCoordinator {
@@ -380,6 +385,7 @@ impl FlushCoordinator {
         group_name: String,
         resolved_config: ResolvedConfig,
         temp_base_dir: std::path::PathBuf,
+        duckdb_secret_sqls: Vec<String>,
     ) -> Self {
         let (tx, rx) = mpsc::channel();
         let max_queued_bytes = resolved_config.max_queued_bytes;
@@ -412,6 +418,7 @@ impl FlushCoordinator {
             per_table_flush_duration: HashMap::new(),
             per_table_avg_row_bytes: HashMap::new(),
             flush_gate: Arc::new(FlushGate::new(max_concurrent, flush_interval)),
+            duckdb_secret_sqls: Arc::new(duckdb_secret_sqls),
         }
     }
 
@@ -526,6 +533,7 @@ impl FlushCoordinator {
         let interval_ms = effective_config.flush_interval_ms as u64;
         let resolved_config = effective_config;
         let temp_dir = self.temp_base_dir.join(format!("m{}", mapping_id));
+        let secret_sqls = Arc::clone(&self.duckdb_secret_sqls);
 
         let join_handle = std::thread::Builder::new()
             .name(format!("duckpipe-flush-{}-m{}", target_key, mapping_id))
@@ -545,6 +553,7 @@ impl FlushCoordinator {
                     interval_ms,
                     resolved_config,
                     temp_dir,
+                    &secret_sqls,
                 );
             })
             .expect("failed to spawn flush thread");
@@ -933,6 +942,11 @@ impl FlushCoordinator {
     pub fn group_name(&self) -> &str {
         &self.group_name
     }
+
+    /// Get the DuckDB secret SQL statements (for snapshot workers).
+    pub fn duckdb_secret_sqls(&self) -> &[String] {
+        &self.duckdb_secret_sqls
+    }
 }
 
 impl Drop for FlushCoordinator {
@@ -968,6 +982,7 @@ fn flush_thread_main(
     flush_interval_ms: u64,
     resolved_config: ResolvedConfig,
     temp_dir: std::path::PathBuf,
+    secret_sqls: &[String],
 ) {
     // Each flush thread owns its own tokio runtime for async PG metadata updates.
     // This avoids deadlock with the main thread's current_thread runtime, since
@@ -1081,6 +1096,7 @@ fn flush_thread_main(
                         meta.source_label.clone(),
                         meta.sync_mode,
                         temp_dir.clone(),
+                        secret_sqls,
                     ) {
                         Ok(w) => worker = Some(w),
                         Err(e) => {

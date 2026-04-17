@@ -80,6 +80,7 @@ pub async fn process_snapshot_task(
     group_name: &str,
     source_label: String,
     sync_mode: SyncMode,
+    secret_sqls: Vec<String>,
 ) -> Result<(u64, u64, u64), String> {
     let table_start = Instant::now();
 
@@ -179,6 +180,7 @@ pub async fn process_snapshot_task(
                 consumer_timing,
                 &consumer_source_label,
                 consumer_sync_mode,
+                &secret_sqls,
             )
         });
 
@@ -386,12 +388,14 @@ fn run_duckdb_consumer(
     timing: bool,
     source_label: &str,
     sync_mode: SyncMode,
+    secret_sqls: &[String],
 ) -> Result<u64, String> {
     let t_start = if timing { Some(Instant::now()) } else { None };
 
     let db = DetachOnDrop(crate::duckdb_flush::open_ducklake_connection(
         duckdb_pg_connstr,
         ducklake_schema,
+        secret_sqls,
     )?);
 
     // Discover lake schema + column names from information_schema

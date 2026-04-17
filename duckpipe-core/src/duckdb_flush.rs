@@ -57,9 +57,13 @@ fn ducklake_load_sql() -> &'static str {
 /// Open a DuckDB in-memory connection with ducklake loaded and attached to PostgreSQL.
 ///
 /// Shared setup for both flush workers and snapshot consumers.
+/// `secret_sqls` are `CREATE SECRET` statements read from pg_duckdb's FDW catalogs
+/// (see [`crate::duckdb_secrets`]). Each is executed after ATTACH to enable S3/GCS/R2
+/// cloud storage access for DuckLake Parquet writes.
 pub fn open_ducklake_connection(
     pg_connstr: &str,
     ducklake_schema: &str,
+    secret_sqls: &[String],
 ) -> Result<Connection, String> {
     let config = Config::default()
         .allow_unsigned_extensions()
@@ -77,6 +81,27 @@ pub fn open_ducklake_connection(
     );
     db.execute_batch(&attach_sql)
         .map_err(|e| format!("duckdb attach: {}", e))?;
+
+    // Inject DuckDB secrets (S3/GCS/R2/Azure credentials from pg_duckdb FDW catalogs).
+    // Failures are logged but non-fatal — secrets are only needed when DuckLake writes
+    // to cloud storage. Local-storage tables work fine without them.
+    if !secret_sqls.is_empty() {
+        let mut loaded = 0;
+        for secret_sql in secret_sqls {
+            match db.execute_batch(secret_sql) {
+                Ok(_) => loaded += 1,
+                Err(e) => {
+                    tracing::warn!("duckpipe: failed to create DuckDB secret: {}", e);
+                }
+            }
+        }
+        if loaded > 0 {
+            tracing::debug!(
+                "duckpipe: loaded {} DuckDB secret(s) into DuckDB connection",
+                loaded
+            );
+        }
+    }
 
     db.execute_batch(
         "SET ducklake_retry_wait_ms = 100; \
@@ -322,8 +347,9 @@ impl FlushWorker {
         source_label: String,
         sync_mode: SyncMode,
         temp_dir: std::path::PathBuf,
+        secret_sqls: &[String],
     ) -> Result<Self, String> {
-        let db = open_ducklake_connection(pg_connstr, ducklake_schema)?;
+        let db = open_ducklake_connection(pg_connstr, ducklake_schema, secret_sqls)?;
 
         // Create per-table temp directory for DuckDB spill files.
         std::fs::create_dir_all(&temp_dir)

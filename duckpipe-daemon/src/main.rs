@@ -282,6 +282,41 @@ async fn read_resolved_config(connstr: &str, group_name: &str) -> ResolvedConfig
     ResolvedConfig::resolve(&global, &group_config)
 }
 
+/// Read DuckDB secrets from pg_duckdb's FDW catalogs via TCP.
+///
+/// Returns a Vec of `CREATE SECRET` SQL strings to inject into DuckDB connections.
+/// If the `duckdb` FDW doesn't exist (pg_duckdb not installed), returns an empty Vec.
+async fn read_duckdb_secrets(connstr: &str) -> Vec<String> {
+    let connect_result =
+        duckpipe_core::connstr::pg_connect_with_app_name(connstr, "duckpipe-daemon-secrets").await;
+    let (client, conn_handle) = match connect_result {
+        Ok(c) => c,
+        Err(e) => {
+            error!("Failed to connect for DuckDB secrets: {}", e);
+            return Vec::new();
+        }
+    };
+
+    let secrets = match client
+        .query(duckpipe_core::duckdb_secrets::SECRET_QUERY, &[])
+        .await
+    {
+        Ok(rows) => rows
+            .iter()
+            .filter_map(|r| r.get::<_, Option<String>>(0))
+            .collect(),
+        Err(_) => {
+            // duckdb FDW may not exist (pg_duckdb not installed) — not an error
+            Vec::new()
+        }
+    };
+
+    drop(client);
+    let _ = conn_handle.await;
+
+    secrets
+}
+
 /// Main sync loop — waits for group binding if unbound, then runs the sync cycle.
 /// Uses an outer loop (not recursion) so unbind/rebind cycles don't grow the stack.
 async fn run_sync_loop(
@@ -309,12 +344,20 @@ async fn run_sync_loop(
         let group_name = state.group.read().await.clone().unwrap();
 
         let resolved_config = read_resolved_config(&config.connstr, &group_name).await;
+        let duckdb_secret_sqls = read_duckdb_secrets(&config.connstr).await;
+        if !duckdb_secret_sqls.is_empty() {
+            info!(
+                "Loaded {} DuckDB secret(s) from pg_duckdb FDW catalogs",
+                duckdb_secret_sqls.len()
+            );
+        }
         let mut coordinator = FlushCoordinator::new(
             config.connstr.clone(),
             config.ducklake_schema.clone(),
             group_name.clone(),
             resolved_config,
             flush_temp_base.to_path_buf(),
+            duckdb_secret_sqls,
         );
         let mut snapshot_manager = SnapshotManager::new();
         let mut consumer: Option<SlotState> = None;
